@@ -1,7 +1,5 @@
 //! Screen capture (displays, regions, windows), downscaling and window management.
 
-use crate::protocol::OpError;
-
 /// A rectangle in physical virtual-desktop pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rect {
@@ -134,6 +132,7 @@ pub struct Captured {
 #[cfg(windows)]
 pub mod win {
     use super::*;
+    use crate::protocol::OpError;
     use serde_json::{Value, json};
     use std::mem::{size_of, zeroed};
     use windows_sys::Win32::Foundation::*;
