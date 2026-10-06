@@ -1,7 +1,7 @@
 export const NS = 'environments'
 
 const zh = {
-  'panel': '环境',
+  panel: '环境',
   'page.title': '环境',
   'page.subtitle': '让智能体使用其他设备：挂载为工作区，或在需要时借用。',
   'action.refresh': '刷新',
@@ -48,7 +48,8 @@ const zh = {
   'section.leases': '使用中',
   'section.leases.empty': '当前没有会话在使用环境。',
   'section.accounts': 'Windows 测试账户',
-  'section.accounts.hint': '受限的本地标准账户。以它运行的程序显示在当前桌面上，便于智能体进行界面测试。创建和删除需要管理员确认。',
+  'section.accounts.hint':
+    '受限的本地标准账户。以它运行的程序显示在当前桌面上，便于智能体进行界面测试。创建和删除需要管理员确认。',
   'section.accounts.empty': '还没有测试账户。',
   'status.available': '空闲',
   'status.busy': '使用中',
@@ -148,7 +149,7 @@ const zh = {
 }
 
 const en = {
-  'panel': 'Environments',
+  panel: 'Environments',
   'page.title': 'Environments',
   'page.subtitle': 'Let agents use other devices: mount one as the workspace, or borrow it when needed.',
   'action.refresh': 'Refresh',
@@ -195,7 +196,8 @@ const en = {
   'section.leases': 'In use',
   'section.leases.empty': 'No session is using an environment right now.',
   'section.accounts': 'Windows test accounts',
-  'section.accounts.hint': 'Restricted local standard accounts. Programs started as one appear on the current desktop so agents can test user interfaces. Creating and deleting needs administrator approval.',
+  'section.accounts.hint':
+    'Restricted local standard accounts. Programs started as one appear on the current desktop so agents can test user interfaces. Creating and deleting needs administrator approval.',
   'section.accounts.empty': 'No test accounts yet.',
   'status.available': 'Available',
   'status.busy': 'In use',
@@ -227,7 +229,8 @@ const en = {
   'field.privateKey.ph': '~/.ssh/id_ed25519',
   'field.passphrase': 'Key passphrase',
   'field.serverPath': 'Remote dsh-env-server path',
-  'field.serverPath.hint': 'Optional. When set it is started over SSH for full capabilities such as UDP tunnels and native search',
+  'field.serverPath.hint':
+    'Optional. When set it is started over SSH for full capabilities such as UDP tunnels and native search',
   'field.cwd': 'Default directory',
   'field.serial': 'Device serial',
   'field.serial.hint': 'From adb devices, e.g. emulator-5554 or 192.168.1.20:5555',
@@ -242,10 +245,12 @@ const en = {
   'dialog.delete.title': 'Delete environment',
   'dialog.delete.body': 'Delete “{name}”? Sessions using it are disconnected immediately.',
   'dialog.account.title': 'Create Windows test account',
-  'dialog.account.body': 'A restricted local standard account is created and added as an environment. Windows asks for administrator approval.',
+  'dialog.account.body':
+    'A restricted local standard account is created and added as an environment. Windows asks for administrator approval.',
   'dialog.account.delete': 'Delete the account “{name}” and its user profile? Windows asks for administrator approval.',
   'server.help.title': 'Start the server on the target machine',
-  'server.help.body': 'Copy dsh-env-server to the target machine, run the command below, then enter the address and token it prints.',
+  'server.help.body':
+    'Copy dsh-env-server to the target machine, run the command below, then enter the address and token it prints.',
   'browser.title': 'Choose a folder',
   'browser.title.workspace': 'New remote workspace',
   'browser.env': 'Environment',
@@ -294,4 +299,7 @@ const en = {
   'adb.error': 'adb is unavailable: {message}',
 }
 
-export const dictionaries = { zh, en }
+/** Message key → template; `{name}` placeholders are interpolated by the locale service. */
+export type Dictionary = Record<string, string>
+
+export const dictionaries: Record<'zh' | 'en', Dictionary> = { zh, en }

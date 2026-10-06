@@ -1,12 +1,31 @@
 import * as React from 'react'
+import type { ReactNode, SVGProps } from 'react'
+import type { EnvKind } from './types.ts'
 
-const base = { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round' }
+const base = {
+  width: 20,
+  height: 20,
+  viewBox: '0 0 24 24',
+  fill: 'none',
+  stroke: 'currentColor',
+  strokeWidth: 1.6,
+  strokeLinecap: 'round',
+  strokeLinejoin: 'round',
+} as const
 
-function Svg({ size = 20, children, ...rest }) {
-  return <svg {...base} width={size} height={size} aria-hidden="true" {...rest}>{children}</svg>
+export interface IconProps {
+  size?: number | undefined
 }
 
-export function IconEnvironments({ size }) {
+function Svg({ size = 20, children, ...rest }: IconProps & { children?: ReactNode } & SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...base} width={size} height={size} aria-hidden="true" {...rest}>
+      {children}
+    </svg>
+  )
+}
+
+export function IconEnvironments({ size }: IconProps) {
   return (
     <Svg size={size}>
       <rect x="3" y="4" width="12" height="9" rx="1.6" />
@@ -17,7 +36,7 @@ export function IconEnvironments({ size }) {
   )
 }
 
-export function IconLocal({ size }) {
+export function IconLocal({ size }: IconProps) {
   return (
     <Svg size={size}>
       <rect x="3" y="4" width="18" height="12" rx="2" />
@@ -26,7 +45,7 @@ export function IconLocal({ size }) {
   )
 }
 
-export function IconServer({ size }) {
+export function IconServer({ size }: IconProps) {
   return (
     <Svg size={size}>
       <rect x="3" y="4" width="18" height="7" rx="1.8" />
@@ -36,7 +55,7 @@ export function IconServer({ size }) {
   )
 }
 
-export function IconSsh({ size }) {
+export function IconSsh({ size }: IconProps) {
   return (
     <Svg size={size}>
       <rect x="3" y="4" width="18" height="16" rx="2.2" />
@@ -45,7 +64,7 @@ export function IconSsh({ size }) {
   )
 }
 
-export function IconPhone({ size }) {
+export function IconPhone({ size }: IconProps) {
   return (
     <Svg size={size}>
       <rect x="6.5" y="2.5" width="11" height="19" rx="2.4" />
@@ -54,7 +73,7 @@ export function IconPhone({ size }) {
   )
 }
 
-export function IconWindows({ size }) {
+export function IconWindows({ size }: IconProps) {
   return (
     <Svg size={size}>
       <path d="M4 5.5 11 4.4V11H4zM13 4.1 20 3v8h-7zM4 13h7v6.6L4 18.5zM13 13h7v8l-7-1.1z" />
@@ -62,7 +81,7 @@ export function IconWindows({ size }) {
   )
 }
 
-export function IconFolder({ size }) {
+export function IconFolder({ size }: IconProps) {
   return (
     <Svg size={size}>
       <path d="M3 7.2A2.2 2.2 0 0 1 5.2 5h3.6l2 2.2h8A2.2 2.2 0 0 1 21 9.4v7.4A2.2 2.2 0 0 1 18.8 19H5.2A2.2 2.2 0 0 1 3 16.8z" />
@@ -70,7 +89,7 @@ export function IconFolder({ size }) {
   )
 }
 
-export function IconFile({ size }) {
+export function IconFile({ size }: IconProps) {
   return (
     <Svg size={size}>
       <path d="M7 3h7l4 4v12.5A1.5 1.5 0 0 1 16.5 21h-9A1.5 1.5 0 0 1 6 19.5v-15A1.5 1.5 0 0 1 7.5 3z" />
@@ -79,11 +98,15 @@ export function IconFile({ size }) {
   )
 }
 
-export function IconPlus({ size }) {
-  return <Svg size={size}><path d="M12 5v14M5 12h14" /></Svg>
+export function IconPlus({ size }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="M12 5v14M5 12h14" />
+    </Svg>
+  )
 }
 
-export function IconRefresh({ size }) {
+export function IconRefresh({ size }: IconProps) {
   return (
     <Svg size={size}>
       <path d="M20 11a8 8 0 0 0-14.6-4M4 4v4h4M4 13a8 8 0 0 0 14.6 4M20 20v-4h-4" />
@@ -91,7 +114,7 @@ export function IconRefresh({ size }) {
   )
 }
 
-export function IconTrash({ size }) {
+export function IconTrash({ size }: IconProps) {
   return (
     <Svg size={size}>
       <path d="M4 7h16M10 11v6M14 11v6M6 7l1 12.2A2 2 0 0 0 9 21h6a2 2 0 0 0 2-1.8L18 7M9 7V4.8A.8.8 0 0 1 9.8 4h4.4a.8.8 0 0 1 .8.8V7" />
@@ -99,7 +122,7 @@ export function IconTrash({ size }) {
   )
 }
 
-export function IconEdit({ size }) {
+export function IconEdit({ size }: IconProps) {
   return (
     <Svg size={size}>
       <path d="m14.5 5.5 4 4M4 20l1-4.5L16.3 4.2a1.7 1.7 0 0 1 2.4 0l1.1 1.1a1.7 1.7 0 0 1 0 2.4L8.5 19z" />
@@ -107,7 +130,7 @@ export function IconEdit({ size }) {
   )
 }
 
-export function IconPlug({ size }) {
+export function IconPlug({ size }: IconProps) {
   return (
     <Svg size={size}>
       <path d="M9 3v5M15 3v5M7 8h10v3a5 5 0 0 1-10 0zM12 16v5" />
@@ -115,11 +138,15 @@ export function IconPlug({ size }) {
   )
 }
 
-export function IconUp({ size }) {
-  return <Svg size={size}><path d="M12 19V6M6 11l6-6 6 6" /></Svg>
+export function IconUp({ size }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="M12 19V6M6 11l6-6 6 6" />
+    </Svg>
+  )
 }
 
-export function IconHome({ size }) {
+export function IconHome({ size }: IconProps) {
   return (
     <Svg size={size}>
       <path d="m4 11 8-7 8 7M6 10v9h12v-9" />
@@ -127,15 +154,23 @@ export function IconHome({ size }) {
   )
 }
 
-export function IconChevron({ size }) {
-  return <Svg size={size}><path d="m9 6 6 6-6 6" /></Svg>
+export function IconChevron({ size }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="m9 6 6 6-6 6" />
+    </Svg>
+  )
 }
 
-export function IconCheck({ size }) {
-  return <Svg size={size}><path d="m5 12.5 4.5 4.5L19 7.5" /></Svg>
+export function IconCheck({ size }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="m5 12.5 4.5 4.5L19 7.5" />
+    </Svg>
+  )
 }
 
-export function IconMount({ size }) {
+export function IconMount({ size }: IconProps) {
   return (
     <Svg size={size}>
       <path d="M12 3v10M8 9l4 4 4-4" />
@@ -145,7 +180,7 @@ export function IconMount({ size }) {
   )
 }
 
-export function IconSpinner({ size }) {
+export function IconSpinner({ size }: IconProps) {
   return (
     <Svg size={size} className="envx-spin">
       <path d="M12 3a9 9 0 1 0 9 9" />
@@ -153,9 +188,16 @@ export function IconSpinner({ size }) {
   )
 }
 
-export const KIND_ICON = { local: IconLocal, server: IconServer, ssh: IconSsh, adb: IconPhone, winuser: IconWindows }
+export const KIND_ICON: Record<EnvKind, (props: IconProps) => React.JSX.Element> = {
+  local: IconLocal,
+  server: IconServer,
+  ssh: IconSsh,
+  adb: IconPhone,
+  winuser: IconWindows,
+}
 
-export function KindIcon({ kind, size = 20 }) {
-  const C = KIND_ICON[kind] ?? IconServer
+export function KindIcon({ kind, size = 20 }: { kind: string | undefined; size?: number }) {
+  const C =
+    (kind !== undefined && Object.hasOwn(KIND_ICON, kind) ? KIND_ICON[kind as EnvKind] : undefined) ?? IconServer
   return <C size={size} />
 }
