@@ -54,6 +54,19 @@ export function invalidate(): void {
   for (const l of listeners) l()
 }
 
+/** Be told about `invalidate()` calls (stores outside React components). */
+export function onInvalidate(listener: () => void): () => void {
+  listeners.add(listener)
+  return () => {
+    listeners.delete(listener)
+  }
+}
+
+/** Whether an API error means the running host plugin is older and lacks the action. */
+export function isUnknownAction(error: unknown): boolean {
+  return error instanceof Error && /unknown action/i.test(error.message)
+}
+
 interface EnvState {
   data: StateView | undefined
   error: string | undefined

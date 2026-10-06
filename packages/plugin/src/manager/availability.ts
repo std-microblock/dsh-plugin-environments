@@ -92,7 +92,10 @@ export class AvailabilityChecker {
    * Availability of several environments. Checks that do not finish within `waitMs` report their
    * previous result (or `unknown`) and keep running, so the next call picks them up.
    */
-  async check(envIds: Iterable<string>, { waitMs = 2000 }: { waitMs?: number } = {}): Promise<Record<string, Availability>> {
+  async check(
+    envIds: Iterable<string>,
+    { waitMs = 2000 }: { waitMs?: number } = {},
+  ): Promise<Record<string, Availability>> {
     const ids = [...new Set(envIds)]
     const out: Record<string, Availability> = {}
     await Promise.all(

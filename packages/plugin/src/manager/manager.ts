@@ -505,7 +505,9 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
       }
     }
     return this.setWorkspaceSettings(hostPath, {
-      defaultMount: mount ? { envId: mount.envId, ...(mount.remoteRoot ? { remoteRoot: mount.remoteRoot } : {}) } : null,
+      defaultMount: mount
+        ? { envId: mount.envId, ...(mount.remoteRoot ? { remoteRoot: mount.remoteRoot } : {}) }
+        : null,
     })
   }
 
@@ -574,7 +576,11 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
    * A default that was applied is persisted into the session (`seedDefaultMount`), so it shows up
    * in step 1 afterwards and later changes of the workspace default do not move the session.
    */
-  mountFor(sessionId: string, cwd: string | undefined, { fresh = false }: { fresh?: boolean } = {}): EffectiveMount | undefined {
+  mountFor(
+    sessionId: string,
+    cwd: string | undefined,
+    { fresh = false }: { fresh?: boolean } = {},
+  ): EffectiveMount | undefined {
     const s = this.sessionSettings(sessionId)
     if (s.mount === false) return undefined
     if (s.mount?.envId) {

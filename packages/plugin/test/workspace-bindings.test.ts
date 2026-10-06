@@ -37,7 +37,10 @@ test('workspace settings patch only the given keys', () => {
   const { m, cleanup } = setup()
   m.setWorkspaceSettings('/ws', { borrowable: ['local'] })
   m.setWorkspaceDefaultMount('/ws', { envId: 'box', remoteRoot: '/srv' })
-  assert.deepEqual(m.workspaceSettings('/ws'), { borrowable: ['local'], defaultMount: { envId: 'box', remoteRoot: '/srv' } })
+  assert.deepEqual(m.workspaceSettings('/ws'), {
+    borrowable: ['local'],
+    defaultMount: { envId: 'box', remoteRoot: '/srv' },
+  })
   m.setWorkspaceSettings('/ws', { borrowable: null })
   assert.deepEqual(m.workspaceSettings('/ws'), { defaultMount: { envId: 'box', remoteRoot: '/srv' } })
   m.setWorkspaceDefaultMount('/ws', null)
@@ -61,7 +64,12 @@ test('bindings: remote workspace, default environment, host', () => {
   // Found by workspace id even when the path spelling differs.
   assert.equal(m.workspaceBinding('/elsewhere', 'w-remote').kind, 'remote')
 
-  assert.deepEqual(m.workspaceBinding('/ws'), { kind: 'default', envId: 'pixel', remoteRoot: undefined, borrowable: undefined })
+  assert.deepEqual(m.workspaceBinding('/ws'), {
+    kind: 'default',
+    envId: 'pixel',
+    remoteRoot: undefined,
+    borrowable: undefined,
+  })
   assert.deepEqual(m.workspaceBinding('/other'), { kind: 'host', borrowable: undefined })
   assert.throws(() => m.setWorkspaceDefaultMount(ws.hostPath, { envId: 'local' }), /remote workspace/)
   cleanup()
@@ -185,14 +193,20 @@ test('HTTP actions: workspace.set patches, workspace.bindings reports bindings w
   }
 
   await call('workspace.set', { workspaceId: 'w-host', borrowable: ['local'] })
-  const set = (await call('workspace.set', { workspaceId: 'w-host', defaultMount: { envId: 'box', remoteRoot: '/srv' } })) as {
+  const set = (await call('workspace.set', {
+    workspaceId: 'w-host',
+    defaultMount: { envId: 'box', remoteRoot: '/srv' },
+  })) as {
     settings: unknown
     binding: { kind: string }
   }
   assert.deepEqual(set.settings, { borrowable: ['local'], defaultMount: { envId: 'box', remoteRoot: '/srv' } })
   assert.equal(set.binding.kind, 'default')
   await assert.rejects(call('workspace.set', { workspaceId: 'missing', defaultMount: null }), /workspace not found/)
-  await assert.rejects(call('workspace.set', { workspaceId: 'w-remote', defaultMount: { envId: 'box' } }), /remote workspace/)
+  await assert.rejects(
+    call('workspace.set', { workspaceId: 'w-remote', defaultMount: { envId: 'box' } }),
+    /remote workspace/,
+  )
 
   const result = (await call('workspace.bindings', {
     workspaces: [
@@ -217,6 +231,17 @@ test('HTTP actions: workspace.set patches, workspace.bindings reports bindings w
   assert.equal(result.availability['box']?.state, 'offline')
   assert.equal(result.availability['pixel']?.state, 'offline')
   assert.deepEqual(result.environments.map(e => e.id).sort(), ['box', 'pixel'])
+
+  // A workspace given by id only is resolved through the DSH workspace registry.
+  const byId = (await call('workspace.bindings', {
+    workspaces: [{ workspaceId: 'w-host' }, { workspaceId: 'nope' }],
+  })) as {
+    bindings: { path: string; kind: string }[]
+  }
+  assert.deepEqual(
+    byId.bindings.map(b => [b.path, b.kind]),
+    [['/projects/site', 'default']],
+  )
 
   // Clearing the default leaves the borrowable list alone.
   await call('workspace.set', { workspacePath: '/projects/site', defaultMount: null })

@@ -274,7 +274,14 @@ export function createActions(
         if (!item || typeof item !== 'object') return []
         const record = item as Record<string, unknown>
         const workspaceId = str(record['workspaceId'])
-        const p = str(record['path'])
+        let p = str(record['path'])
+        if (!p && workspaceId) {
+          try {
+            p = workspacePathOf(undefined, workspaceId)
+          } catch {
+            // unknown workspace: skipped
+          }
+        }
         if (!p) return []
         return [{ workspaceId, path: p, ...manager.workspaceBinding(p, workspaceId) }]
       })

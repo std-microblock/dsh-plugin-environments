@@ -101,6 +101,7 @@ function Panel({ sessionId, data, t, openManager, onClose }: PanelProps) {
         <div className="envx-pop-title">
           <span>{t('pop.mount')}</span>
           {mount?.source === 'workspace' && <small>{t('pop.mount.fromWorkspace')}</small>}
+          {mount?.source === 'default' && <small>{t('pop.mount.fromDefault')}</small>}
         </div>
         {mount ? (
           <div className="envx-mounted" data-kind={mountEnv?.kind ?? 'server'}>
@@ -118,15 +119,20 @@ function Panel({ sessionId, data, t, openManager, onClose }: PanelProps) {
                 {!s.mountActive && !s.mountError ? ` · ${t('pop.mount.pending')}` : ''}
               </span>
             </div>
-            {!locked && mount.source === 'session' && (
+            {!locked && mount.source !== 'workspace' && (
               <button
                 type="button"
                 className="envx-textbtn"
                 data-quiet=""
                 disabled={act.busy}
-                onClick={() => void act.run(() => call('session.set', { sessionId, mount: null }))}
+                onClick={() =>
+                  // A workspace default is turned off for this session with an explicit `false`.
+                  void act.run(() =>
+                    call('session.set', { sessionId, mount: mount.source === 'default' ? false : null, cwd: s.cwd }),
+                  )
+                }
               >
-                {t('action.unmount')}
+                {mount.source === 'default' ? t('action.dontMount') : t('action.unmount')}
               </button>
             )}
           </div>
