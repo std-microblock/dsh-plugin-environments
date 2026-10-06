@@ -1,0 +1,19 @@
+{
+  "name": "@dsh-environments/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Wire framing, message types and the Node client for the dsh-env-server protocol (docs/protocol.md).",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test --test-timeout=120000 \"test/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "typescript": "~6.0.3"
+  }
+}
