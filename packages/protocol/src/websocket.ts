@@ -178,9 +178,13 @@ export interface WsConnectOptions {
 }
 
 /** Dial a ws:// or wss:// URL; resolves once the upgrade completed. */
-export function wsConnect(url: string, { signal, timeoutMs = 15000, headers = {} }: WsConnectOptions = {}): Promise<Transport> {
+export function wsConnect(
+  url: string,
+  { signal, timeoutMs = 15000, headers = {} }: WsConnectOptions = {},
+): Promise<Transport> {
   const u = new URL(url)
-  if (u.protocol !== 'ws:' && u.protocol !== 'wss:') return Promise.reject(new EnvError('EINVAL', `not a websocket URL: ${url}`))
+  if (u.protocol !== 'ws:' && u.protocol !== 'wss:')
+    return Promise.reject(new EnvError('EINVAL', `not a websocket URL: ${url}`))
   const key = crypto.randomBytes(16).toString('base64')
   const mod = u.protocol === 'wss:' ? https : http
   return new Promise((resolve, reject) => {

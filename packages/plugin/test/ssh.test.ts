@@ -239,7 +239,10 @@ const sleepSpec = isWin ? { argv: ['ping', '-n', '120', '127.0.0.1'] } : { argv:
 
 test('remote command quoting per shell', () => {
   assert.equal(remoteCommand('sh', '/a b/x', ['serve', "it's"]), `'/a b/x' 'serve' 'it'\\''s'`)
-  assert.equal(remoteCommand('cmd', 'C:\\A B\\x.exe', ['serve', '--listen', '127.0.0.1:0', 'a b']), `"C:\\A B\\x.exe" serve --listen 127.0.0.1:0 "a b"`)
+  assert.equal(
+    remoteCommand('cmd', 'C:\\A B\\x.exe', ['serve', '--listen', '127.0.0.1:0', 'a b']),
+    `"C:\\A B\\x.exe" serve --listen 127.0.0.1:0 "a b"`,
+  )
   assert.equal(remoteCommand('powershell', "C:\\x's.exe", ['serve']), `& 'C:\\x''s.exe' 'serve'`)
 })
 

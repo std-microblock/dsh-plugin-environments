@@ -30,7 +30,13 @@ export function deriveKeys(
   transcript: Buffer,
 ): SecureKeys {
   const okm = Buffer.from(
-    crypto.hkdfSync('sha256', Buffer.from(secret), Buffer.concat([nonceI, nonceR]), Buffer.concat([INFO, Buffer.from(id)]), 128),
+    crypto.hkdfSync(
+      'sha256',
+      Buffer.from(secret),
+      Buffer.concat([nonceI, nonceR]),
+      Buffer.concat([INFO, Buffer.from(id)]),
+      128,
+    ),
   )
   const th = crypto.createHash('sha256').update(transcript).digest()
   const mac = (key: Buffer, label: string) => crypto.createHmac('sha256', key).update(label).update(th).digest()
@@ -97,7 +103,8 @@ class HandshakeReader {
     }
     const onEnd = (e?: Error) => {
       if (!active) return
-      this.ended = e ?? new EnvError('AUTH', 'peer closed the connection during the handshake (unknown id or wrong secret?)')
+      this.ended =
+        e ?? new EnvError('AUTH', 'peer closed the connection during the handshake (unknown id or wrong secret?)')
       this.pump()
     }
     transport.on('data', onData)
@@ -226,13 +233,25 @@ export function secureInitiate(transport: Transport, { secret, id = '', signal }
   const idBytes = Buffer.from(id)
   if (idBytes.length > 255) return Promise.reject(new EnvError('EINVAL', 'id too long'))
   const nonceI = crypto.randomBytes(32)
-  const hello = Buffer.concat([SECURE_MAGIC, Buffer.from([SECURE_VERSION]), nonceI, Buffer.from([idBytes.length]), idBytes])
+  const hello = Buffer.concat([
+    SECURE_MAGIC,
+    Buffer.from([SECURE_VERSION]),
+    nonceI,
+    Buffer.from([idBytes.length]),
+    idBytes,
+  ])
   const run = async () => {
     transport.write(hello)
     const reply = await reader.read(69)
     if (!reply.subarray(0, 4).equals(SECURE_MAGIC) || reply[4] !== SECURE_VERSION)
       throw new EnvError('PROTOCOL', 'peer does not speak the dsh-env secure channel')
-    const keys = deriveKeys(secret, nonceI, reply.subarray(5, 37), idBytes, Buffer.concat([hello, reply.subarray(0, 37)]))
+    const keys = deriveKeys(
+      secret,
+      nonceI,
+      reply.subarray(5, 37),
+      idBytes,
+      Buffer.concat([hello, reply.subarray(0, 37)]),
+    )
     if (!crypto.timingSafeEqual(keys.confirmR, reply.subarray(37, 69)))
       throw new EnvError('AUTH', 'peer failed to prove knowledge of the secret (wrong secret?)')
     transport.write(keys.confirmI)

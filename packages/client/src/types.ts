@@ -1,11 +1,12 @@
 // Shapes of the plugin HTTP API responses as consumed by the GUI.
 // They mirror packages/plugin/src/api/actions.ts; fields the GUI does not read are omitted.
 
-export type EnvKind = 'local' | 'server' | 'ssh' | 'adb' | 'winuser'
+export type EnvKind = 'local' | 'server' | 'ssh' | 'adb' | 'winuser' | 'reverse'
 
 export interface EnvConfigView {
   host?: string
   port?: number | string
+  url?: string
   token?: string
   username?: string
   password?: string
@@ -51,6 +52,44 @@ export interface EnvView {
   status?: EnvStatusView
   info?: InfoView
   lastError?: string
+  /** reverse environments: connections dialed in by the remote server */
+  connection?: ReverseConnectionView
+}
+
+export interface ReverseConnectionView {
+  idle: number
+  active: number
+  peer?: string
+  since?: number
+}
+
+export interface ListenerStatusView {
+  enabled: boolean
+  listening: boolean
+  host: string
+  port: number
+  path?: string
+  error?: string
+}
+
+export interface ReverseSettingsView {
+  tcp?: { enabled?: boolean; host?: string; port?: number }
+  ws?: { enabled?: boolean; host?: string; port?: number; path?: string }
+  publicHost?: string
+}
+
+export interface ReverseStatusView {
+  tcp: ListenerStatusView
+  ws: ListenerStatusView
+  publicHost: string
+}
+
+/** Returned once when a reverse environment's secret is created or rotated. */
+export interface ReverseRevealView {
+  secret: string
+  urls: string[]
+  posix?: string
+  windows?: string
 }
 
 export interface RemoteWorkspaceView {

@@ -108,7 +108,8 @@ export function parseServerUrl(url: string): DialTarget {
     return { kind: 'ws', url: s }
   }
   const m = /^(?:tcp:\/\/)?(\[[^\]]+\]|[^:/]+):(\d+)\/?$/i.exec(s)
-  if (!m?.[1] || !m[2]) throw new EnvError('EINVAL', `invalid server address "${url}" (use host:port, tcp://, ws:// or wss://)`)
+  if (!m?.[1] || !m[2])
+    throw new EnvError('EINVAL', `invalid server address "${url}" (use host:port, tcp://, ws:// or wss://)`)
   return { kind: 'tcp', host: m[1].replace(/^\[|\]$/g, ''), port: Number(m[2]) }
 }
 

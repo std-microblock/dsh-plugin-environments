@@ -105,7 +105,8 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
   private readonly browseConnections = new Map<string, BrowseEntry>()
   private saveTimer: NodeJS.Timeout | undefined
   disposed = false
-  /** Listeners and connection pool for everse environments. */
+  /** Listeners and connection pool for 
+everse environments. */
   readonly reverse: ReverseHub
   private readonly reverseDefaults: ReverseListenerSettings
 

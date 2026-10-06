@@ -118,7 +118,9 @@ export class ReverseHub extends EventEmitter<ReverseHubEvents> {
     const tcp = { ...REVERSE_DEFAULTS.tcp, ...settings.tcp }
     const ws = { ...REVERSE_DEFAULTS.ws, ...settings.ws }
     const tcpChanged =
-      !!tcp.enabled !== this.status.tcp.enabled || tcp.host !== this.status.tcp.host || tcp.port !== this.status.tcp.port
+      !!tcp.enabled !== this.status.tcp.enabled ||
+      tcp.host !== this.status.tcp.host ||
+      tcp.port !== this.status.tcp.port
     const wsChanged =
       !!ws.enabled !== this.status.ws.enabled ||
       ws.host !== this.status.ws.host ||
@@ -308,7 +310,10 @@ export class ReverseHub extends EventEmitter<ReverseHubEvents> {
    * Take a connection for environment `id`, waiting up to `timeoutMs` for the server to dial
    * in (it reconnects with backoff, and dials a new spare right after one is taken).
    */
-  take(id: string, { signal, timeoutMs = 10000 }: { signal?: AbortSignal | undefined; timeoutMs?: number } = {}): Promise<Transport> {
+  take(
+    id: string,
+    { signal, timeoutMs = 10000 }: { signal?: AbortSignal | undefined; timeoutMs?: number } = {},
+  ): Promise<Transport> {
     const spare = this.spares.get(id)?.shift()
     if (spare) {
       const t = this.activate(id, spare)
@@ -341,7 +346,10 @@ export class ReverseHub extends EventEmitter<ReverseHubEvents> {
       }
       const onAbort = () => waiter.reject(new EnvError('CANCELLED', 'aborted'))
       const timer = setTimeout(
-        () => waiter.reject(new EnvError('ETIMEDOUT', `environment ${id} is not connected (run dsh-env-server connect on it)`)),
+        () =>
+          waiter.reject(
+            new EnvError('ETIMEDOUT', `environment ${id} is not connected (run dsh-env-server connect on it)`),
+          ),
         timeoutMs,
       )
       signal?.addEventListener('abort', onAbort, { once: true })
@@ -371,12 +379,11 @@ export class ReverseHub extends EventEmitter<ReverseHubEvents> {
 
 /** Validate settings coming from the GUI / plugin config. */
 export function sanitizeReverseSettings(input: unknown): ReverseListenerSettings {
-  const o = (v: unknown): Record<string, unknown> =>
-    v && typeof v === 'object' ? (v as Record<string, unknown>) : {}
+  const o = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' ? (v as Record<string, unknown>) : {})
   const port = (v: unknown, fallback: number): number => {
     const n = Number(v)
     if (v === undefined || v === '' || v === null) return fallback
-    if (!Number.isInteger(n) || n < 0 || n > 65535) throw new EnvError('EINVAL', `invalid port ${String(v)}`)
+    if (!Number.isInteger(n) || n < 0 || n > 65535) throw new EnvError('EINVAL', `invalid port ${JSON.stringify(v)}`)
     return n
   }
   const host = (v: unknown, fallback: string): string => (typeof v === 'string' && v.trim() ? v.trim() : fallback)
