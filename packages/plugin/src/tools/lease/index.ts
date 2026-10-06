@@ -10,6 +10,9 @@ import { addFileTools } from './file-tools.ts'
 import { addProcessTools, type ManagedProcess } from './process-tools.ts'
 import { addScreenTools } from './screen-tools.ts'
 import { addTunnelTool } from './tunnel-tool.ts'
+import { addUiTools } from './ui-tools.ts'
+import { addWindowTools } from './windows-tools.ts'
+import { ScreenSession } from '../screen/session.ts'
 
 export interface LeaseTools {
   tools: ToolDefinition[]
@@ -34,7 +37,10 @@ export function leaseTools({ ctx, defineTool, lease, workspaceOf }: LeaseToolsOp
   addFileTools(t)
   const processes = addProcessTools(t)
   addTunnelTool(t)
-  addScreenTools(t)
+  const screen = new ScreenSession(t.env)
+  addScreenTools(t, screen)
+  addUiTools(t, screen)
+  addWindowTools(t, screen)
   if (t.env instanceof AdbEnvironment) addAndroidTools(t, t.env)
 
   const dispose = async () => {

@@ -121,21 +121,109 @@ For a tcp listener the server sends `{"t":"accept","listener":id,"ch":N,"peer":"
 
 ### System
 
-| op               | args                       | result                                                                          |
-| ---------------- | -------------------------- | ------------------------------------------------------------------------------- |
-| `sys.info`       | `{}`                       | `Info`                                                                          |
-| `sys.screenshot` | `{display?: number}`       | result `{width, height, format: 'png'}`; payload = PNG bytes (cap `screenshot`) |
-| `sys.input`      | `{actions: InputAction[]}` | `{}` (cap `input`)                                                              |
+| op               | args                                                    | result                                                                                  |
+| ---------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `sys.info`       | `{}`                                                    | `Info`                                                                                  |
+| `sys.screenshot` | `ScreenshotArgs`                                        | `ScreenshotResult`; payload = PNG bytes (cap `screenshot`)                              |
+| `sys.input`      | `{actions: InputAction[]}`                              | `{}` (cap `input`)                                                                      |
+| `sys.displays`   | `{}`                                                    | `{displays: DisplayInfo[], virtual: PixelRect}` (cap `displays`)                        |
+| `sys.windows`    | `{all?: boolean = false}`                               | `{windows: WindowInfo[], foreground: number}` in z-order, topmost first (cap `windows`) |
+| `sys.window`     | `{hwnd, action: WindowAction, x?, y?, width?, height?}` | `WindowActionResult` (cap `windows`); `move` needs all four of x, y, width, height      |
+
+Capabilities: `screenshot` and `input` (currently Windows servers), `displays` (`sys.displays` and `display` selection), `windows` (`sys.windows`, `sys.window`, `window` captures), `uia` (the host has Windows PowerShell, so clients can run UI Automation queries through `proc.spawn`; there is no `sys.uia` op). Android devices are driven by the plugin over adb and advertise `screenshot`, `input` and `android`.
+
+All coordinates are **physical pixels of the virtual desktop** (the server is per-monitor DPI aware, v2), so the primary monitor's top-left is (0,0) and other monitors may have negative coordinates. Clients that downscale screenshots for a model map coordinates back before sending input.
 
 ```ts
+interface PixelRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+interface ScreenshotArgs {
+  display?: number // index from sys.displays (0 = primary, default); -1 = whole virtual desktop
+  rect?: PixelRect // capture this rectangle of the virtual desktop instead (clipped to it)
+  window?: number // capture one top-level window by hwnd (PrintWindow: works when covered, not minimized)
+  maxWidth?: number // downscale (area filter, never enlarges) to fit these bounds
+  maxHeight?: number
+  cursor?: boolean // draw the mouse pointer into the image
+}
+
+interface ScreenshotResult {
+  width: number // image size
+  height: number
+  format: 'png'
+  x?: number // physical rectangle the image covers (absent on old servers: primary screen at 0,0)
+  y?: number
+  srcWidth?: number
+  srcHeight?: number
+  cursor?: { x: number; y: number } // pointer position, physical, when cursor was requested
+}
+
+interface DisplayInfo extends PixelRect {
+  index: number
+  name: string
+  primary: boolean
+  dpi: number
+  scale: number // dpi / 96
+}
+
+interface WindowInfo extends PixelRect {
+  hwnd: number
+  title: string
+  class: string
+  pid: number
+  process: string // executable name
+  visible: boolean
+  minimized: boolean
+  maximized: boolean
+  foreground: boolean
+  topmost: boolean
+}
+
+type WindowAction = 'focus' | 'minimize' | 'maximize' | 'restore' | 'close' | 'move'
+// close posts WM_CLOSE (like clicking X). focus restores minimized windows first.
+
+interface WindowActionResult {
+  ok: boolean
+  foreground: boolean // the window is the foreground window afterwards
+  minimized: boolean
+  rect: PixelRect | null
+}
+
+type MouseButton = 'left' | 'right' | 'middle' | 'back' | 'forward'
+
 type InputAction =
   | { kind: 'move'; x: number; y: number }
-  | { kind: 'click'; x?: number; y?: number; button?: 'left' | 'right' | 'middle'; double?: boolean }
-  | { kind: 'scroll'; x?: number; y?: number; dx?: number; dy?: number }
-  | { kind: 'type'; text: string }
-  | { kind: 'key'; key: string } // e.g. "enter", "ctrl+c", "alt+f4"
+  | {
+      kind: 'click'
+      x?: number
+      y?: number
+      button?: MouseButton
+      double?: boolean
+      count?: number
+      modifiers?: string
+    }
+  | { kind: 'mouse_down' | 'mouse_up'; x?: number; y?: number; button?: MouseButton }
+  | { kind: 'drag'; path: [number, number][]; button?: MouseButton; durationMs?: number; modifiers?: string }
+  | { kind: 'scroll'; x?: number; y?: number; dx?: number; dy?: number; modifiers?: string }
+  | { kind: 'type'; text: string; delayMs?: number }
+  | { kind: 'key'; key: string; repeat?: number; holdMs?: number } // e.g. "enter", "ctrl+c", "alt+f4", "ctrl++"
+  | { kind: 'key_down' | 'key_up'; key: string }
   | { kind: 'wait'; ms: number }
 ```
+
+Input semantics:
+
+- A batch runs in order on one thread. Keys and buttons still held when the batch ends (or fails) are released, so nothing stays stuck.
+- `click`: `count` 1–3 (`double: true` = 2); without x/y it clicks at the current pointer position. `modifiers` (e.g. `"ctrl+shift"`) are held around the click, drag or scroll.
+- `drag`: press at the first point, move through the others (interpolated over `durationMs`, default 400), release at the last; `x, y, x2, y2` is accepted instead of `path`.
+- `scroll`: `dy`/`dx` in wheel notches (fractions allowed); positive `dy` scrolls down, positive `dx` right. With x/y the pointer moves there first.
+- `type`: any Unicode text via `KEYEVENTF_UNICODE` (surrogate pairs included); `\n` / `\r\n` press Enter and `\t` presses Tab. `delayMs` pauses between characters.
+- `key`: `+`-separated combo, case-insensitive names (`ctrl`, `shift`, `alt`, `win`, `enter`, `esc`, `tab`, `backspace`, `delete`, `home`, `end`, `pageup`, `pagedown`, arrows, `f1`–`f24`, `space`, media/volume keys, letters, digits, and layout-dependent single characters such as `;`). `repeat` presses it up to 100 times; `holdMs` keeps it down.
+- `wait` and all durations are capped at 60 s.
 
 ## Channels and flow control
 

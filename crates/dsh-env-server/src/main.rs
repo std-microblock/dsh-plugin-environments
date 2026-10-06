@@ -1,11 +1,13 @@
 #![allow(dead_code)]
 mod cli;
 mod fs_ops;
+mod input;
 mod net;
 mod ops;
 mod proc;
 mod protocol;
 mod pty;
+mod screen;
 mod search;
 mod session;
 mod sys;

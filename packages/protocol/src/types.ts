@@ -57,6 +57,9 @@ export type KnownCapability =
   | 'udp-listen'
   | 'screenshot'
   | 'input'
+  | 'displays'
+  | 'windows'
+  | 'uia'
   | 'android'
 
 export type Capability = KnownCapability | (string & {})
@@ -162,14 +165,102 @@ export interface SpawnArgs {
 /** See {@link SpawnArgs.encoding}. */
 export type SpawnEncoding = 'utf8' | 'auto' | 'raw'
 
-/** Pointer/keyboard action for `sys.input`. */
+export type MouseButton = 'left' | 'right' | 'middle' | 'back' | 'forward'
+
+/**
+ * Pointer/keyboard action for `sys.input`. Coordinates are physical pixels of the virtual
+ * desktop. `modifiers` is a combo such as `"ctrl+shift"` held during the action.
+ */
 export type InputAction =
   | { kind: 'move'; x: number; y: number }
-  | { kind: 'click'; x?: number; y?: number; button?: 'left' | 'right' | 'middle'; double?: boolean }
-  | { kind: 'scroll'; x?: number; y?: number; dx?: number; dy?: number }
-  | { kind: 'type'; text: string }
-  | { kind: 'key'; key: string }
+  | {
+      kind: 'click'
+      x?: number
+      y?: number
+      button?: MouseButton
+      double?: boolean
+      count?: number
+      modifiers?: string
+    }
+  | { kind: 'mouse_down' | 'mouse_up'; x?: number; y?: number; button?: MouseButton }
+  | {
+      kind: 'drag'
+      path: readonly (readonly [number, number])[]
+      button?: MouseButton
+      durationMs?: number
+      modifiers?: string
+    }
+  | { kind: 'scroll'; x?: number; y?: number; dx?: number; dy?: number; modifiers?: string }
+  | { kind: 'type'; text: string; delayMs?: number }
+  | { kind: 'key'; key: string; repeat?: number; holdMs?: number }
+  | { kind: 'key_down' | 'key_up'; key: string }
   | { kind: 'wait'; ms: number }
+
+/** A rectangle in physical pixels. */
+export interface PixelRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/** `sys.screenshot` arguments (all optional; servers without cap `displays` only know `display`). */
+export interface ScreenshotArgs {
+  /** Display index from `sys.displays` (0 = primary); -1 = the whole virtual desktop. */
+  display?: number
+  /** Capture this rectangle of the virtual desktop instead. */
+  rect?: PixelRect
+  /** Capture this top-level window (hwnd from `sys.windows`). */
+  window?: number
+  /** Downscale (never enlarge) to fit these bounds. */
+  maxWidth?: number
+  maxHeight?: number
+  /** Draw the mouse pointer into the image. */
+  cursor?: boolean
+}
+
+export interface ScreenshotResult {
+  width: number
+  height: number
+  format: 'png'
+  /** Physical rectangle the image covers (absent on old servers: the primary screen at 0,0). */
+  x?: number
+  y?: number
+  srcWidth?: number
+  srcHeight?: number
+  cursor?: { x: number; y: number }
+}
+
+export interface DisplayInfo extends PixelRect {
+  index: number
+  name: string
+  primary: boolean
+  dpi: number
+  /** dpi / 96. */
+  scale: number
+}
+
+export interface WindowInfo extends PixelRect {
+  hwnd: number
+  title: string
+  class: string
+  pid: number
+  process: string
+  visible: boolean
+  minimized: boolean
+  maximized: boolean
+  foreground: boolean
+  topmost: boolean
+}
+
+export type WindowAction = 'focus' | 'minimize' | 'maximize' | 'restore' | 'close' | 'move'
+
+export interface WindowActionResult {
+  ok: boolean
+  foreground: boolean
+  minimized: boolean
+  rect: PixelRect | null
+}
 
 type Empty = Record<string, never>
 
@@ -201,8 +292,14 @@ export interface OpMap {
   'net.listen': { args: { host: string; port: number; proto: NetProto }; result: { id: number; port: number } }
   'net.unlisten': { args: { id: number }; result: Empty }
   'sys.info': { args: Empty; result: Info }
-  'sys.screenshot': { args: { display?: number }; result: { width: number; height: number; format: 'png' } }
+  'sys.screenshot': { args: ScreenshotArgs; result: ScreenshotResult }
   'sys.input': { args: { actions: readonly InputAction[] }; result: Empty }
+  'sys.displays': { args: Empty; result: { displays: DisplayInfo[]; virtual: PixelRect } }
+  'sys.windows': { args: { all?: boolean }; result: { windows: WindowInfo[]; foreground: number } }
+  'sys.window': {
+    args: { hwnd: number; action: WindowAction; x?: number; y?: number; width?: number; height?: number }
+    result: WindowActionResult
+  }
 }
 
 export type Op = keyof OpMap

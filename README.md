@@ -72,7 +72,22 @@ dsh plugin --profile desktop add link:G:/dsh-plugin-remote-environments/packages
 | `env_return`   | 归还环境，同时关闭通过它开启的进程和隧道                                              |
 | `env_transfer` | 在本会话工作区和已借环境之间、或两个已借环境之间复制文件或目录，位置写成 `别名:/路径` |
 
-借到之后的工具：`<别名>__exec`、`read_file`、`read_image`、`write_file`、`edit_file`、`list_dir`、`glob`、`grep`、`process_start` / `process_io` / `process_kill`（可交互的长时间进程）、`tunnel`（`to_env` / `from_env`，TCP 或 UDP）。环境支持时还有 `screenshot` 和 `input`；Android 环境另外有 `install_apk`、`app`、`ui_dump`、`logcat`。
+借到之后的工具：`<别名>__exec`、`read_file`、`read_image`、`write_file`、`edit_file`、`list_dir`、`glob`、`grep`、`process_start` / `process_io` / `process_kill`（可交互的长时间进程）、`tunnel`（`to_env` / `from_env`，TCP 或 UDP）。
+
+电脑操作（computer use）工具按环境能力出现：
+
+| 工具          | 环境             | 作用                                                                                                                                                                       |
+| ------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `screenshot`  | Windows、Android | 截图并缩小到长边 ≤ `max_size`（默认 1280），之后所有坐标都按这张图的像素计算；`region` 放大局部，`window` 截单个窗口，`display` 选显示器，可选 JPEG 和鼠标指针             |
+| `input`       | Windows、Android | 按顺序执行动作：点击（双击、右键、修饰键）、移动、拖动、长按、滑动、滚动、输入 Unicode 文本、组合键、按住键、等待；`element: N` 直接指向 `ui` 列出的元素；可附带操作后截图 |
+| `ui`          | Windows、Android | 列出界面元素（Android uiautomator / Windows UI Automation）：编号、类型、文字、id、中心坐标、大小、状态；可按文字查找并点击、设置文本、滚动、展开、切换等                  |
+| `windows`     | Windows          | 列出顶层窗口，聚焦、最小化、最大化、还原、关闭、移动窗口                                                                                                                   |
+| `device`      | Android          | 设备信息（型号、系统、屏幕尺寸/密度/方向、前台应用、输入法、亮屏/锁屏、电量），唤醒、熄屏、解锁（无密码时）、打开通知栏/快捷设置                                           |
+| `app`         | Android          | 启动、停止、清除数据、卸载、查看信息、列出应用、当前前台 Activity、打开 URL、`am start` 任意 Intent                                                                        |
+| `install_apk` | Android          | 从工作区或其他已借环境安装 APK                                                                                                                                             |
+| `logcat`      | Android          | 读取最近的日志，可按文字和级别过滤                                                                                                                                         |
+
+Android 上非 ASCII 文本需要设备装有 [ADB Keyboard](https://github.com/senzhk/ADBKeyBoard)（输入时临时切换，之后恢复原输入法），否则会明确报告不支持。
 
 每个会话能借哪些环境：默认是全部环境；工作区设置了默认列表时继承它；会话也可以随时单独修改。独占环境（Android 和 Windows 账户默认独占）同一时间只能由一个会话持有，其他会话会按先后顺序排队。会话恢复时，插件会尝试重新借回上次持有的环境。
 
