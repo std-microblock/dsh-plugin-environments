@@ -1,22 +1,17 @@
 // Running the bundled dsh-env-server on an SSH host.
 import crypto from 'node:crypto'
-import fs from 'node:fs'
-import path from 'node:path'
 import type { Client as SshClient, SFTPWrapper } from 'ssh2'
 import { CallbackTransport, EnvError } from '@dsh-environments/protocol'
-import { binDir } from '../../paths.ts'
+import { serverBinaryBytes, targetForHost } from '../../server-binary.ts'
 import { shq } from '../posix-shell.ts'
 import { ServerEnvironment } from '../server/server-env.ts'
 import { execOnce } from './connection.ts'
 
-/** Bundled server binary for a remote `uname -sm`, if one ships with the plugin. */
-export function bundledBinaryFor(uname: string): string | undefined {
-  const [sys, machine = ''] = uname.trim().split(/\s+/)
-  if (!/^linux$/i.test(sys ?? '')) return undefined
-  const arch = /^(x86_64|amd64)$/i.test(machine) ? 'x64' : /^(aarch64|arm64)$/i.test(machine) ? 'arm64' : undefined
-  if (!arch) return undefined
-  const file = path.join(binDir(`linux-${arch}`), 'dsh-env-server')
-  return fs.existsSync(file) ? file : undefined
+/** Bundled server binary (decompressed) for a remote `uname -sm`, if one ships with the plugin. */
+export function bundledBinaryFor(uname: string): Buffer | undefined {
+  const [sys = '', machine = ''] = uname.trim().split(/\s+/)
+  const target = targetForHost(sys, machine)
+  return target ? serverBinaryBytes(target) : undefined
 }
 
 function openSftp(conn: SshClient): Promise<SFTPWrapper> {
@@ -28,9 +23,8 @@ export async function provisionServer(conn: SshClient, signal?: AbortSignal): Pr
   const probe = await execOnce(conn, 'uname -sm; echo "$HOME"')
   if (probe.code !== 0) return undefined
   const [uname, home] = probe.stdout.toString().split(/\r?\n/)
-  const local = bundledBinaryFor(uname ?? '')
-  if (!local || !home) return undefined
-  const data = fs.readFileSync(local)
+  const data = bundledBinaryFor(uname ?? '')
+  if (!data || !home) return undefined
   const hash = crypto.createHash('sha256').update(data).digest('hex').slice(0, 12)
   const dir = `${home}/.dsh-env/bin`
   const remote = `${dir}/dsh-env-server-${hash}`

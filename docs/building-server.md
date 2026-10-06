@@ -4,13 +4,13 @@ The server (`crates/dsh-env-server`) ships as a prebuilt binary for five targets
 inside the plugin package, so binary size matters. This document lists the CI
 build commands, the size budget and the design choices that keep it small.
 
-| package dir      | Rust target                  | built on            |
-|------------------|------------------------------|---------------------|
-| `win32-x64`      | `x86_64-pc-windows-msvc`     | Windows (MSVC)      |
-| `linux-x64`      | `x86_64-unknown-linux-musl`  | any host (rust-lld) |
-| `linux-ia32`     | `i686-unknown-linux-musl`    | any host (rust-lld) |
-| `linux-arm64`    | `aarch64-unknown-linux-musl` | any host (rust-lld) |
-| `darwin-arm64`   | `aarch64-apple-darwin`       | macOS (Xcode SDK)   |
+| package dir    | Rust target                  | built on            |
+| -------------- | ---------------------------- | ------------------- |
+| `win32-x64`    | `x86_64-pc-windows-msvc`     | Windows (MSVC)      |
+| `linux-x64`    | `x86_64-unknown-linux-musl`  | any host (rust-lld) |
+| `linux-ia32`   | `i686-unknown-linux-musl`    | any host (rust-lld) |
+| `linux-arm64`  | `aarch64-unknown-linux-musl` | any host (rust-lld) |
+| `darwin-arm64` | `aarch64-apple-darwin`       | macOS (Xcode SDK)   |
 
 All commands below run from `crates/dsh-env-server/`. That directory's
 `.cargo/config.toml` is only picked up when cargo runs from there (or below), so
@@ -65,19 +65,19 @@ cargo +nightly build --profile dist --target <triple> \
   --config "build.rustflags=['-Zunstable-options','-Cpanic=immediate-abort']"
 ```
 
-* `-Zbuild-std` rebuilds std with the release profile (opt-level z, LTO across std).
-* `optimize_for_size` selects smaller std algorithms (sorting, formatting
+- `-Zbuild-std` rebuilds std with the release profile (opt-level z, LTO across std).
+- `optimize_for_size` selects smaller std algorithms (sorting, formatting
   helpers); behaviour is identical. Worth ~20 KiB on top of the rest.
-* `-Cpanic=immediate-abort` (the current spelling; it replaced the old
+- `-Cpanic=immediate-abort` (the current spelling; it replaced the old
   `-Zbuild-std-features=panic_immediate_abort`) removes the panic message /
   formatting / backtrace machinery. A panic now aborts immediately **without
   printing a message**. The server is written not to panic in normal operation;
   errors are reported through the protocol.
-* Do not set `RUSTFLAGS` in the environment for this build: it overrides
+- Do not set `RUSTFLAGS` in the environment for this build: it overrides
   `build.rustflags` and silently drops `immediate-abort`.
-* `-Zlocation-detail=none` was tried and gave no further reduction (0 bytes) once
+- `-Zlocation-detail=none` was tried and gave no further reduction (0 bytes) once
   immediate-abort is on, so it is not used.
-* `profile.dist` inherits `release` unchanged; it only exists so dist artifacts
+- `profile.dist` inherits `release` unchanged; it only exists so dist artifacts
   land in a separate directory.
 
 The alias is inert on stable — plain `cargo build --release` keeps working.
@@ -111,19 +111,19 @@ Measured 2026-10-07, rustc 1.98.1 stable / 1.101.0-nightly (2026-10-05).
 existed). Compression: brotli quality 11, window 24 (node `zlib`); xz = LZMA2
 preset 9 via 7-Zip (`xz -9e` was not available on the build host); gzip -9.
 
-| target | build | raw | brotli-11 | xz -9 | gzip -9 |
-|---|---|---:|---:|---:|---:|
-| win x64 | before | 5517 KiB | 1501 KiB | 1479 KiB | 2159 KiB |
-| win x64 | stable release | 792 KiB | 322 KiB | 317 KiB | 390 KiB |
-| win x64 | nightly dist | **523 KiB** | **227 KiB** | 223 KiB | 271 KiB |
-| linux x64 | before | 7219 KiB | 1707 KiB | 1685 KiB | 2398 KiB |
-| linux x64 | stable release | 1077 KiB | 428 KiB | 421 KiB | 526 KiB |
-| linux x64 | nightly dist | **608 KiB** | **253 KiB** | 248 KiB | 305 KiB |
-| linux i686 | stable release | 1039 KiB | 445 KiB | 439 KiB | 539 KiB |
-| linux i686 | nightly dist | **587 KiB** | **259 KiB** | 256 KiB | 311 KiB |
-| linux arm64 | before | 7030 KiB | 1640 KiB | 1549 KiB | 2381 KiB |
-| linux arm64 | stable release | 944 KiB | 399 KiB | 376 KiB | 515 KiB |
-| linux arm64 | nightly dist | **544 KiB** | **242 KiB** | 228 KiB | 311 KiB |
+| target      | build          |         raw |   brotli-11 |    xz -9 |  gzip -9 |
+| ----------- | -------------- | ----------: | ----------: | -------: | -------: |
+| win x64     | before         |    5517 KiB |    1501 KiB | 1479 KiB | 2159 KiB |
+| win x64     | stable release |     792 KiB |     322 KiB |  317 KiB |  390 KiB |
+| win x64     | nightly dist   | **523 KiB** | **227 KiB** |  223 KiB |  271 KiB |
+| linux x64   | before         |    7219 KiB |    1707 KiB | 1685 KiB | 2398 KiB |
+| linux x64   | stable release |    1077 KiB |     428 KiB |  421 KiB |  526 KiB |
+| linux x64   | nightly dist   | **608 KiB** | **253 KiB** |  248 KiB |  305 KiB |
+| linux i686  | stable release |    1039 KiB |     445 KiB |  439 KiB |  539 KiB |
+| linux i686  | nightly dist   | **587 KiB** | **259 KiB** |  256 KiB |  311 KiB |
+| linux arm64 | before         |    7030 KiB |    1640 KiB | 1549 KiB | 2381 KiB |
+| linux arm64 | stable release |     944 KiB |     399 KiB |  376 KiB |  515 KiB |
+| linux arm64 | nightly dist   | **544 KiB** | **242 KiB** |  228 KiB |  311 KiB |
 
 macOS arm64 is only type-checked from Windows (`cargo check --target
 aarch64-apple-darwin`, stable and nightly build-std); linking needs the Apple
@@ -136,13 +136,13 @@ features), `serde_json` (no default features), `regex-lite`, `miniz_oxide`
 (PNG/zlib encoding for screenshots), `getrandom`, plus `libc` / `windows-sys`.
 The following were replaced by small in-tree code:
 
-| removed crate(s)               | replacement |
-|--------------------------------|-------------|
-| `clap`                         | `src/cli.rs` hand-written argument parser and help text |
-| `portable-pty`                 | `src/pty.rs` (openpty on Unix, ConPTY on Windows) |
-| `ignore`, `globset`, `grep-*`  | `src/walk.rs` (gitignore-aware walker, glob matcher) + `src/search.rs` (regex-lite based grep) |
-| `base64`, `png`                | `src/util.rs` (base64 codec, minimal PNG writer over `miniz_oxide`) |
-| `rand`, `anyhow`               | `getrandom`, plain `io::Error` / `String` errors |
+| removed crate(s)              | replacement                                                                                    |
+| ----------------------------- | ---------------------------------------------------------------------------------------------- |
+| `clap`                        | `src/cli.rs` hand-written argument parser and help text                                        |
+| `portable-pty`                | `src/pty.rs` (openpty on Unix, ConPTY on Windows)                                              |
+| `ignore`, `globset`, `grep-*` | `src/walk.rs` (gitignore-aware walker, glob matcher) + `src/search.rs` (regex-lite based grep) |
+| `base64`, `png`               | `src/util.rs` (base64 codec, minimal PNG writer over `miniz_oxide`)                            |
+| `rand`, `anyhow`              | `getrandom`, plain `io::Error` / `String` errors                                               |
 
 Before adding a dependency, check the size impact of a stable release build for
 at least one Linux target (`cargo bloat` or simply the raw size) and justify it.
@@ -166,13 +166,13 @@ is assigned to a job object before it runs (`kill` terminates the whole tree). R
 
 Behaviour differences vs. the previous `portable-pty` version:
 
-* `proc.kill` on a PTY process: `TERM`/`INT`/`HUP`/`QUIT` send that signal to the
+- `proc.kill` on a PTY process: `TERM`/`INT`/`HUP`/`QUIT` send that signal to the
   process group; the default (`KILL`) sends `SIGHUP` (like a closing terminal)
   and escalates to `SIGKILL` after 250 ms if the process is still alive.
-* Exit of a signal-terminated PTY child is reported as `{code: 1, signal: "SIG<n>"}`
+- Exit of a signal-terminated PTY child is reported as `{code: 1, signal: "SIG<n>"}`
   (numeric, e.g. `SIG1` for SIGHUP), consistent with non-PTY processes
   (`proc.rs`), rather than a signal name.
-* No other protocol-visible differences; see `docs/protocol.md`.
+- No other protocol-visible differences; see `docs/protocol.md`.
 
 ## Testing
 

@@ -1,26 +1,16 @@
 // Factories that open dsh-env-server environments: a local stdio child, or a TCP server.
 import { spawn } from 'node:child_process'
-import fs from 'node:fs'
 import net from 'node:net'
-import path from 'node:path'
 import { childTransport, EnvError, errorCode, errorMessage } from '@dsh-environments/protocol'
-import { binDir, CRATE_TARGET_DIR } from '../../paths.ts'
+import { HOST_TARGET, serverBinaryFile, serverExeName } from '../../server-binary.ts'
 import type { EnvironmentKind } from '../types.ts'
 import { ServerEnvironment } from './server-env.ts'
 
-export const SERVER_EXE = process.platform === 'win32' ? 'dsh-env-server.exe' : 'dsh-env-server'
+export const SERVER_EXE = serverExeName()
 
-/** Locate the dsh-env-server binary for the host platform. */
+/** Locate (unpacking if needed) the dsh-env-server binary for the host platform. */
 export function serverBinary(override?: string): string {
-  if (override) return override
-  const candidates = [
-    process.env['DSH_ENV_SERVER_BIN'],
-    path.join(binDir(), SERVER_EXE),
-    path.join(CRATE_TARGET_DIR, 'release', SERVER_EXE),
-    path.join(CRATE_TARGET_DIR, 'debug', SERVER_EXE),
-  ].filter((c): c is string => !!c)
-  for (const c of candidates) if (fs.existsSync(c)) return c
-  throw new EnvError('ENOENT', `dsh-env-server binary not found (looked in ${candidates.join(', ')})`)
+  return serverBinaryFile(HOST_TARGET, override)
 }
 
 export interface OpenLocalOptions {
