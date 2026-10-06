@@ -7,15 +7,18 @@ mod proc;
 mod protocol;
 mod pty;
 mod search;
+mod secure;
 mod session;
 mod sys;
+mod transport;
 mod util;
 mod walk;
 mod winuser;
+mod ws;
 
 use cli::Cmd;
-use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 fn resolve_cwd(cwd: Option<PathBuf>) -> PathBuf {
@@ -65,20 +68,51 @@ fn main() {
         },
         Cmd::Serve {
             listen,
-            token,
-            token_file,
+            secret,
             cwd,
             once,
-        } => {
-            let rt = runtime();
-            match rt.block_on(serve(listen, token, token_file, resolve_cwd(cwd), once)) {
-                Ok(()) => 0,
-                Err(e) => {
-                    eprintln!("dsh-env-server: {e}");
-                    1
+            exit_idle,
+            lifeline,
+        } => run(lifeline, async move |life| {
+            let listen = transport::Endpoint::parse(&listen).map_err(invalid_input)?;
+            let secret = match transport::read_secret(secret.token, secret.file, secret.stdin)? {
+                Some(s) => s,
+                None => {
+                    let mut bytes = [0u8; 32];
+                    util::random_bytes(&mut bytes);
+                    let t = util::hex(&bytes);
+                    println!("DSH_ENV_SERVER token={t}");
+                    t
                 }
-            }
-        }
+            };
+            let opts = transport::ServeOptions {
+                listen,
+                secret,
+                cwd: resolve_cwd(cwd),
+                once,
+                exit_idle,
+            };
+            transport::serve(opts, life).await
+        }),
+        Cmd::Connect {
+            url,
+            id,
+            secret,
+            cwd,
+            lifeline,
+        } => run(lifeline, async move |life| {
+            let url = transport::Endpoint::parse(&url).map_err(invalid_input)?;
+            let secret = transport::read_secret(secret.token, secret.file, secret.stdin)?
+                .ok_or_else(|| invalid_input("a secret is required".into()))?;
+            let opts = transport::ConnectOptions {
+                url,
+                secret,
+                id,
+                cwd: resolve_cwd(cwd),
+                max_sessions: 32,
+            };
+            transport::connect(opts, life).await
+        }),
         Cmd::Stdio { cwd } => {
             let rt = runtime();
             let cwd = resolve_cwd(cwd);
@@ -87,6 +121,8 @@ fn main() {
                     token: None,
                     cwd,
                     idle_timeout: None,
+                    shutdown: None,
+                    on_hello: None,
                 };
                 session::serve_connection(tokio::io::stdin(), tokio::io::stdout(), opts).await
             });
@@ -103,46 +139,33 @@ fn main() {
     std::process::exit(code);
 }
 
-async fn serve(
-    listen: String,
-    token: Option<String>,
-    token_file: Option<PathBuf>,
-    cwd: PathBuf,
-    once: bool,
-) -> std::io::Result<()> {
-    let token = match (token, token_file) {
-        (Some(t), _) => t,
-        (None, Some(f)) => std::fs::read_to_string(f)?.trim().to_string(),
-        (None, None) => {
-            let mut bytes = [0u8; 32];
-            util::random_bytes(&mut bytes);
-            let t = util::hex(&bytes);
-            println!("DSH_ENV_SERVER token={t}");
-            t
+fn invalid_input(msg: String) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, msg)
+}
+
+/// Run a network command, then shut every session down (killing their process trees) before
+/// the process exits.
+fn run<F>(lifeline: bool, f: impl FnOnce(Arc<transport::Lifetime>) -> F) -> i32
+where
+    F: Future<Output = std::io::Result<()>>,
+{
+    let rt = runtime();
+    let code = rt.block_on(async move {
+        let life = transport::Lifetime::new();
+        if lifeline {
+            life.lifeline();
         }
-    };
-    let listener = tokio::net::TcpListener::bind(&listen).await?;
-    println!("DSH_ENV_SERVER listening={}", listener.local_addr()?);
-    std::io::stdout().flush()?;
-    loop {
-        let (stream, peer) = listener.accept().await?;
-        let _ = stream.set_nodelay(true);
-        let token = token.clone();
-        let cwd = cwd.clone();
-        let task = tokio::spawn(async move {
-            let (r, w) = stream.into_split();
-            let opts = session::ConnOptions {
-                token: Some(token),
-                cwd,
-                idle_timeout: Some(Duration::from_secs(60)),
-            };
-            if let Err(e) = session::serve_connection(r, w, opts).await {
-                eprintln!("dsh-env-server: session {peer} ended: {e}");
+        let r = f(life.clone()).await;
+        life.trigger();
+        life.drain(Duration::from_secs(5)).await;
+        match r {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("dsh-env-server: {e}");
+                1
             }
-        });
-        if once {
-            let _ = task.await;
-            return Ok(());
         }
-    }
+    });
+    rt.shutdown_timeout(Duration::from_millis(500));
+    code
 }

@@ -13,3 +13,23 @@ export {
   type Transport,
 } from './client.ts'
 export { CallbackTransport, childTransport, type StdioChild } from './transports.ts'
+export {
+  deriveKeys,
+  generateSecret,
+  MAX_RECORD,
+  RecordCipher,
+  secureInitiate,
+  secureRespond,
+  SECURE_VERSION,
+  type InitiateOptions,
+  type SecureKeys,
+} from './secure.ts'
+export {
+  encodeWsFrame,
+  WsDecoder,
+  wsAccept,
+  wsAcceptKey,
+  wsConnect,
+  type WsConnectOptions,
+  type WsFrame,
+} from './websocket.ts'

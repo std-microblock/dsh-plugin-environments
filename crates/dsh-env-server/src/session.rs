@@ -1,6 +1,8 @@
 //! One protocol connection: request dispatch, channel multiplexing and flow control.
 
-use crate::protocol::{Frame, OpError, OpResult, WINDOW, read_frame, write_frame};
+use crate::protocol::{
+    Frame, OpError, OpResult, PROTOCOL_VERSION, WINDOW, read_frame, write_frame,
+};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -8,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, BufWriter};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::AbortHandle;
 
 /// Client→server channel event.
@@ -323,9 +325,14 @@ impl Session {
 
 /// Options for one connection.
 pub struct ConnOptions {
+    /// Token the hello must carry (plain transports); `None` accepts any token.
     pub token: Option<String>,
     pub cwd: PathBuf,
     pub idle_timeout: Option<Duration>,
+    /// Ends the session (killing its processes) when it becomes `true`.
+    pub shutdown: Option<watch::Receiver<bool>>,
+    /// Signalled when a valid hello arrives (reverse connections dial their next spare).
+    pub on_hello: Option<oneshot::Sender<()>>,
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -363,14 +370,34 @@ where
         }
     }
 
-    // Handshake.
-    let Some(hello) = read_next(&mut reader, idle).await? else {
-        return Ok(());
+    let mut shutdown = opts.shutdown;
+    async fn stopped(rx: &mut Option<watch::Receiver<bool>>) {
+        match rx {
+            Some(rx) => {
+                let _ = rx.wait_for(|v| *v).await;
+            }
+            None => std::future::pending().await,
+        }
+    }
+
+    // Handshake. A spare reverse connection may see keepalive pings before its hello.
+    let hello = loop {
+        let next = tokio::select! {
+            f = read_next(&mut reader, idle) => f?,
+            _ = stopped(&mut shutdown) => return Ok(()),
+        };
+        let Some(frame) = next else { return Ok(()) };
+        if frame.kind() != "ping" {
+            break frame;
+        }
+        let n = frame.header.get("n").cloned().unwrap_or(Value::Null);
+        write_frame(&mut writer, &Frame::new(json!({"t":"pong","n":n}))).await?;
+        tokio::io::AsyncWriteExt::flush(&mut writer).await?;
     };
     let info = crate::sys::info(&opts.cwd);
     if hello.kind() != "hello" {
         let f = Frame::new(
-            json!({"t":"hello","v":1,"ok":false,"error":{"code":"PROTOCOL","message":"expected hello"}}),
+            json!({"t":"hello","v":PROTOCOL_VERSION,"ok":false,"error":{"code":"PROTOCOL","message":"expected hello"}}),
         );
         write_frame(&mut writer, &f).await?;
         tokio::io::AsyncWriteExt::flush(&mut writer).await?;
@@ -380,7 +407,7 @@ where
         let got = hello.str("token").unwrap_or("");
         if !constant_time_eq(expected.as_bytes(), got.as_bytes()) {
             let f = Frame::new(
-                json!({"t":"hello","v":1,"ok":false,"error":{"code":"AUTH","message":"invalid token"}}),
+                json!({"t":"hello","v":PROTOCOL_VERSION,"ok":false,"error":{"code":"AUTH","message":"invalid token"}}),
             );
             write_frame(&mut writer, &f).await?;
             tokio::io::AsyncWriteExt::flush(&mut writer).await?;
@@ -398,7 +425,10 @@ where
         cwd: opts.cwd.clone(),
         info: info.clone(),
     });
-    session.send_json(json!({"t":"hello","v":1,"ok":true,"info":info}));
+    session.send_json(json!({"t":"hello","v":PROTOCOL_VERSION,"ok":true,"info":info}));
+    if let Some(tx) = opts.on_hello {
+        let _ = tx.send(());
+    }
 
     let writer_task = tokio::spawn(async move {
         while let Some(frame) = out_rx.recv().await {
@@ -419,7 +449,11 @@ where
 
     let result: std::io::Result<()> = async {
         loop {
-            let Some(frame) = read_next(&mut reader, idle).await? else { break };
+            let next = tokio::select! {
+                f = read_next(&mut reader, idle) => f?,
+                _ = stopped(&mut shutdown) => None,
+            };
+            let Some(frame) = next else { break };
             match frame.kind() {
                 "req" => {
                     let id = frame.u64("id").unwrap_or(0);

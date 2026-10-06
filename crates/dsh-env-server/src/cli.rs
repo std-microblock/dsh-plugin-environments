@@ -8,12 +8,23 @@ Remote environment server for the DeepSeek Harness environments plugin
 Usage: dsh-env-server <COMMAND>
 
 Commands:
-  serve    Serve the environment protocol over TCP
-             --listen <ADDR>      Address to listen on [default: 127.0.0.1:7461]
-             --token <TOKEN>      Shared secret clients must present
+  serve    Listen for the plugin (TCP or WebSocket, always over the secure channel)
+             --listen <ADDR>      host:port, tcp://host:port or ws://host:port/path
+                                  [default: 127.0.0.1:7461]
+             --token-stdin        Read the shared secret from the first line of stdin
              --token-file <PATH>  Read the shared secret from a file
+             --token <TOKEN>      Shared secret (visible to other users in ps; avoid)
+                                  Without a secret a random one is generated and printed.
              --cwd <PATH>         Working directory for relative paths
              --once               Exit after the first connection ends
+             --exit-idle          Exit when the last session ends
+             --lifeline           Exit (killing every spawned process) when stdin closes
+  connect  Dial the plugin (reverse connection), reconnecting with backoff
+             <URL>                tcp://host:port or ws://host:port/path
+             --id <ID>            Environment id configured in the plugin
+             --token-stdin | --token-file <PATH> | --token <TOKEN>
+             --cwd <PATH>
+             --lifeline
   stdio    Serve exactly one session on stdin/stdout
              --cwd <PATH>
   winuser  Manage dsh-managed local Windows accounts
@@ -51,14 +62,45 @@ pub enum WinUserCmd {
     },
 }
 
+/// Where the shared secret comes from.
+#[derive(Debug, PartialEq, Default)]
+pub struct SecretSource {
+    pub token: Option<String>,
+    pub file: Option<PathBuf>,
+    pub stdin: bool,
+}
+
+impl SecretSource {
+    fn from(o: &Opts) -> Result<SecretSource, String> {
+        let s = SecretSource {
+            token: o.get("token"),
+            file: o.get("token-file").map(PathBuf::from),
+            stdin: o.has("token-stdin"),
+        };
+        let n = s.token.is_some() as u8 + s.file.is_some() as u8 + s.stdin as u8;
+        if n > 1 {
+            return Err("use only one of --token, --token-file, --token-stdin".into());
+        }
+        Ok(s)
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Cmd {
     Serve {
         listen: String,
-        token: Option<String>,
-        token_file: Option<PathBuf>,
+        secret: SecretSource,
         cwd: Option<PathBuf>,
         once: bool,
+        exit_idle: bool,
+        lifeline: bool,
+    },
+    Connect {
+        url: String,
+        id: String,
+        secret: SecretSource,
+        cwd: Option<PathBuf>,
+        lifeline: bool,
     },
     Stdio {
         cwd: Option<PathBuf>,
@@ -164,17 +206,50 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
         "-h" | "--help" | "help" => Ok(Cmd::Help),
         "-V" | "--version" => Ok(Cmd::Version),
         "serve" => {
-            let o = Opts::parse(rest, &["once"], &["listen", "token", "token-file", "cwd"])?;
+            let o = Opts::parse(
+                rest,
+                &["once", "exit-idle", "lifeline", "token-stdin"],
+                &["listen", "token", "token-file", "cwd"],
+            )?;
             no_rest(&o)?;
             if o.has("help") {
                 return Ok(Cmd::Help);
             }
             Ok(Cmd::Serve {
                 listen: o.get("listen").unwrap_or_else(|| "127.0.0.1:7461".into()),
-                token: o.get("token"),
-                token_file: o.get("token-file").map(PathBuf::from),
+                secret: SecretSource::from(&o)?,
                 cwd: o.get("cwd").map(PathBuf::from),
                 once: o.has("once"),
+                exit_idle: o.has("exit-idle"),
+                lifeline: o.has("lifeline"),
+            })
+        }
+        "connect" => {
+            let (url, rest) = match rest.first() {
+                Some(u) if !u.starts_with('-') => (Some(u.clone()), &rest[1..]),
+                _ => (None, rest),
+            };
+            let o = Opts::parse(
+                rest,
+                &["lifeline", "token-stdin"],
+                &["id", "token", "token-file", "cwd"],
+            )?;
+            no_rest(&o)?;
+            if o.has("help") {
+                return Ok(Cmd::Help);
+            }
+            let secret = SecretSource::from(&o)?;
+            if secret == SecretSource::default() {
+                return Err(
+                    "connect needs a secret: --token-stdin, --token-file or --token".into(),
+                );
+            }
+            Ok(Cmd::Connect {
+                url: url.ok_or("the following required arguments were not provided: <URL>")?,
+                id: o.req("id")?,
+                secret,
+                cwd: o.get("cwd").map(PathBuf::from),
+                lifeline: o.has("lifeline"),
             })
         }
         "stdio" => {
@@ -275,10 +350,11 @@ mod tests {
             p(&["serve"]).unwrap(),
             Cmd::Serve {
                 listen: "127.0.0.1:7461".into(),
-                token: None,
-                token_file: None,
+                secret: SecretSource::default(),
                 cwd: None,
-                once: false
+                once: false,
+                exit_idle: false,
+                lifeline: false,
             }
         );
         assert_eq!(
@@ -294,14 +370,50 @@ mod tests {
             .unwrap(),
             Cmd::Serve {
                 listen: "0.0.0.0:1".into(),
-                token: Some("abc".into()),
-                token_file: None,
+                secret: SecretSource {
+                    token: Some("abc".into()),
+                    ..Default::default()
+                },
                 cwd: Some("/x".into()),
-                once: true
+                once: true,
+                exit_idle: false,
+                lifeline: false,
             }
         );
         assert!(p(&["serve", "--bogus"]).is_err());
         assert!(p(&["serve", "--token"]).is_err());
+        assert!(p(&["serve", "--token", "a", "--token-stdin"]).is_err());
+        match p(&["serve", "--token-stdin", "--lifeline", "--exit-idle"]).unwrap() {
+            Cmd::Serve {
+                secret,
+                lifeline,
+                exit_idle,
+                ..
+            } => {
+                assert!(secret.stdin && lifeline && exit_idle);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn connect_args() {
+        assert_eq!(
+            p(&["connect", "ws://h:1/x", "--id", "e1", "--token-file", "/s"]).unwrap(),
+            Cmd::Connect {
+                url: "ws://h:1/x".into(),
+                id: "e1".into(),
+                secret: SecretSource {
+                    file: Some("/s".into()),
+                    ..Default::default()
+                },
+                cwd: None,
+                lifeline: false,
+            }
+        );
+        assert!(p(&["connect", "tcp://h:1", "--id", "e1"]).is_err());
+        assert!(p(&["connect", "--id", "e1", "--token-stdin"]).is_err());
+        assert!(p(&["connect", "tcp://h:1", "--token-stdin"]).is_err());
     }
 
     #[test]
