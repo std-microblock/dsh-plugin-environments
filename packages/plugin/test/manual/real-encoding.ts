@@ -61,7 +61,7 @@ console.log(
   `--- pty: ${JSON.stringify(
     Buffer.concat(chunks)
       .toString('utf8')
-      // eslint-disable-next-line no-control-regex
+
       .replace(/\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07/g, '')
       .trim(),
   )}`,
