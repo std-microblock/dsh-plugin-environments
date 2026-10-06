@@ -1,100 +1,33 @@
 {
-  "name": "dsh-plugin-environments",
+  "name": "dsh-plugin-environments-monorepo",
   "version": "0.1.0",
   "private": true,
-  "description": "Environments for the DeepSeek Harness: mount or borrow local, dsh-env-server, SSH, ADB (Android) and Windows-account devices.",
+  "description": "Workspace for dsh-plugin-environments: the DSH environments plugin, its protocol client and its web GUI.",
   "type": "module",
-  "main": "lib/index.js",
-  "exports": {
-    ".": "./lib/index.js",
-    "./client": "./client.js",
-    "./package.json": "./package.json"
-  },
-  "files": [
-    "lib",
-    "bin",
-    "client.js",
-    "cordis.patch.yml",
-    "README.md",
-    "docs"
-  ],
   "license": "MIT",
-  "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "platform": "web",
-      "immediately": true,
-      "inject": [
-        "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-workspace",
-        "@deepseek-ai/dsh-client-ui-session"
-      ]
-    }
+  "engines": {
+    "node": ">=24"
   },
   "scripts": {
-    "build": "node scripts/build.mjs",
-    "build:client": "node scripts/build.mjs --client",
-    "build:server": "node scripts/build.mjs --server",
-    "test": "node --test --test-timeout=120000 test/*.test.js"
-  },
-  "dependencies": {
-    "ssh2": "^1.16.0"
+    "build": "node scripts/build.ts",
+    "build:server": "node scripts/build.ts --server",
+    "build:client": "node scripts/build.ts --client",
+    "build:plugin": "node scripts/build.ts --plugin",
+    "typecheck": "tsc -p tsconfig.json && pnpm -r typecheck",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "pnpm -r --workspace-concurrency=1 test"
   },
   "devDependencies": {
-    "esbuild": "^0.25.0"
-  },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-tools": "*",
-    "@deepseek-ai/dsh-scope": "*",
-    "@deepseek-ai/dsh-fs": "*",
-    "@deepseek-ai/dsh-subprocess": "*",
-    "@deepseek-ai/dsh-bash-local": "*",
-    "@deepseek-ai/dsh-pwsh-local": "*",
-    "@deepseek-ai/dsh-tool-bash": "*",
-    "@deepseek-ai/dsh-tool-pwsh": "*",
-    "@deepseek-ai/dsh-tool-fs": "*",
-    "@deepseek-ai/dsh-agent-instructions": "*",
-    "@deepseek-ai/dsh-skill-filesystem": "*"
-  },
-  "peerDependenciesMeta": {
-    "@deepseek-ai/cordis": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-tools": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-scope": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-fs": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-subprocess": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-bash-local": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-pwsh-local": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-tool-bash": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-tool-pwsh": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-tool-fs": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-agent-instructions": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-skill-filesystem": {
-      "optional": true
-    }
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.4",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.12.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.13.0",
+    "prettier": "^3.9.9",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.71.1"
   }
 }

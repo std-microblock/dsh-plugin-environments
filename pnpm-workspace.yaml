@@ -1,7 +1,9 @@
 packages:
-  - .
+  - packages/*
 allowBuilds:
   esbuild: true
   ssh2: false
   cpu-features: false
-
+# DSH packages are typing-only devDependencies; their peers are provided by the DSH runtime.
+autoInstallPeers: false
+strictPeerDependencies: false

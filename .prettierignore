@@ -1,0 +1,10 @@
+node_modules/
+dist/
+crates/
+pnpm-lock.yaml
+packages/plugin/client.js
+packages/plugin/bin/
+docs/research.md
+.cache/
+.tmp-scan/
+.work/

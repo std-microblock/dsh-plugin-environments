@@ -1,8 +1,16 @@
 node_modules/
-.cache/
-server/target/
 *.log
+*.tsbuildinfo
 
-.work/
+# local junk
+.cache/
 .tmp-scan/
+.work/
+
+# build outputs
+dist/
+packages/plugin/bin/
+packages/plugin/client.js
+bin/
+client.js
 crates/*/target/
