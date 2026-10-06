@@ -7,13 +7,28 @@
 
 ## 安装
 
+发布版本附带全部五个平台的 `dsh-env-server`（win32-x64、linux-x64、linux-ia32、linux-arm64、darwin-arm64），二进制以 Brotli 压缩存放，首次使用时解压到 `~/.dsh/cache/`。任选一种方式安装：
+
+```sh
+# 1. 某个版本的发布包（GitHub Release 附件，推荐）
+dsh plugin add https://github.com/std-microblock/dsh-plugin-environments/releases/download/vX.Y.Z/dsh-plugin-environments-X.Y.Z.tgz
+
+# 2. release 分支：始终是最新正式版；也可以用 release-vX.Y.Z 标签固定版本
+dsh plugin add github:std-microblock/dsh-plugin-environments#release
+dsh plugin add github:std-microblock/dsh-plugin-environments#release-vX.Y.Z
+```
+
+需要指定配置时加 `--profile desktop` 等参数。每个 Release 还附带 `SHA256SUMS`，以及各平台的原始服务端二进制 `dsh-env-server-X.Y.Z-<平台>.gz`，用于在别的机器上运行 `dsh-env-server serve`。
+
+### 从源码安装
+
 ```sh
 pnpm install
-pnpm run build        # 构建 dsh-env-server（本机 + Linux x64/arm64）、插件 dist/ 和 client.js
+pnpm run build        # 构建 dsh-env-server（本机 + Linux musl 目标）、插件 dist/ 和 client.js
 dsh plugin --profile desktop add link:G:/dsh-plugin-remote-environments/packages/plugin
 ```
 
-插件包位于 `packages/plugin`（包名仍是 `dsh-plugin-environments`）。`pnpm run build` 会把服务端二进制放到 `packages/plugin/bin/<platform>-<arch>/`，把插件打包到 `packages/plugin/dist/index.js`，把界面打包到 `packages/plugin/client.js`；这些都是构建产物，不进入 git。
+插件包位于 `packages/plugin`（包名仍是 `dsh-plugin-environments`）。`pnpm run build` 会把服务端二进制放到 `packages/plugin/bin/<platform>-<arch>/`，把插件打包到 `packages/plugin/dist/index.js`，把界面打包到 `packages/plugin/client.js`；这些都是构建产物，不进入 git。`pnpm run package` 生成与发布版本相同的 `.tgz`（见 [CONTRIBUTING.md](CONTRIBUTING.md#releasing)）。
 
 安装后会出现以下入口：
 
@@ -80,6 +95,7 @@ pnpm test                      # 协议单元测试 + 插件集成测试：env-s
 pnpm build:server              # cargo 构建 crates/dsh-env-server，并放到 packages/plugin/bin/
 pnpm build:plugin              # packages/plugin/dist/index.js
 pnpm build:client              # packages/plugin/client.js
+pnpm run package               # 发布包 out/dsh-plugin-environments-<版本>.tgz + SHA256SUMS（本地缺少 macOS 二进制时加 --allow-missing）
 ```
 
 `crates/dsh-env-server` 是 Rust 写的 `dsh-env-server`，子命令有 `serve`、`stdio`、`winuser create|delete|list|launch|grant`。Linux 静态二进制通过 `rust-lld` 交叉编译，不需要额外的工具链。
