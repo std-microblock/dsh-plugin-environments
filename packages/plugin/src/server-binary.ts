@@ -58,9 +58,18 @@ interface Located {
   compressed: boolean
 }
 
+/**
+ * Directory searched for `target`'s binary: `bin/<target>/` in the package, or
+ * `$DSH_ENV_SERVER_BIN_DIR/<target>/` when that variable is set (e.g. downloaded CI artifacts).
+ */
+function targetBinDir(target: string): string {
+  const root = process.env['DSH_ENV_SERVER_BIN_DIR']
+  return root ? path.join(root, target) : binDir(target)
+}
+
 function locate(target: string): Located | undefined {
   const exe = serverExeName(target)
-  const dir = binDir(target)
+  const dir = targetBinDir(target)
   const raw = path.join(dir, exe)
   if (fs.existsSync(raw)) return { file: raw, compressed: false }
   const br = `${raw}.br`
@@ -110,7 +119,7 @@ export function serverBinaryFile(target: string = HOST_TARGET, override?: string
   if (env && fs.existsSync(env)) return env
   const found = locate(target)
   if (!found) {
-    throw new EnvError('ENOENT', `dsh-env-server binary for ${target} not found in ${binDir(target)}`)
+    throw new EnvError('ENOENT', `dsh-env-server binary for ${target} not found in ${targetBinDir(target)}`)
   }
   if (!found.compressed) return found.file
   const data = zlib.brotliDecompressSync(fs.readFileSync(found.file))
