@@ -22,6 +22,9 @@ export class ServerProcess implements EnvProcess {
     this.stdout = channel.readable(1)
     // A PTY merges stderr into stdout.
     this.stderr = pty ? Readable.from([]) : channel.readable(2)
+    // A lost connection destroys the streams with an error; `exited` reports it, so an
+    // unobserved stream must not raise an uncaught 'error' event.
+    for (const s of [this.stdin, this.stdout, this.stderr]) s.on('error', () => {})
     this.exited = new Promise(resolve => {
       channel.once('exit', exit => resolve(exit))
       void channel.done.then(({ error }) => {

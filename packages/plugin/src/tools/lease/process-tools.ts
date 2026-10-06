@@ -1,4 +1,5 @@
 // Long-running / interactive processes of a borrowed environment.
+import { StringDecoder } from 'node:string_decoder'
 import type { EnvProcess, ExitInfo } from '../../env/types.ts'
 import { TEXT_OUTPUT, clip, stripAnsi } from '../common.ts'
 import type { LeaseToolContext } from './context.ts'
@@ -18,15 +19,19 @@ export class ManagedProcess {
     this.id = id
     this.proc = proc
     this.command = command
-    const append = (d: Buffer) => {
-      const s = d.toString('utf8')
-      this.buffer += s
-      this.total += s.length
-      if (this.buffer.length > 1024 * 1024) this.buffer = this.buffer.slice(-512 * 1024)
-      this.notify()
+    // One decoder per stream so characters split across chunks are not mangled.
+    const collect = () => {
+      const decoder = new StringDecoder('utf8')
+      return (d: Buffer) => {
+        const s = decoder.write(d)
+        this.buffer += s
+        this.total += s.length
+        if (this.buffer.length > 1024 * 1024) this.buffer = this.buffer.slice(-512 * 1024)
+        this.notify()
+      }
     }
-    proc.stdout.on('data', append)
-    if (proc.stderr !== proc.stdout) proc.stderr.on('data', append)
+    proc.stdout.on('data', collect())
+    if (proc.stderr !== proc.stdout) proc.stderr.on('data', collect())
     void proc.exited.then(exit => {
       this.exit = exit
       this.notify()

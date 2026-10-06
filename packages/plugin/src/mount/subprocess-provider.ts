@@ -19,6 +19,18 @@ import type { EnvProcess, SpawnSpec } from '../env/types.ts'
 import { asPluginContext } from '../host-api.ts'
 import type { MountMap } from './map.ts'
 
+/** Number of trailing bytes of `buf` that form an incomplete UTF-8 sequence. */
+export function incompleteUtf8Tail(buf: Uint8Array): number {
+  for (let i = 1; i <= Math.min(3, buf.length); i++) {
+    const b = buf[buf.length - i] ?? 0
+    if ((b & 0xc0) === 0x80) continue
+    if (b < 0xc0) return 0
+    const need = b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : 2
+    return need > i ? i : 0
+  }
+  return 0
+}
+
 /** Tail-keeping collector implementing the offset-based reader contract. */
 export class Collector {
   private readonly maxBytes: number
@@ -39,11 +51,23 @@ export class Collector {
     }
   }
 
+  /**
+   * Text from `fromByte` on. The returned offset never points inside a UTF-8 character: an
+   * incomplete trailing sequence is left for the next read.
+   */
   readFrom(fromByte: number): { text: string; nextOffset: number; lossy: boolean } {
     const start = this.total - this.size
     const all = Buffer.concat(this.chunks)
-    if (fromByte < start) return { text: all.toString('utf8'), nextOffset: this.total, lossy: true }
-    return { text: all.subarray(fromByte - start).toString('utf8'), nextOffset: this.total, lossy: false }
+    const lossy = fromByte < start
+    let view = lossy ? all : all.subarray(fromByte - start)
+    if (lossy) {
+      // The kept tail may begin inside a character.
+      let skip = 0
+      while (skip < 3 && skip < view.length && ((view[skip] ?? 0) & 0xc0) === 0x80) skip++
+      view = view.subarray(skip)
+    }
+    const tail = incompleteUtf8Tail(view)
+    return { text: view.subarray(0, view.length - tail).toString('utf8'), nextOffset: this.total - tail, lossy }
   }
 }
 

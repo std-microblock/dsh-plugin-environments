@@ -118,9 +118,97 @@ mod imp {
         }
     }
 
-    fn profile_dir(name: &str) -> PathBuf {
-        let base = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
-        PathBuf::from(format!("{base}\\Users\\{name}"))
+    /// String form (`S-1-5-21-...`) of the account's SID.
+    pub fn account_sid(name: &str) -> Option<String> {
+        use windows_sys::Win32::Security::*;
+        let wname = wide(name);
+        let mut sid_len = 0u32;
+        let mut dom_len = 0u32;
+        let mut kind: SID_NAME_USE = 0;
+        unsafe {
+            LookupAccountNameW(
+                null(),
+                wname.as_ptr(),
+                null_mut(),
+                &mut sid_len,
+                null_mut(),
+                &mut dom_len,
+                &mut kind,
+            );
+            if sid_len == 0 {
+                return None;
+            }
+            let mut sid = vec![0u8; sid_len as usize];
+            let mut dom = vec![0u16; dom_len.max(1) as usize];
+            if LookupAccountNameW(
+                null(),
+                wname.as_ptr(),
+                sid.as_mut_ptr() as PSID,
+                &mut sid_len,
+                dom.as_mut_ptr(),
+                &mut dom_len,
+                &mut kind,
+            ) == 0
+            {
+                return None;
+            }
+            let psid = sid.as_mut_ptr() as PSID;
+            let auth = (*GetSidIdentifierAuthority(psid)).Value;
+            let auth = auth.iter().fold(0u64, |a, &b| (a << 8) | b as u64);
+            let mut s = format!("S-1-{auth}");
+            for i in 0..*GetSidSubAuthorityCount(psid) as u32 {
+                s.push_str(&format!("-{}", *GetSidSubAuthority(psid, i)));
+            }
+            Some(s)
+        }
+    }
+
+    /// The registered profile directory of a SID (absent before the first logon). New
+    /// accounts whose name clashes with a leftover folder get e.g. `C:\Users\name.HOST`.
+    pub fn profile_path(sid: &str) -> Option<PathBuf> {
+        use windows_sys::Win32::System::Registry::*;
+        let key = wide(&format!(
+            "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\{sid}"
+        ));
+        let value = wide("ProfileImagePath");
+        let mut buf = vec![0u16; 1024];
+        let mut len = (buf.len() * 2) as u32;
+        let rc = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                key.as_ptr(),
+                value.as_ptr(),
+                RRF_RT_REG_SZ,
+                null_mut(),
+                buf.as_mut_ptr() as _,
+                &mut len,
+            )
+        };
+        if rc != 0 {
+            return None;
+        }
+        // The reported size is not reliable for expanded REG_EXPAND_SZ values.
+        let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        buf.truncate(end.min(len as usize / 2));
+        Some(PathBuf::from(String::from_utf16_lossy(&buf)))
+    }
+
+    #[link(name = "userenv", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn DeleteProfileW(sid: *const u16, path: *const u16, computer: *const u16) -> i32;
+    }
+
+    /// Run a console tool, returning (success, decoded output).
+    fn tool(program: &str, args: &[&str]) -> Result<(bool, String)> {
+        let out = std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("{program}: {e}"))?;
+        let cp = crate::util::codepage::oem();
+        let mut text = crate::util::codepage::decode_any(cp, &out.stdout);
+        text.push_str(&crate::util::codepage::decode_any(cp, &out.stderr));
+        Ok((out.status.success(), text.trim().to_string()))
     }
 
     pub fn create(name: &str, secret_out: &str) -> Result<serde_json::Value> {
@@ -183,8 +271,14 @@ mod imp {
                     let comment = from_wide(item.usri1_comment);
                     if comment == COMMENT {
                         let name = from_wide(item.usri1_name);
-                        let profile = profile_dir(&name);
-                        out.push(json!({"name": name, "profile": profile.to_string_lossy(), "profileExists": profile.exists()}));
+                        let sid = account_sid(&name);
+                        let profile = sid.as_deref().and_then(profile_path);
+                        out.push(json!({
+                            "name": name,
+                            "sid": sid,
+                            "profile": profile.as_ref().map(|p| p.to_string_lossy()),
+                            "profileExists": profile.is_some_and(|p| p.is_dir()),
+                        }));
                     }
                 }
                 if !buf.is_null() {
@@ -208,28 +302,63 @@ mod imp {
         }) {
             bail!("`{name}` is not a dsh-managed account");
         }
+        let sid = account_sid(name);
+        // Processes still running as the account keep its profile loaded (and the
+        // account's files open); end them first.
+        let _ = tool(
+            "taskkill.exe",
+            &["/F", "/T", "/FI", &format!("USERNAME eq {name}")],
+        );
         let wname = wide(name);
         let rc = unsafe { NetUserDel(null(), wname.as_ptr()) };
         if rc != 0 {
             bail!("NetUserDel failed with code {rc}");
         }
-        if purge {
-            let script = format!(
-                "Get-CimInstance Win32_UserProfile | Where-Object {{ $_.LocalPath -like '*\\{name}' -and -not $_.Loaded }} | Remove-CimInstance"
-            );
-            let _ = std::process::Command::new("powershell.exe")
-                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-                .status();
+        let mut result = json!({"ok": true, "name": name});
+        if purge && let Some(sid) = sid {
+            let path = profile_path(&sid);
+            let wsid = wide(&sid);
+            // The profile service unloads the hive a little after the last process ends.
+            let mut error = None;
+            for _ in 0..20 {
+                let deleted = unsafe { DeleteProfileW(wsid.as_ptr(), null(), null()) } != 0;
+                let e = std::io::Error::last_os_error();
+                if deleted || profile_path(&sid).is_none() {
+                    error = None;
+                    break;
+                }
+                error = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(750));
+            }
+            if let Some(p) = &path
+                && p.exists()
+            {
+                let _ = std::fs::remove_dir_all(p);
+            }
+            let left = path.as_ref().is_some_and(|p| p.exists()) || profile_path(&sid).is_some();
+            result["profile"] = json!(path.as_ref().map(|p| p.to_string_lossy()));
+            result["profileRemoved"] = json!(!left);
+            if left {
+                result["warning"] = json!(format!(
+                    "the account was deleted but its profile {} could not be removed{}",
+                    path.as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default(),
+                    error.map(|e| format!(": {e}")).unwrap_or_default()
+                ));
+            }
         }
-        Ok(json!({"ok": true, "name": name}))
+        Ok(result)
     }
 
     pub fn grant(name: &str, path: &str) -> Result<serde_json::Value> {
-        let status = std::process::Command::new("icacls.exe")
-            .args([path, "/grant", &format!("{name}:(OI)(CI)M"), "/T", "/Q"])
-            .status()?;
-        if !status.success() {
-            bail!("icacls failed ({status})");
+        // Inheritable ACE on the directory; Windows propagates it to the existing tree.
+        let (ok, out) = tool(
+            "icacls.exe",
+            &[path, "/grant", &format!("{name}:(OI)(CI)M"), "/Q"],
+        )?;
+        if !ok {
+            bail!("icacls failed: {out}");
         }
         Ok(json!({"ok": true}))
     }
@@ -260,12 +389,42 @@ mod imp {
         out
     }
 
+    /// Explain the CreateProcessWithLogonW failures users actually hit.
+    fn logon_hint(code: Option<i32>) -> &'static str {
+        match code {
+            Some(1326) => {
+                " (the stored password no longer matches; delete and recreate the account)"
+            }
+            Some(1327) | Some(1331) => " (the account is disabled or restricted)",
+            Some(1385) => {
+                " (local policy does not allow this account to log on locally; check \"Allow log on locally\" / \"Deny log on locally\")"
+            }
+            Some(267) => " (the working directory does not exist or the account cannot open it)",
+            Some(1058) | Some(1079) => {
+                " (the Secondary Logon service \"seclogon\" is disabled; enable it in services.msc)"
+            }
+            Some(5) => {
+                " (access denied: the account cannot execute the program; grant it read & execute)"
+            }
+            _ => "",
+        }
+    }
+
+    /// Start `program` as the account on the interactive desktop.
+    ///
+    /// The process is created suspended and put into a kill-on-close job owned by this
+    /// launcher. With `supervise`, the launcher prints the result line, then stays alive
+    /// until the process exits or its stdin closes (the plugin went away or closed the
+    /// environment) and takes the whole tree down with it, so nothing started as the
+    /// account outlives the connection. Without it the process is detached as before.
     pub fn launch(
         name: &str,
         secret_file: &str,
         cwd: Option<&str>,
         program: &[String],
+        supervise: bool,
     ) -> Result<serde_json::Value> {
+        use std::io::Write;
         if program.is_empty() {
             bail!("missing program");
         }
@@ -283,54 +442,109 @@ mod imp {
         let wuser = wide(name);
         let wdomain = wide(".");
         let wpass = wide(&password);
-        let mut desktop = wide("winsta0\\default");
         let wcwd = cwd.map(wide);
+        // Kill-on-close: only meaningful while we stay around to hold it.
+        let job = if supervise {
+            crate::proc::job::Job::new()
+        } else {
+            None
+        };
         unsafe {
             let mut si: STARTUPINFOW = std::mem::zeroed();
             si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-            // A null desktop makes the secondary logon service inherit the caller's
-            // window station/desktop AND grant the account access to it; naming
-            // "winsta0\default" explicitly would leave that grant to us.
-            si.lpDesktop = std::ptr::null_mut();
-            let _ = &mut desktop;
+            // A null desktop makes the secondary logon service use the caller's window
+            // station/desktop (WinSta0\Default) AND grant the account's logon SID access to
+            // it, so GUI programs started by the account show up on the user's desktop.
+            si.lpDesktop = null_mut();
             si.dwFlags = STARTF_USESHOWWINDOW;
-            si.wShowWindow = 0; // SW_HIDE for the server's own console
+            si.wShowWindow = 0; // SW_HIDE, should a console window be created anyway
             let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
-            let ok = CreateProcessWithLogonW(
-                wuser.as_ptr(),
-                wdomain.as_ptr(),
-                wpass.as_ptr(),
-                LOGON_WITH_PROFILE,
-                null(),
-                wcmd.as_mut_ptr(),
-                CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE,
-                null(),
-                wcwd.as_ref().map(|w| w.as_ptr()).unwrap_or(null()),
-                &si,
-                &mut pi,
-            );
-            if ok == 0 {
+            let mut create = |flags: PROCESS_CREATION_FLAGS| {
+                CreateProcessWithLogonW(
+                    wuser.as_ptr(),
+                    wdomain.as_ptr(),
+                    wpass.as_ptr(),
+                    // Loads the profile (creating it on the first logon) so USERPROFILE,
+                    // APPDATA, HKCU, ... are the account's own.
+                    LOGON_WITH_PROFILE,
+                    null(),
+                    wcmd.as_mut_ptr(),
+                    // A null environment means "built from the account's profile".
+                    flags | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
+                    null(),
+                    wcwd.as_ref().map(|w| w.as_ptr()).unwrap_or(null()),
+                    &si,
+                    &mut pi,
+                ) != 0
+            };
+            // A windowless console (no flash, no Windows Terminal tab); fall back to a
+            // hidden new console where the flag is not accepted.
+            if !create(CREATE_NO_WINDOW) && !create(CREATE_NEW_CONSOLE) {
+                let e = std::io::Error::last_os_error();
                 bail!(
-                    "CreateProcessWithLogonW failed: {}",
-                    std::io::Error::last_os_error()
+                    "CreateProcessWithLogonW failed: {e}{}",
+                    logon_hint(e.raw_os_error())
                 );
             }
+            let in_job = job.as_ref().is_some_and(|j| j.assign(pi.hProcess));
+            ResumeThread(pi.hThread);
+            CloseHandle(pi.hThread);
             let pid = pi.dwProcessId;
             // Report an immediate failure (e.g. 0xC0000142 when the account cannot reach the desktop).
-            let mut early_exit = None;
             if WaitForSingleObject(pi.hProcess, 1500) == 0 {
                 let mut code = 0u32;
                 GetExitCodeProcess(pi.hProcess, &mut code);
-                early_exit = Some(code);
+                CloseHandle(pi.hProcess);
+                let hint = match code {
+                    0xC000_0142 => {
+                        " (DLL initialization failed: the account cannot access the window station/desktop)"
+                    }
+                    0xC000_0022 => " (access denied: the account cannot execute the program)",
+                    _ => "",
+                };
+                return Ok(json!({
+                    "ok": false,
+                    "pid": pid,
+                    "exitCode": code,
+                    "error": format!("the process exited immediately with code 0x{code:08X}{hint}"),
+                }));
             }
-            CloseHandle(pi.hThread);
+            let started = json!({"ok": true, "pid": pid, "job": in_job});
+            if !supervise {
+                CloseHandle(pi.hProcess);
+                return Ok(started);
+            }
+            let mut out = std::io::stdout();
+            let _ = writeln!(out, "{started}");
+            let _ = out.flush();
+            // stdin closing (or failing) ends the supervision.
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 256];
+                while let Ok(n) = std::io::Read::read(&mut std::io::stdin(), &mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                }
+                let _ = tx.send(());
+            });
+            let mut exit = None;
+            loop {
+                if WaitForSingleObject(pi.hProcess, 200) == 0 {
+                    let mut code = 0u32;
+                    GetExitCodeProcess(pi.hProcess, &mut code);
+                    exit = Some(code);
+                    break;
+                }
+                if rx.try_recv().is_ok() {
+                    break;
+                }
+            }
+            if let Some(j) = &job {
+                j.terminate();
+            }
             CloseHandle(pi.hProcess);
-            match early_exit {
-                Some(code) => Ok(
-                    json!({"ok": false, "pid": pid, "exitCode": code, "error": format!("the process exited immediately with code 0x{code:08X}")}),
-                ),
-                None => Ok(json!({"ok": true, "pid": pid})),
-            }
+            Ok(json!({"ok": true, "pid": pid, "exited": exit}))
         }
     }
 }
@@ -390,7 +604,8 @@ pub fn run(cmd: WinUserCmd) -> std::result::Result<serde_json::Value, String> {
                 secret_file,
                 cwd,
                 program,
-            } => imp::launch(&name, &secret_file, cwd.as_deref(), &program),
+                supervise,
+            } => imp::launch(&name, &secret_file, cwd.as_deref(), &program, supervise),
             WinUserCmd::Grant { name, path } => imp::grant(&name, &path),
         };
         r.map_err(|e| e.0)
@@ -399,5 +614,33 @@ pub fn run(cmd: WinUserCmd) -> std::result::Result<serde_json::Value, String> {
     {
         let _ = cmd;
         Err("winuser commands are only available on Windows".into())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::imp;
+
+    #[test]
+    fn sid_and_profile_lookup() {
+        assert_eq!(imp::account_sid("SYSTEM").as_deref(), Some("S-1-5-18"));
+        let profile = imp::profile_path("S-1-5-18").unwrap();
+        let p = profile.to_string_lossy().to_ascii_lowercase();
+        assert!(p.ends_with("\\config\\systemprofile"), "{p:?}");
+        assert!(imp::account_sid("dsh-no-such-account-xyz").is_none());
+        assert!(imp::profile_path("S-1-5-21-1-2-3-4").is_none());
+    }
+
+    #[test]
+    fn launch_reports_missing_secret() {
+        let e = imp::launch(
+            "x",
+            "Z:\\dsh-no-such\\secret",
+            None,
+            &["cmd.exe".into()],
+            false,
+        )
+        .unwrap_err();
+        assert!(e.0.contains("reading"), "{}", e.0);
     }
 }

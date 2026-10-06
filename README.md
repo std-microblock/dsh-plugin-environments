@@ -81,6 +81,38 @@ dsh plugin --profile desktop add link:G:/dsh-plugin-remote-environments/packages
 - 每个连接、租约和隧道都绑定在 Cordis 的 fiber/scope 上，智能体销毁、归还或插件卸载时会自动清理。
 - `dsh-env-server` 在连接断开时会结束它启动的所有进程树（Windows 用 Job Object，Unix 用进程组），并关闭监听和套接字。
 
+## Windows 账户环境（`winuser`）
+
+在**环境**页面创建账户后，插件会：
+
+1. **创建**（需要管理员确认，装了 gsudo 时用 gsudo，否则弹出 UAC）：用 `NetUserAdd` 建一个注释为 `dsh-env managed` 的本地标准用户，随机密码用当前用户的 DPAPI 加密后存到插件数据目录的 `winusers/<账户>.secret`。可选地给若干目录授予该账户“修改”权限（`icacls /grant <账户>:(OI)(CI)M`，继承到已有的子文件）。
+2. **连接**：把服务端二进制复制到 `%ProgramData%\dsh-env\dsh-env-server-<内容哈希>.exe`（插件自带的二进制通常在当前用户的配置目录里，其他账户进不去；`ProgramData` 下的文件继承 “Users：读取和执行”）。然后以当前用户身份运行 `dsh-env-server winuser launch --supervise`，它用 `CreateProcessWithLogonW(LOGON_WITH_PROFILE)` 以该账户身份启动 `serve --listen 127.0.0.1:<随机端口> --token <随机令牌> --once --cwd ~`：
+   - 首次登录时 Windows 会创建账户的配置文件（`C:\Users\<账户>`，如果同名目录已存在则是 `C:\Users\<账户>.<计算机名>`）；`USERPROFILE`、`APPDATA`、`TEMP`、HKCU 都是该账户自己的。
+   - 默认工作目录是该账户的主目录；环境配置里的 `cwd` 必须是该账户能进入的目录（例如授予过权限的工作区），否则启动会报“目录名称无效”。
+   - 进程在当前交互会话的 `WinSta0\Default` 桌面上运行（不指定桌面时由 Secondary Logon 服务授予访问权限），所以它启动的窗口程序会显示在当前桌面上，截图和键鼠输入作用于同一块屏幕（坐标是物理像素）。服务端自己没有控制台窗口。
+   - 服务端被放进由启动器持有的 Job Object（`KILL_ON_JOB_CLOSE`）。启动器作为插件的子进程一直运行，环境关闭、连接断开或 dsh 退出（启动器的 stdin 关闭）时，以该账户身份启动的整棵进程树都会被结束。
+3. **删除**（需要管理员确认）：结束该账户的所有进程，删除账户，再用 `DeleteProfileW` 删除它的配置文件（配置文件卸载需要一点时间，会重试约 15 秒；删不掉时账户仍会删除，并返回警告）。
+
+限制：
+
+- 该账户是标准用户，环境里的程序不能提权：直接启动要求管理员权限的程序会失败（错误 740 “请求的操作需要提升”）；通过 ShellExecute 提权（例如 `Start-Process -Verb RunAs`）会在当前桌面弹出索要管理员凭据的 UAC 窗口，需要坐在电脑前的人处理。
+- 同一时间只有一个交互桌面，该账户的窗口和当前用户的窗口在同一个桌面上，互相可见、可操作；锁屏时截图和输入可能失败。
+- 端口只监听 `127.0.0.1`，但同一台机器上的其他本地用户也能连接这个端口，靠随机令牌认证；令牌出现在服务端的命令行里（只有该账户本身和管理员能读到）。
+- 账户能读取所有对 “Users” 开放的位置（例如 `C:\Users\Public`、大多数程序目录），不能读写当前用户的配置目录，除非显式授权。
+- 依赖 Secondary Logon 服务（`seclogon`）；禁用该服务或组策略禁止该账户“本地登录”时会给出对应的错误说明。
+- 密码只能由创建账户的那个 Windows 用户解密（DPAPI）；换了用户或数据目录丢失后需要删除并重建账户。
+
+## Windows 输出编码
+
+中文 Windows 的控制台默认代码页是 936（GBK），`cmd`、`ping`、`net`、Windows PowerShell 等写进管道的文字原本会被当成 UTF-8 解码成乱码。现在：
+
+- `proc.spawn` 默认（`encoding: 'utf8'`）让子进程运行在 UTF-8 控制台上（服务端通过 `dsh-env-server __utf8-console` 包装一层，调用 `SetConsoleCP/SetConsoleOutputCP(65001)`），`command` 模式还会把 Windows PowerShell 的 `$OutputEncoding` 设为 UTF-8；仍不是 UTF-8 的输出行按 OEM 代码页转码。这样 GBK 以外的字符（emoji、韩文等）也不会变成 `?`。副作用：在 UTF-8 控制台上，`ping`、`net`、Windows PowerShell 等系统工具会输出英文提示。
+- `encoding: 'auto'` 保持控制台原来的代码页（提示保持中文），只把非 UTF-8 的输出行按 OEM 代码页转成 UTF-8；`encoding: 'raw'` 原样转发字节（二进制输出）。
+- PTY（ConPTY）本身就输出 UTF-8，不做任何转换。
+- 插件在宿主机上运行的程序（adb、提权助手）的输出同样按“UTF-8 优先，否则 OEM 代码页”解码；进程输出按流解码，多字节字符跨数据块时不会被截断。
+
+详见 [docs/protocol.md](docs/protocol.md) 的 `proc.spawn` 一节。
+
 ## 协议
 
 文档见 [docs/protocol.md](docs/protocol.md)：
@@ -111,4 +143,5 @@ pnpm build:client              # packages/plugin/client.js
 - 走纯 SSH（未运行 `dsh-env-server`）时只有 TCP 隧道；远端是 Windows 时也不支持 grep。
 - 挂载会话中，GUI 侧栏的文件树、diff 摘要和 `@` 文件补全仍然显示宿主机上的占位目录。
 - DSH 没有为工作区行和工作区菜单提供插件扩展位，侧边栏里的链接图标、环境名称和“环境设置…”菜单项是按工作区行的 `data-row-key` 属性插入到页面里的。DSH 改变侧边栏结构后，这些装饰可能不再显示，但不会影响其他功能。
-- 同一台 Windows 机器上同一时间只有一个交互桌面，Windows 账户环境的程序和当前用户共用这个桌面。
+- 同一台 Windows 机器上同一时间只有一个交互桌面，Windows 账户环境的程序和当前用户共用这个桌面（其他限制见上面的“Windows 账户环境”）。
+- Windows 上默认的 UTF-8 模式下，`proc.spawn` 返回的 `pid` 是 `__utf8-console` 包装进程的 pid。

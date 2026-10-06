@@ -93,13 +93,19 @@ interface DirEntry {
 
 ### Processes
 
-| op            | args                                                                                                                     | result                                                   |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- |
-| `proc.spawn`  | `{argv?: string[], command?: string, cwd?, env?: Record<string,string \| null>, clearEnv?: boolean, pty?: {rows, cols}}` | `{ch, pid}`                                              |
-| `proc.resize` | `{ch, rows, cols}`                                                                                                       | `{}`                                                     |
-| `proc.kill`   | `{ch, signal?: 'TERM' \| 'KILL' \| 'INT'}`                                                                               | `{}` (kills the whole process tree; Windows: job object) |
+| op            | args                                                                                                                                                           | result                                                   |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `proc.spawn`  | `{argv?: string[], command?: string, cwd?, env?: Record<string,string \| null>, clearEnv?: boolean, pty?: {rows, cols}, encoding?: 'utf8' \| 'auto' \| 'raw'}` | `{ch, pid}`                                              |
+| `proc.resize` | `{ch, rows, cols}`                                                                                                                                             | `{}`                                                     |
+| `proc.kill`   | `{ch, signal?: 'TERM' \| 'KILL' \| 'INT'}`                                                                                                                     | `{}` (kills the whole process tree; Windows: job object) |
 
-Exactly one of `argv` / `command` is required. `command` runs through the platform shell (`/bin/sh -c` on posix, `cmd.exe /d /s /c` on windows unless the server's configured shell is pwsh, then `pwsh -NoProfile -Command`). `env` entries with `null` remove a variable.
+Exactly one of `argv` / `command` is required. `command` runs through the platform shell (`$SHELL -c` or `/bin/sh -c` on posix; on windows `pwsh.exe` when it is on PATH, else `powershell.exe`, with `-NoLogo -NoProfile -NonInteractive -Command`). `env` entries with `null` remove a variable. Arguments, `cwd` and `env` are passed as UTF-16 (`CreateProcessW`), so non-ASCII values reach the child intact.
+
+`encoding` only matters for pipe output on Windows servers (it is ignored on posix and for PTYs: ConPTY always emits UTF-8 and translates the child's code page itself, so terminals keep the console's default code page and localized messages):
+
+- `utf8` (default): the child runs on a UTF-8 console. The server starts it through a copy of itself (`dsh-env-server __utf8-console -- <argv>`, which calls `SetConsoleCP`/`SetConsoleOutputCP(65001)` on its windowless console, runs the program there in a nested kill-on-close job and exits with its code), so the reported `pid` is that wrapper's. For `command`, Windows PowerShell's `$OutputEncoding` is also set to UTF-8 (a first script line, so error positions of the caller's code start at line 2). Output that still is not UTF-8 is transcoded as in `auto`. A missing program fails the spawn with `ENOENT` as before. Note that console tools such as `ping`, `net` or Windows PowerShell print their messages in English on a UTF-8 console.
+- `auto`: the console keeps its code page (the OEM code page, e.g. 936). Output is decoded line by line: a line that is valid UTF-8 passes through, anything else is decoded with the OEM code page (`MultiByteToWideChar`) and sent as UTF-8; characters split across reads are held back until complete. Text the code page cannot represent (emoji, Korean on a Chinese system, ...) is already lost in the child (`?`).
+- `raw`: the bytes are forwarded untouched (binary output). Both other modes also drop a leading UTF-8 BOM.
 
 Channel data: stdin is client→server `data {ch, fd: 0}` and `eof {ch, fd: 0}`. Server sends `data {ch, fd: 1}` / `data {ch, fd: 2}` (PTY merges into fd 1), `eof {ch, fd}` when each output ends, `exit {ch, code, signal}` when the process exits, then `close {ch}` after all output is flushed.
 
