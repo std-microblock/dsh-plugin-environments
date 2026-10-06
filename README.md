@@ -9,9 +9,11 @@
 
 ```sh
 pnpm install
-pnpm run build        # 构建 dsh-env-server（本机 + Linux x64/arm64）和 client.js
-dsh plugin --profile desktop add link:G:/dsh-plugin-remote-environments
+pnpm run build        # 构建 dsh-env-server（本机 + Linux x64/arm64）、插件 dist/ 和 client.js
+dsh plugin --profile desktop add link:G:/dsh-plugin-remote-environments/packages/plugin
 ```
+
+插件包位于 `packages/plugin`（包名仍是 `dsh-plugin-environments`）。`pnpm run build` 会把服务端二进制放到 `packages/plugin/bin/<platform>-<arch>/`，把插件打包到 `packages/plugin/dist/index.js`，把界面打包到 `packages/plugin/client.js`；这些都是构建产物，不进入 git。
 
 安装后会出现以下入口：
 
@@ -20,13 +22,13 @@ dsh plugin --profile desktop add link:G:/dsh-plugin-remote-environments
 
 ## 环境类型
 
-| 类型 | 连接方式 | 能力 |
-|---|---|---|
-| 本机 `local` | 把随插件附带的 `dsh-env-server` 作为 stdio 子进程启动 | 全部能力：文件、进程/PTY、TCP/UDP 正反向隧道、glob/grep、截图、键鼠输入 |
-| 环境服务器 `server` | 通过 TCP 连接到在目标机器上运行的 `dsh-env-server serve --listen 0.0.0.0:7461`，用令牌认证 | 同上；截图和输入目前仅限 Windows 目标 |
-| SSH `ssh` | 使用 ssh2 连接，支持密码、私钥或 ssh-agent。目标是 Linux x64/arm64 时，自动通过 SFTP 上传对应的静态 `dsh-env-server`（存放在 `~/.dsh-env/bin/`），再通过 exec 通道运行，从而获得完整能力。上传失败或目标是其他系统时，退回到 SFTP + exec + TCP 转发 | 完整能力，或退回后的基础能力 |
-| Android `adb` | 调用 adb CLI。`adb devices` 发现的设备会自动列出，可以一键加入列表 | 文件（push/pull/exec-out）、shell（含 PTY）、TCP forward/reverse、截图、输入，以及 `install_apk`、`app`、`ui_dump`、`logcat` |
-| Windows 账户 `winuser` | 创建一个本地标准账户（需要管理员确认），密码用 DPAPI 加密保存。连接时用 `CreateProcessWithLogonW` 以该账户身份在当前交互桌面上启动 `dsh-env-server` | 全部能力。该账户启动的图形界面程序会显示在当前桌面，智能体可以截图并操作 |
+| 类型                   | 连接方式                                                                                                                                                                                                                                            | 能力                                                                                                                         |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| 本机 `local`           | 把随插件附带的 `dsh-env-server` 作为 stdio 子进程启动                                                                                                                                                                                               | 全部能力：文件、进程/PTY、TCP/UDP 正反向隧道、glob/grep、截图、键鼠输入                                                      |
+| 环境服务器 `server`    | 通过 TCP 连接到在目标机器上运行的 `dsh-env-server serve --listen 0.0.0.0:7461`，用令牌认证                                                                                                                                                          | 同上；截图和输入目前仅限 Windows 目标                                                                                        |
+| SSH `ssh`              | 使用 ssh2 连接，支持密码、私钥或 ssh-agent。目标是 Linux x64/arm64 时，自动通过 SFTP 上传对应的静态 `dsh-env-server`（存放在 `~/.dsh-env/bin/`），再通过 exec 通道运行，从而获得完整能力。上传失败或目标是其他系统时，退回到 SFTP + exec + TCP 转发 | 完整能力，或退回后的基础能力                                                                                                 |
+| Android `adb`          | 调用 adb CLI。`adb devices` 发现的设备会自动列出，可以一键加入列表                                                                                                                                                                                  | 文件（push/pull/exec-out）、shell（含 PTY）、TCP forward/reverse、截图、输入，以及 `install_apk`、`app`、`ui_dump`、`logcat` |
+| Windows 账户 `winuser` | 创建一个本地标准账户（需要管理员确认），密码用 DPAPI 加密保存。连接时用 `CreateProcessWithLogonW` 以该账户身份在当前交互桌面上启动 `dsh-env-server`                                                                                                 | 全部能力。该账户启动的图形界面程序会显示在当前桌面，智能体可以截图并操作                                                     |
 
 ## 远程工作区（挂载）
 
@@ -42,11 +44,11 @@ dsh plugin --profile desktop add link:G:/dsh-plugin-remote-environments
 
 ## 借用
 
-| 工具 | 作用 |
-|---|---|
-| `env_list` | 列出本会话可借用的环境、它们的状态，以及本会话已经借到的环境 |
-| `env_borrow` | 借用一个环境；`wait: true` 时如果环境忙，会排队等待（可设超时） |
-| `env_return` | 归还环境，同时关闭通过它开启的进程和隧道 |
+| 工具           | 作用                                                                                  |
+| -------------- | ------------------------------------------------------------------------------------- |
+| `env_list`     | 列出本会话可借用的环境、它们的状态，以及本会话已经借到的环境                          |
+| `env_borrow`   | 借用一个环境；`wait: true` 时如果环境忙，会排队等待（可设超时）                       |
+| `env_return`   | 归还环境，同时关闭通过它开启的进程和隧道                                              |
 | `env_transfer` | 在本会话工作区和已借环境之间、或两个已借环境之间复制文件或目录，位置写成 `别名:/路径` |
 
 借到之后的工具：`<别名>__exec`、`read_file`、`read_image`、`write_file`、`edit_file`、`list_dir`、`glob`、`grep`、`process_start` / `process_io` / `process_kill`（可交互的长时间进程）、`tunnel`（`to_env` / `from_env`，TCP 或 UDP）。环境支持时还有 `screenshot` 和 `input`；Android 环境另外有 `install_apk`、`app`、`ui_dump`、`logcat`。
@@ -69,13 +71,18 @@ dsh plugin --profile desktop add link:G:/dsh-plugin-remote-environments
 
 ## 开发
 
+这是一个 TypeScript（strict）pnpm monorepo，目录结构和约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
 ```sh
-pnpm test                     # 节点侧集成测试：env-server、ssh、adb（模拟设备）、租约、挂载映射
-cd server && cargo build      # 服务端
-node scripts/build.mjs --client
+pnpm install
+pnpm lint && pnpm typecheck    # ESLint（type-aware）+ tsc
+pnpm test                      # 协议单元测试 + 插件集成测试：env-server、ssh、adb（模拟设备）、租约、挂载映射
+pnpm build:server              # cargo 构建 crates/dsh-env-server，并放到 packages/plugin/bin/
+pnpm build:plugin              # packages/plugin/dist/index.js
+pnpm build:client              # packages/plugin/client.js
 ```
 
-`server/` 是 Rust 写的 `dsh-env-server`，子命令有 `serve`、`stdio`、`winuser create|delete|list|launch|grant`。Linux 静态二进制通过 `rust-lld` 交叉编译，不需要额外的工具链。
+`crates/dsh-env-server` 是 Rust 写的 `dsh-env-server`，子命令有 `serve`、`stdio`、`winuser create|delete|list|launch|grant`。Linux 静态二进制通过 `rust-lld` 交叉编译，不需要额外的工具链。
 
 ## 已知限制
 

@@ -20,24 +20,24 @@ Maximum frame length: 16 MiB + 64 KiB. Payload chunks for streams are at most 25
 The client sends first:
 
 ```json
-{"t":"hello","v":1,"token":"<secret or empty>","client":"dsh-plugin-environments/0.1.0"}
+{ "t": "hello", "v": 1, "token": "<secret or empty>", "client": "dsh-plugin-environments/0.1.0" }
 ```
 
 The server replies with either `{"t":"hello","v":1,"ok":true,"info":Info}` or `{"t":"hello","v":1,"ok":false,"error":{"code":"AUTH","message":"..."}}` and closes. A server started with `--token` rejects mismatched tokens (constant-time compare). A server started without a token (stdio mode) accepts any token.
 
 ```ts
 interface Info {
-  version: string          // server version
+  version: string // server version
   os: 'windows' | 'linux' | 'macos' | 'android' | string
   family: 'windows' | 'posix'
-  arch: string             // x86_64, aarch64, ...
+  arch: string // x86_64, aarch64, ...
   hostname: string
   user: string
-  home: string             // absolute
-  cwd: string              // server process cwd, absolute
+  home: string // absolute
+  cwd: string // server process cwd, absolute
   pathSep: '\\' | '/'
-  shell: string            // default shell executable (pwsh/powershell/cmd on windows, $SHELL or /bin/sh on posix)
-  caps: string[]           // e.g. ["fs","glob","grep","proc","pty","tcp","tcp-listen","udp","udp-listen","screenshot","input"]
+  shell: string // default shell executable (pwsh/powershell/cmd on windows, $SHELL or /bin/sh on posix)
+  caps: string[] // e.g. ["fs","glob","grep","proc","pty","tcp","tcp-listen","udp","udp-listen","screenshot","input"]
 }
 ```
 
@@ -58,34 +58,46 @@ All paths are absolute paths in the server's own spelling, or relative to `args.
 
 ### Filesystem
 
-| op | args | result / payload |
-|---|---|---|
-| `fs.stat` | `{path, follow?: boolean = true}` | `Stat \| null` (null = absent) |
-| `fs.readdir` | `{path}` | `{entries: DirEntry[]}` sorted by name |
-| `fs.read` | `{path, offset?: number = 0, length?: number, max?: number}` | result `{size, eof}`; payload = bytes. If `length` is omitted the whole file is read; if the file (or the requested window) exceeds `max` (default 16 MiB) → `ETOOBIG`. |
-| `fs.write` | `{path, mode: 'overwrite' \| 'create' \| 'append', atomic?: boolean = true, mkdirs?: boolean = false}` + payload | `Stat`. `create` fails with `EEXIST` if present. `atomic` writes a temp sibling then renames (ignored for `append`). |
-| `fs.mkdir` | `{path, recursive?: boolean}` | `{}` |
-| `fs.remove` | `{path, recursive?: boolean}` | `{}`; removing a missing path → `ENOENT` |
-| `fs.rename` | `{from, to, overwrite?: boolean = false}` | `{}` |
-| `fs.copy` | `{from, to, recursive?: boolean, overwrite?: boolean}` | `{}` (server-local copy) |
-| `fs.realpath` | `{path}` | `{path}` |
-| `fs.glob` | `{pattern, cwd, limit?: number = 1000, hidden?: boolean = false, gitignore?: boolean = true}` | `{paths: string[], truncated: boolean}`; paths relative to `cwd` using `/`, sorted by mtime desc then name |
-| `fs.grep` | `{pattern, cwd, path?, glob?, literal?: boolean, ignoreCase?: boolean, multiline?: boolean, limit?: number = 500, filesOnly?: boolean, hidden?: boolean, gitignore?: boolean = true}` | `{matches: {path, line, text}[], files: string[], truncated: boolean}`; `path` relative to `cwd` with `/`; text is trimmed to 500 chars |
-| `fs.readStream` | `{path}` | `{ch, size}`; then server sends `data` frames on `ch` and finally `eof` + `close` |
-| `fs.writeStream` | `{path, atomic?: boolean = true, mkdirs?: boolean}` | `{ch}`; client sends `data` frames then `eof`; server answers with `close {ch, result: Stat}` or `close {ch, error}` |
+| op               | args                                                                                                                                                                                  | result / payload                                                                                                                                                        |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fs.stat`        | `{path, follow?: boolean = true}`                                                                                                                                                     | `Stat \| null` (null = absent)                                                                                                                                          |
+| `fs.readdir`     | `{path}`                                                                                                                                                                              | `{entries: DirEntry[]}` sorted by name                                                                                                                                  |
+| `fs.read`        | `{path, offset?: number = 0, length?: number, max?: number}`                                                                                                                          | result `{size, eof}`; payload = bytes. If `length` is omitted the whole file is read; if the file (or the requested window) exceeds `max` (default 16 MiB) → `ETOOBIG`. |
+| `fs.write`       | `{path, mode: 'overwrite' \| 'create' \| 'append', atomic?: boolean = true, mkdirs?: boolean = false}` + payload                                                                      | `Stat`. `create` fails with `EEXIST` if present. `atomic` writes a temp sibling then renames (ignored for `append`).                                                    |
+| `fs.mkdir`       | `{path, recursive?: boolean}`                                                                                                                                                         | `{}`                                                                                                                                                                    |
+| `fs.remove`      | `{path, recursive?: boolean}`                                                                                                                                                         | `{}`; removing a missing path → `ENOENT`                                                                                                                                |
+| `fs.rename`      | `{from, to, overwrite?: boolean = false}`                                                                                                                                             | `{}`                                                                                                                                                                    |
+| `fs.copy`        | `{from, to, recursive?: boolean, overwrite?: boolean}`                                                                                                                                | `{}` (server-local copy)                                                                                                                                                |
+| `fs.realpath`    | `{path}`                                                                                                                                                                              | `{path}`                                                                                                                                                                |
+| `fs.glob`        | `{pattern, cwd, limit?: number = 1000, hidden?: boolean = false, gitignore?: boolean = true}`                                                                                         | `{paths: string[], truncated: boolean}`; paths relative to `cwd` using `/`, sorted by mtime desc then name                                                              |
+| `fs.grep`        | `{pattern, cwd, path?, glob?, literal?: boolean, ignoreCase?: boolean, multiline?: boolean, limit?: number = 500, filesOnly?: boolean, hidden?: boolean, gitignore?: boolean = true}` | `{matches: {path, line, text}[], files: string[], truncated: boolean}`; `path` relative to `cwd` with `/`; text is trimmed to 500 chars                                 |
+| `fs.readStream`  | `{path}`                                                                                                                                                                              | `{ch, size}`; then server sends `data` frames on `ch` and finally `eof` + `close`                                                                                       |
+| `fs.writeStream` | `{path, atomic?: boolean = true, mkdirs?: boolean}`                                                                                                                                   | `{ch}`; client sends `data` frames then `eof`; server answers with `close {ch, result: Stat}` or `close {ch, error}`                                                    |
 
 ```ts
-interface Stat { type: 'file' | 'dir' | 'symlink' | 'other'; size: number; mtimeMs: number; mode: number; ino?: string; dev?: string }
-interface DirEntry { name: string; type: 'file' | 'dir' | 'symlink' | 'other'; size?: number; mtimeMs?: number }
+interface Stat {
+  type: 'file' | 'dir' | 'symlink' | 'other'
+  size: number
+  mtimeMs: number
+  mode: number
+  ino?: string
+  dev?: string
+}
+interface DirEntry {
+  name: string
+  type: 'file' | 'dir' | 'symlink' | 'other'
+  size?: number
+  mtimeMs?: number
+}
 ```
 
 ### Processes
 
-| op | args | result |
-|---|---|---|
-| `proc.spawn` | `{argv?: string[], command?: string, cwd?, env?: Record<string,string \| null>, clearEnv?: boolean, pty?: {rows, cols}}` | `{ch, pid}` |
-| `proc.resize` | `{ch, rows, cols}` | `{}` |
-| `proc.kill` | `{ch, signal?: 'TERM' \| 'KILL' \| 'INT'}` | `{}` (kills the whole process tree; Windows: job object) |
+| op            | args                                                                                                                     | result                                                   |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- |
+| `proc.spawn`  | `{argv?: string[], command?: string, cwd?, env?: Record<string,string \| null>, clearEnv?: boolean, pty?: {rows, cols}}` | `{ch, pid}`                                              |
+| `proc.resize` | `{ch, rows, cols}`                                                                                                       | `{}`                                                     |
+| `proc.kill`   | `{ch, signal?: 'TERM' \| 'KILL' \| 'INT'}`                                                                               | `{}` (kills the whole process tree; Windows: job object) |
 
 Exactly one of `argv` / `command` is required. `command` runs through the platform shell (`/bin/sh -c` on posix, `cmd.exe /d /s /c` on windows unless the server's configured shell is pwsh, then `pwsh -NoProfile -Command`). `env` entries with `null` remove a variable.
 
@@ -93,30 +105,30 @@ Channel data: stdin is client→server `data {ch, fd: 0}` and `eof {ch, fd: 0}`.
 
 ### Network tunnels
 
-| op | args | result |
-|---|---|---|
-| `net.connect` | `{host, port, proto: 'tcp' \| 'udp'}` | `{ch}` – the server connected (tcp) or bound an ephemeral socket "connected" to the target (udp). Bytes on `ch` are the TCP stream; for udp every `data` frame is exactly one datagram. |
-| `net.listen` | `{host, port, proto: 'tcp' \| 'udp'}` | `{id, port}` – actual bound port (port 0 = ephemeral). |
-| `net.unlisten` | `{id}` | `{}` – also closes channels accepted by it |
+| op             | args                                  | result                                                                                                                                                                                  |
+| -------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `net.connect`  | `{host, port, proto: 'tcp' \| 'udp'}` | `{ch}` – the server connected (tcp) or bound an ephemeral socket "connected" to the target (udp). Bytes on `ch` are the TCP stream; for udp every `data` frame is exactly one datagram. |
+| `net.listen`   | `{host, port, proto: 'tcp' \| 'udp'}` | `{id, port}` – actual bound port (port 0 = ephemeral).                                                                                                                                  |
+| `net.unlisten` | `{id}`                                | `{}` – also closes channels accepted by it                                                                                                                                              |
 
 For a tcp listener the server sends `{"t":"accept","listener":id,"ch":N,"peer":"ip:port"}` for each accepted connection; the channel then behaves like a `net.connect` channel. For a udp listener the server allocates one channel per distinct peer address (with an `accept` frame the first time) and every datagram from that peer becomes a `data` frame; datagrams the client writes on that channel are sent back to that peer. Idle udp peer channels close after 120 s.
 
 ### System
 
-| op | args | result |
-|---|---|---|
-| `sys.info` | `{}` | `Info` |
-| `sys.screenshot` | `{display?: number}` | result `{width, height, format: 'png'}`; payload = PNG bytes (cap `screenshot`) |
-| `sys.input` | `{actions: InputAction[]}` | `{}` (cap `input`) |
+| op               | args                       | result                                                                          |
+| ---------------- | -------------------------- | ------------------------------------------------------------------------------- |
+| `sys.info`       | `{}`                       | `Info`                                                                          |
+| `sys.screenshot` | `{display?: number}`       | result `{width, height, format: 'png'}`; payload = PNG bytes (cap `screenshot`) |
+| `sys.input`      | `{actions: InputAction[]}` | `{}` (cap `input`)                                                              |
 
 ```ts
 type InputAction =
-  | {kind: 'move', x: number, y: number}
-  | {kind: 'click', x?: number, y?: number, button?: 'left' | 'right' | 'middle', double?: boolean}
-  | {kind: 'scroll', x?: number, y?: number, dx?: number, dy?: number}
-  | {kind: 'type', text: string}
-  | {kind: 'key', key: string}            // e.g. "enter", "ctrl+c", "alt+f4"
-  | {kind: 'wait', ms: number}
+  | { kind: 'move'; x: number; y: number }
+  | { kind: 'click'; x?: number; y?: number; button?: 'left' | 'right' | 'middle'; double?: boolean }
+  | { kind: 'scroll'; x?: number; y?: number; dx?: number; dy?: number }
+  | { kind: 'type'; text: string }
+  | { kind: 'key'; key: string } // e.g. "enter", "ctrl+c", "alt+f4"
+  | { kind: 'wait'; ms: number }
 ```
 
 ## Channels and flow control
