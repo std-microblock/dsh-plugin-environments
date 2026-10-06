@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite, BufWriter};
+use tokio::io::{AsyncRead, BufWriter};
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::AbortHandle;
 
@@ -343,15 +343,13 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Serve one connection until it closes.
-pub async fn serve_connection<R, W>(
-    mut reader: R,
-    writer: W,
+///
+/// Takes boxed halves so the (large) session state machine is instantiated only once.
+pub async fn serve_connection(
+    mut reader: crate::transport::BoxRead,
+    writer: crate::transport::BoxWrite,
     opts: ConnOptions,
-) -> std::io::Result<()>
-where
-    R: AsyncRead + Unpin + Send + 'static,
-    W: AsyncWrite + Unpin + Send + 'static,
-{
+) -> std::io::Result<()> {
     let mut writer = BufWriter::new(writer);
     let idle = opts.idle_timeout;
     async fn read_next<R: AsyncRead + Unpin>(

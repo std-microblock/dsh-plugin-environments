@@ -1,6 +1,15 @@
-# dsh environment protocol (v1)
+# dsh environment protocol (v2)
 
-The wire protocol between the DSH host plugin (client) and `dsh-env-server` (server). One logical connection runs over any reliable byte stream: TCP, the server's stdin/stdout (`--stdio`), or an SSH exec channel.
+The wire protocol between the DSH host plugin (client) and `dsh-env-server` (server). One logical connection runs over any reliable byte stream:
+
+| transport                                                | how it is reached                                                    | layers below the frames                  |
+| -------------------------------------------------------- | -------------------------------------------------------------------- | ---------------------------------------- |
+| stdio (`stdio`)                                          | local child process, or an SSH exec channel (fallback)               | none (the pipe is private to the parent) |
+| TCP, plugin dials (`serve --listen h:p`)                 | `server` environments, SSH port forwarding, Windows-account servers  | [secure channel](#secure-channel)        |
+| WebSocket, plugin dials (`serve --listen ws://h:p/path`) | `server` environments (`ws://`, or `wss://` via a TLS reverse proxy) | [WebSocket](#websocket) + secure channel |
+| TCP / WebSocket, server dials (`connect`)                | `reverse` environments ([reverse connections](#reverse-connections)) | (WebSocket +) secure channel             |
+
+Every network transport is authenticated and encrypted with the environment's pre-shared secret; there is no plaintext network mode. v2 differs from v1 only in that layer (frames and ops are unchanged); a v2 server answers `hello` with `"v":2`.
 
 ## Framing
 
@@ -20,10 +29,10 @@ Maximum frame length: 16 MiB + 64 KiB. Payload chunks for streams are at most 25
 The client sends first:
 
 ```json
-{ "t": "hello", "v": 1, "token": "<secret or empty>", "client": "dsh-plugin-environments/0.1.0" }
+{ "t": "hello", "v": 2, "token": "", "client": "dsh-plugin-environments/0.1.0" }
 ```
 
-The server replies with either `{"t":"hello","v":1,"ok":true,"info":Info}` or `{"t":"hello","v":1,"ok":false,"error":{"code":"AUTH","message":"..."}}` and closes. A server started with `--token` rejects mismatched tokens (constant-time compare). A server started without a token (stdio mode) accepts any token.
+The server replies with either `{"t":"hello","v":2,"ok":true,"info":Info}` or `{"t":"hello","v":2,"ok":false,"error":{"code":"AUTH","message":"..."}}` and closes. On network transports the peer was already authenticated by the secure channel, so `token` is ignored; stdio servers accept any token. Before its `hello` a connection may receive `ping` frames (spare reverse connections are kept alive that way); the server answers them with `pong`.
 
 ```ts
 interface Info {
@@ -150,3 +159,55 @@ Each direction of each (ch, fd) has a send window that starts at 1 MiB. A sender
 ## Keepalive
 
 Either side may send `{"t":"ping","n":k}`; the peer answers `{"t":"pong","n":k}`. The client pings every 15 s; a server in TCP mode drops a connection that is silent for 60 s. When a connection ends, the server kills every process it spawned for it, closes its listeners and sockets and deletes unfinished atomic-write temp files.
+
+## Secure channel
+
+Network transports run this layer directly on the TCP stream (or on the WebSocket byte stream). It gives mutual authentication and encryption from a pre-shared secret, without certificates. The **initiator** is whoever dialed (the plugin for `serve`, the server for `connect`), the **responder** is whoever listened. The secret is the UTF-8 bytes of the configured token (the plugin generates 256-bit random secrets, base64url); it is never sent.
+
+```
+initiator → responder   "DSHS" | 0x01 | nonce_i[32] | idLen u8 | id[idLen]
+responder → initiator   "DSHS" | 0x01 | nonce_r[32] | confirm_r[32]
+initiator → responder   confirm_i[32]
+
+okm  = HKDF-SHA256(salt = nonce_i ‖ nonce_r, ikm = secret, info = "dsh-env secure v1\0" ‖ id, L = 128)
+k_i2r = okm[0..32]   k_r2i = okm[32..64]   m_i = okm[64..96]   m_r = okm[96..128]
+th   = SHA-256(initiator hello ‖ "DSHS" ‖ 0x01 ‖ nonce_r)
+confirm_r = HMAC-SHA256(m_r, "responder" ‖ th)
+confirm_i = HMAC-SHA256(m_i, "initiator" ‖ th)
+```
+
+- `id` selects the secret on the responder: the environment id on reverse connections; empty (ignored) when the plugin dials a server.
+- The responder proves knowledge of the secret first (`confirm_r`); the initiator aborts on mismatch (`AUTH`), then proves it (`confirm_i`). A responder that does not know `id`, or sees a wrong `confirm_i`, closes the connection without explanation. Comparisons are constant-time. The handshake must finish within 15 s.
+- Both nonces are fresh random values, so keys are unique per connection: replaying a recorded handshake or records against a new connection fails key confirmation / authentication.
+
+After the handshake every byte travels in records:
+
+```
+u32 BE len            // ciphertext length incl. the 16-byte tag; 16 ≤ len ≤ 65536 + 16
+[len] ChaCha20-Poly1305(key = k_i2r or k_r2i, nonce = 0u32 ‖ seq u64 BE, aad = the 4 len bytes)
+```
+
+`seq` starts at 0 per direction and increments per record, so reordered, replayed, dropped or truncated records fail authentication; any failure closes the connection. Records carry an arbitrary slice of the frame byte stream (frames may span records). There is no forward secrecy: anyone holding the secret can decrypt recorded traffic, so rotate secrets that may have leaked.
+
+Known-answer vectors (secret `s3cret`, nonce_i = 32 × 0x01, nonce_r = 32 × 0x02, id `env1`, th = SHA-256("transcript")) are checked by both implementations (`crates/dsh-env-server/src/secure.rs`, `packages/protocol/test/secure.test.ts`).
+
+## WebSocket
+
+`ws://host:port/path` endpoints use RFC 6455 with only what the protocol needs: a `GET` upgrade (the server checks the path and answers `101` with `Sec-WebSocket-Accept`, else `404`/`426`), binary frames whose payloads form one byte stream (fragmentation allowed), ping → pong, and close. Client frames are masked, server frames are not; text frames and extensions are rejected; the maximum frame payload is 16 MiB + 64 KiB. The secure channel runs inside, so a TLS-terminating reverse proxy (`wss://` on the plugin side) sees only ciphertext. `dsh-env-server` implements no TLS itself.
+
+## Reverse connections
+
+`dsh-env-server connect <tcp://host:port | ws://host:port/path> --id <envId> --token-file <path>` dials the plugin's listener (opt-in; TCP and/or WebSocket, configured in the GUI or the plugin config) and runs the secure channel as initiator with `id = envId`. Once authenticated the connection is a **spare**: the plugin keeps it alive with `ping` frames until an environment is opened, then sends `hello` on it. As soon as the server sees that `hello` it dials the next spare, so there is normally exactly one idle connection per running `connect` (at most 32 sessions). Failed dials and handshakes are retried with exponential backoff (1 s … 60 s). The environment counts as connected while a spare or an active session exists.
+
+## Server lifetime flags
+
+| flag            | effect                                                                                                                    |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `--token-stdin` | read the secret from the first line of stdin (`--token-file <path>` reads a file; avoid `--token`, it is visible in `ps`) |
+| `--lifeline`    | exit when stdin reaches EOF (the parent or the SSH channel went away)                                                     |
+| `--exit-idle`   | `serve`: exit when the last session ends (after at least one authenticated session)                                       |
+| `--once`        | `serve`: exit after the first connection ends                                                                             |
+
+`serve` prints `DSH_ENV_SERVER pid=<pid>`, for WebSocket listeners `DSH_ENV_SERVER url=ws://<addr><path>`, then `DSH_ENV_SERVER listening=<addr>`; without a secret it generates one and prints `DSH_ENV_SERVER token=<secret>` first. Shutting down (lifeline, exit-idle, end of `connect`) closes every session, which kills their process trees, before the process exits.
+
+SSH environments start `serve --listen 127.0.0.1:0 --token-stdin --lifeline --exit-idle` over an exec channel with a fresh secret per start, reach it with a `direct-tcpip` forward and run the secure channel over that; other local users can reach the loopback port but cannot authenticate. When the SSH server refuses forwarding the plugin falls back to `stdio` over the exec channel.

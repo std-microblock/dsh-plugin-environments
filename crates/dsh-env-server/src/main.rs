@@ -73,46 +73,57 @@ fn main() {
             once,
             exit_idle,
             lifeline,
-        } => run(lifeline, async move |life| {
-            let listen = transport::Endpoint::parse(&listen).map_err(invalid_input)?;
-            let secret = match transport::read_secret(secret.token, secret.file, secret.stdin)? {
-                Some(s) => s,
-                None => {
-                    let mut bytes = [0u8; 32];
-                    util::random_bytes(&mut bytes);
-                    let t = util::hex(&bytes);
-                    println!("DSH_ENV_SERVER token={t}");
-                    t
-                }
-            };
-            let opts = transport::ServeOptions {
-                listen,
-                secret,
-                cwd: resolve_cwd(cwd),
-                once,
-                exit_idle,
-            };
-            transport::serve(opts, life).await
-        }),
+        } => run(
+            lifeline,
+            Box::new(move |life| {
+                Box::pin(async move {
+                    let listen = transport::Endpoint::parse(&listen).map_err(invalid_input)?;
+                    let secret =
+                        match transport::read_secret(secret.token, secret.file, secret.stdin)? {
+                            Some(s) => s,
+                            None => {
+                                let mut bytes = [0u8; 32];
+                                util::random_bytes(&mut bytes);
+                                let t = util::hex(&bytes);
+                                println!("DSH_ENV_SERVER token={t}");
+                                t
+                            }
+                        };
+                    let opts = transport::ServeOptions {
+                        listen,
+                        secret,
+                        cwd: resolve_cwd(cwd),
+                        once,
+                        exit_idle,
+                    };
+                    transport::serve(opts, life).await
+                })
+            }),
+        ),
         Cmd::Connect {
             url,
             id,
             secret,
             cwd,
             lifeline,
-        } => run(lifeline, async move |life| {
-            let url = transport::Endpoint::parse(&url).map_err(invalid_input)?;
-            let secret = transport::read_secret(secret.token, secret.file, secret.stdin)?
-                .ok_or_else(|| invalid_input("a secret is required".into()))?;
-            let opts = transport::ConnectOptions {
-                url,
-                secret,
-                id,
-                cwd: resolve_cwd(cwd),
-                max_sessions: 32,
-            };
-            transport::connect(opts, life).await
-        }),
+        } => run(
+            lifeline,
+            Box::new(move |life| {
+                Box::pin(async move {
+                    let url = transport::Endpoint::parse(&url).map_err(invalid_input)?;
+                    let secret = transport::read_secret(secret.token, secret.file, secret.stdin)?
+                        .ok_or_else(|| invalid_input("a secret is required".into()))?;
+                    let opts = transport::ConnectOptions {
+                        url,
+                        secret,
+                        id,
+                        cwd: resolve_cwd(cwd),
+                        max_sessions: 32,
+                    };
+                    transport::connect(opts, life).await
+                })
+            }),
+        ),
         Cmd::Stdio { cwd } => {
             let rt = runtime();
             let cwd = resolve_cwd(cwd);
@@ -124,7 +135,12 @@ fn main() {
                     shutdown: None,
                     on_hello: None,
                 };
-                session::serve_connection(tokio::io::stdin(), tokio::io::stdout(), opts).await
+                session::serve_connection(
+                    Box::new(tokio::io::stdin()),
+                    Box::new(tokio::io::stdout()),
+                    opts,
+                )
+                .await
             });
             rt.shutdown_timeout(Duration::from_millis(500));
             match r {
@@ -145,10 +161,9 @@ fn invalid_input(msg: String) -> std::io::Error {
 
 /// Run a network command, then shut every session down (killing their process trees) before
 /// the process exits.
-fn run<F>(lifeline: bool, f: impl FnOnce(Arc<transport::Lifetime>) -> F) -> i32
-where
-    F: Future<Output = std::io::Result<()>>,
-{
+type CmdFuture = std::pin::Pin<Box<dyn Future<Output = std::io::Result<()>>>>;
+
+fn run(lifeline: bool, f: Box<dyn FnOnce(Arc<transport::Lifetime>) -> CmdFuture>) -> i32 {
     let rt = runtime();
     let code = rt.block_on(async move {
         let life = transport::Lifetime::new();
