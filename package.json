@@ -11,8 +11,11 @@
   "scripts": {
     "build": "node scripts/build.ts",
     "build:server": "node scripts/build.ts --server",
+    "build:server:dist": "node scripts/build-server.ts --dist",
     "build:client": "node scripts/build.ts --client",
     "build:plugin": "node scripts/build.ts --plugin",
+    "package": "node scripts/package.ts",
+    "release:version": "node scripts/release-version.ts",
     "typecheck": "tsc -p tsconfig.json && pnpm -r typecheck",
     "lint": "eslint .",
     "format": "prettier --write .",

@@ -1,0 +1,100 @@
+name: Release
+
+# Push a tag `vX.Y.Z` (matching packages/plugin/package.json; see CONTRIBUTING.md) to:
+#  - build and test every target with the pinned nightly (no stable fallback),
+#  - create the GitHub release with the plugin tarball, raw per-target server binaries and SHA256SUMS,
+#  - commit the package contents to the `release` branch (one commit per version, tagged
+#    `release-vX.Y.Z`) so `dsh plugin add github:<owner>/<repo>#release` installs the latest release.
+# Pre-release tags (`vX.Y.Z-rc.1`) get a pre-release and a `release-鈥 tag but do not move `release`.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+      - name: Tag matches every recorded version
+        run: node scripts/release-version.ts --check "$GITHUB_REF_NAME"
+
+  build:
+    needs: verify
+    uses: ./.github/workflows/build.yml
+    with:
+      strict: true
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: package
+          path: out
+      - name: Commit package to the release branch
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          tree_dir="$RUNNER_TEMP/release-tree"
+          mkdir -p "$tree_dir"
+          tar -xzf "out/dsh-plugin-environments-$version.tgz" -C "$tree_dir" --strip-components=1
+          # Stage the unpacked package as a whole tree in a scratch index (no checkout of `release`).
+          export GIT_INDEX_FILE="$RUNNER_TEMP/release.index"
+          git -C "$tree_dir" --git-dir="$PWD/.git" --work-tree=. add -A -f .
+          tree=$(git write-tree)
+          parent=()
+          if git ls-remote --exit-code --heads origin release > /dev/null; then
+            git fetch --depth=1 origin release
+            parent=(-p FETCH_HEAD)
+          fi
+          commit=$(git commit-tree "$tree" "${parent[@]}" \
+            -m "dsh-plugin-environments $version" \
+            -m "Packaged from $GITHUB_SHA ($TAG). Install: dsh plugin add github:$GITHUB_REPOSITORY#release-$TAG")
+          refs=("$commit:refs/tags/release-$TAG")
+          if [[ "$TAG" != *-* ]]; then refs+=("$commit:refs/heads/release"); fi
+          git push origin "${refs[@]}"
+      - name: Create GitHub release
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/dsh-plugin-environments-$version.tgz"
+          # shellcheck disable=SC2016 # backticks are Markdown
+          notes=$(printf '%s\n' \
+            '## Install' \
+            '' \
+            '```sh' \
+            "dsh plugin add $url" \
+            "# or: dsh plugin add github:$GITHUB_REPOSITORY#release-$TAG" \
+            '```' \
+            '' \
+            '`dsh-env-server-*.gz` are the raw server binaries (also inside the plugin package) for running' \
+            '`dsh-env-server serve` on other machines; verify downloads with `SHA256SUMS`.')
+          flags=()
+          if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$TAG" out/*.tgz out/*.gz out/SHA256SUMS \
+            --verify-tag --title "$TAG" --notes "$notes" --generate-notes "${flags[@]}"

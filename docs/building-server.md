@@ -24,7 +24,7 @@ rustup target add x86_64-pc-windows-msvc x86_64-unknown-linux-musl \
   i686-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin
 
 # nightly (optional, for the smaller `dist` build)
-rustup toolchain install nightly --profile minimal -c rust-src
+rustup toolchain install nightly --profile minimal -c rust-src   # CI: the pinned one, see below
 rustup target add --toolchain nightly x86_64-unknown-linux-musl \
   i686-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin
 ```
@@ -82,27 +82,43 @@ cargo +nightly build --profile dist --target <triple> \
 
 The alias is inert on stable — plain `cargo build --release` keeps working.
 
-Pin the nightly in CI (e.g. `nightly-2026-10-05`, the one these numbers were
-measured with) since `-Z` flags can change; fall back to the stable build if
-the nightly build fails.
-
-### Per-target CI commands
+The nightly is pinned in **`scripts/dist-toolchain.txt`** (currently
+`nightly-2026-10-06`, i.e. rustc 1.101.0-nightly 2026-10-05, the one these numbers
+were measured with), since `-Z` flags can change. CI and `scripts/build-server.ts`
+read it from there; it is the only place to change it.
 
 ```sh
-# Windows runner (MSVC)
-cargo +nightly dist --target x86_64-pc-windows-msvc
-
-# Linux (or any) runner
-cargo +nightly dist --target x86_64-unknown-linux-musl
-cargo +nightly dist --target i686-unknown-linux-musl
-cargo +nightly dist --target aarch64-unknown-linux-musl
-
-# macOS runner
-cargo +nightly dist --target aarch64-apple-darwin
+rustup toolchain install nightly-2026-10-06 --profile minimal -c rust-src \
+  -t x86_64-pc-windows-msvc,x86_64-unknown-linux-musl,i686-unknown-linux-musl,aarch64-unknown-linux-musl
 ```
 
-Replace `+nightly dist` with `build --release` for the stable variant
-(output under `release/` instead of `dist/`).
+### Per-target commands (CI)
+
+CI (`.github/workflows/build.yml`) builds each target on its own runner with the
+build script, which runs `cargo +<pinned nightly> dist --locked --target <triple>`
+from the crate directory (with `RUSTFLAGS` cleared) and stages the result as
+`<out>/<target>/dsh-env-server[.exe]`:
+
+```sh
+node scripts/build-server.ts --dist --target win32-x64 --out bin     # windows runner (MSVC)
+node scripts/build-server.ts --dist --target linux-x64 --out bin     # ubuntu (rust-lld)
+node scripts/build-server.ts --dist --target linux-ia32 --out bin    # ubuntu (rust-lld)
+node scripts/build-server.ts --dist --target linux-arm64 --out bin   # ubuntu (rust-lld)
+node scripts/build-server.ts --dist --target darwin-arm64 --out bin  # macos-15 (arm64)
+```
+
+`--fallback` (used by CI, not by releases) falls back to the stable
+`cargo build --release` with a warning annotation if the nightly build fails, so
+a broken nightly cannot block development but can never silently produce a
+bigger release. Without `--dist` the script does the stable build directly
+(output under `release/` instead of `dist/`). Locally, `pnpm build:server:dist`
+(default targets: host + the three Linux musl targets) stages into
+`packages/plugin/bin/`.
+
+The release package stores each binary Brotli-compressed
+(`bin/<target>/dsh-env-server[.exe].br`, quality 11, 16 MiB window;
+`scripts/package.ts`), which `packages/plugin/src/server-binary.ts` unpacks into
+`~/.dsh/cache/dsh-plugin-environments/bin/<target>-<hash>/` on first use.
 
 ## Sizes
 
@@ -201,5 +217,6 @@ cargo clippy --all-targets --target x86_64-unknown-linux-musl -- -D warnings
 cargo clippy --all-targets --target aarch64-apple-darwin -- -D warnings
 cargo test
 # end-to-end (from repo root), against any built binary:
-DSH_ENV_SERVER_BIN=crates/dsh-env-server/target/<triple>/dist/dsh-env-server node --test test/env-server.test.js
+cd packages/plugin
+DSH_ENV_SERVER_BIN=../../crates/dsh-env-server/target/<triple>/dist/dsh-env-server node --test test/env-server.test.ts
 ```
