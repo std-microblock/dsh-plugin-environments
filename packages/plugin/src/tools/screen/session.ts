@@ -141,9 +141,8 @@ export class ScreenSession {
   /** Window followed by screenshots that do not name a target (after a window screenshot). */
   window: WindowInfo | undefined = undefined
   maxEdge = DEFAULT_MAX_EDGE
+  /** Elements of the latest `ui` listing (physical bounds, so they survive re-screenshots). */
   elements: UiElement[] = []
-  /** Frame the elements were listed in (to detect stale indexes). */
-  elementsAt = 0
 
   readonly env: Environment
 

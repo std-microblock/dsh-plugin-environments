@@ -81,7 +81,11 @@ test('JPEG encoder structure', () => {
     [...Array(64).keys()],
   )
   assert.deepEqual(ZIGZAG.slice(0, 10), [0, 1, 8, 16, 9, 2, 3, 10, 17, 24])
-  for (const t of [DC_LUM, DC_CHR, AC_LUM, AC_CHR]) assert.equal(t.bits.reduce((a, b) => a + b, 0), t.vals.length)
+  for (const t of [DC_LUM, DC_CHR, AC_LUM, AC_CHR])
+    assert.equal(
+      t.bits.reduce((a, b) => a + b, 0),
+      t.vals.length,
+    )
   const jpg = encodeJpeg(gradient(33, 17), 80)
   assert.deepEqual([...jpg.subarray(0, 2)], [0xff, 0xd8])
   assert.deepEqual([...jpg.subarray(-2)], [0xff, 0xd9])
@@ -165,6 +169,7 @@ class FakeEnv extends Environment {
       stdout: Buffer.from(this.execOut),
       stderr: Buffer.alloc(0),
       truncated: false,
+      timedOut: false,
     })
   }
 }
@@ -195,7 +200,10 @@ test('screen session: downscale, zoom and action mapping', async () => {
     [199, 99],
   ])
   s.elements = [{ index: 0, depth: 0, role: 'Edit', bounds: { x: 10, y: 10, width: 20, height: 10 }, flags: [] }]
-  const typed = await toEnvActions(s, [{ kind: 'type', element: 0, text: 'hi' }, { kind: 'long_press', x: 10, y: 10 }])
+  const typed = await toEnvActions(s, [
+    { kind: 'type', element: 0, text: 'hi' },
+    { kind: 'long_press', x: 10, y: 10 },
+  ])
   assert.deepEqual(
     typed.map(a => a.kind),
     ['click', 'wait', 'type', 'mouse_down', 'wait', 'mouse_up'],
@@ -266,7 +274,10 @@ test('android input commands', () => {
   assert.equal(keyCommand('power', { holdMs: 1000 }), 'input keyevent --longpress 26')
   const screen = { width: 1000, height: 2000 }
   assert.equal(actionScript({ kind: 'click', x: 10.4, y: 20.6 }, screen), 'input tap 10 21')
-  assert.match(actionScript({ kind: 'click', x: 1, y: 2, count: 2 }, screen), /^input tap 1 2 & sleep 0\.12; input tap 1 2; wait$/)
+  assert.match(
+    actionScript({ kind: 'click', x: 1, y: 2, count: 2 }, screen),
+    /^input tap 1 2 & sleep 0\.12; input tap 1 2; wait$/,
+  )
   assert.equal(actionScript({ kind: 'long_press', x: 1, y: 2 }, screen), 'input swipe 1 2 1 2 800')
   assert.equal(
     actionScript({ kind: 'swipe', x: 1, y: 2, x2: 3, y2: 4, durationMs: 100 }, screen),
@@ -274,7 +285,18 @@ test('android input commands', () => {
   )
   assert.equal(actionScript({ kind: 'drag', x: 1, y: 2, x2: 3, y2: 4 }, screen), 'input draganddrop 1 2 3 4 800')
   assert.match(
-    actionScript({ kind: 'drag', path: [[0, 0], [5, 5], [9, 9]], durationMs: 200 }, screen),
+    actionScript(
+      {
+        kind: 'drag',
+        path: [
+          [0, 0],
+          [5, 5],
+          [9, 9],
+        ],
+        durationMs: 200,
+      },
+      screen,
+    ),
     /^input motionevent DOWN 0 0; sleep 0\.100; input motionevent MOVE 5 5; .*input motionevent UP 9 9$/,
   )
   // dy 2 = 20% of the height, finger moves up from 1200 to 800.
@@ -333,12 +355,102 @@ test('UI Automation request encoding, coordinate mapping and listing', async () 
     root: [0, 0, 500, 400],
     truncated: false,
     items: [
-      { d: 0, p: '', t: 'Window', n: 'App', id: '', c: '', r: [0, 0, 500, 400], en: true, off: false, foc: false, kf: false, pat: [], v: null, rid: [1] },
-      { d: 1, p: '/0', t: 'Button', n: 'OK', id: 'ok', c: '', r: [10, 10, 50, 20], en: true, off: false, foc: false, kf: true, pat: ['invoke'], v: null, rid: [2] },
-      { d: 2, p: '/0/0', t: 'Text', n: 'OK', id: '', c: '', r: [12, 12, 20, 10], en: true, off: false, foc: false, kf: false, pat: [], v: null, rid: [3] },
-      { d: 1, p: '/1', t: 'Edit', n: '', id: 'q', c: '', r: [10, 50, 200, 20], en: false, off: false, foc: true, kf: true, pat: 'value', v: 'abc', rid: 4 },
-      { d: 1, p: '/2', t: 'Text', n: 'gone', id: '', c: '', r: [0, 0, 1, 1], en: true, off: true, foc: false, kf: false, pat: null, v: null, rid: [5] },
-      { d: 1, p: '/3', t: 'Pane', n: '', id: '', c: '', r: null, en: true, off: false, foc: false, kf: false, pat: [], v: null, rid: [6] },
+      {
+        d: 0,
+        p: '',
+        t: 'Window',
+        n: 'App',
+        id: '',
+        c: '',
+        r: [0, 0, 500, 400],
+        en: true,
+        off: false,
+        foc: false,
+        kf: false,
+        pat: [],
+        v: null,
+        rid: [1],
+      },
+      {
+        d: 1,
+        p: '/0',
+        t: 'Button',
+        n: 'OK',
+        id: 'ok',
+        c: '',
+        r: [10, 10, 50, 20],
+        en: true,
+        off: false,
+        foc: false,
+        kf: true,
+        pat: ['invoke'],
+        v: null,
+        rid: [2],
+      },
+      {
+        d: 2,
+        p: '/0/0',
+        t: 'Text',
+        n: 'OK',
+        id: '',
+        c: '',
+        r: [12, 12, 20, 10],
+        en: true,
+        off: false,
+        foc: false,
+        kf: false,
+        pat: [],
+        v: null,
+        rid: [3],
+      },
+      {
+        d: 1,
+        p: '/1',
+        t: 'Edit',
+        n: '',
+        id: 'q',
+        c: '',
+        r: [10, 50, 200, 20],
+        en: false,
+        off: false,
+        foc: true,
+        kf: true,
+        pat: 'value',
+        v: 'abc',
+        rid: 4,
+      },
+      {
+        d: 1,
+        p: '/2',
+        t: 'Text',
+        n: 'gone',
+        id: '',
+        c: '',
+        r: [0, 0, 1, 1],
+        en: true,
+        off: true,
+        foc: false,
+        kf: false,
+        pat: null,
+        v: null,
+        rid: [5],
+      },
+      {
+        d: 1,
+        p: '/3',
+        t: 'Pane',
+        n: '',
+        id: '',
+        c: '',
+        r: null,
+        en: true,
+        off: false,
+        foc: false,
+        kf: false,
+        pat: [],
+        v: null,
+        rid: [6],
+      },
     ],
   })
   const { elements } = await listUia(env, win({ hwnd: 7, width: 500, height: 400 }))
