@@ -8,3 +8,4 @@ docs/research.md
 .cache/
 .tmp-scan/
 .work/
+out/

@@ -14,3 +14,6 @@ packages/plugin/client.js
 bin/
 client.js
 crates/*/target/
+
+# release packaging (pnpm package)
+out/
