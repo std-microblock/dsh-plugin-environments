@@ -151,16 +151,16 @@ export interface SpawnArgs {
   clearEnv?: boolean
   pty?: PtySize
   /**
-   * How the server treats pipe output on Windows (ignored elsewhere and for PTYs, whose output is
-   * always UTF-8): `auto` (default) passes valid UTF-8 through and transcodes legacy code-page
-   * text (e.g. GBK) to UTF-8; `utf8` additionally forces the child's console to UTF-8 (default
-   * for `command`); `raw` forwards the bytes untouched (binary output).
+   * How a Windows server treats pipe output (ignored on posix and for PTYs, whose output is
+   * always UTF-8): `utf8` (default) runs the child on a UTF-8 console and transcodes leftover
+   * code-page text; `auto` keeps the console code page and transcodes code-page (e.g. GBK) lines
+   * to UTF-8; `raw` forwards the bytes untouched (binary output). See docs/protocol.md.
    */
   encoding?: SpawnEncoding
 }
 
 /** See {@link SpawnArgs.encoding}. */
-export type SpawnEncoding = 'auto' | 'utf8' | 'raw'
+export type SpawnEncoding = 'utf8' | 'auto' | 'raw'
 
 /** Pointer/keyboard action for `sys.input`. */
 export type InputAction =
