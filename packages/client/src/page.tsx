@@ -19,13 +19,15 @@ function target(env: EnvView): string | undefined {
   const c = env.config
   switch (env.kind) {
     case 'server':
-      return `${c.host}:${c.port}`
+      return c.url || `${c.host}:${c.port}`
     case 'ssh':
       return `${c.username ? `${c.username}@` : ''}${c.host}${c.port && Number(c.port) !== 22 ? `:${c.port}` : ''}`
     case 'adb':
       return c.serial
     case 'winuser':
       return c.account
+    case 'reverse':
+      return env.connection?.peer
     default:
       return env.description
   }
@@ -43,6 +45,12 @@ function statusOf(env: EnvView, t: Translate): Status {
     const who = st.holders?.[0]?.title
     const queue = st.queue?.length ? ` · ${t('status.queue', { count: st.queue.length })}` : ''
     return { state: 'busy', text: (who ? t('status.busyBy', { who }) : t('status.busy')) + queue }
+  }
+  if (env.kind === 'reverse') {
+    const c = env.connection
+    return c && c.idle + c.active > 0
+      ? { state: 'ok', text: t('status.available'), ...(c.peer ? { detail: c.peer } : {}) }
+      : { state: 'idle', text: t('status.offline') }
   }
   if (env.lastError) return { state: 'error', text: t('status.failed'), detail: env.lastError }
   if (env.info || env.kind === 'local' || env.discovered) return { state: 'ok', text: t('status.available') }

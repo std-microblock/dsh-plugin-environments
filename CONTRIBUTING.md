@@ -21,7 +21,7 @@ packages/
       env/                Environment abstraction and implementations
         environment.ts    abstract base class: capabilities, tunnels, exec()
         types.ts          shared option/result/process types
-        server/           dsh-env-server backed environments (stdio child, TCP, tunnels)
+        server/           dsh-env-server backed environments (stdio child, TCP/WebSocket + secure channel, reverse hub, tunnels)
         ssh/              SSH: connection, server provisioning, plain SFTP/exec fallback
         adb/              Android over the adb CLI
         winuser/          dsh-managed Windows accounts

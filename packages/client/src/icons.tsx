@@ -188,6 +188,23 @@ export function IconSpinner({ size }: IconProps) {
   )
 }
 
+export function IconReverse({ size }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="M4 8h13M13 4l4 4-4 4M20 16H7M11 12l-4 4 4 4" />
+    </Svg>
+  )
+}
+
+export function IconCopy({ size }: IconProps) {
+  return (
+    <Svg size={size}>
+      <rect x="9" y="9" width="11" height="11" rx="2" />
+      <path d="M5 15V6a2 2 0 0 1 2-2h8" />
+    </Svg>
+  )
+}
+
 /** Chain link: marks a workspace bound to a remote environment. */
 export function IconLink({ size }: IconProps) {
   return (
@@ -204,6 +221,7 @@ export const KIND_ICON: Record<EnvKind, (props: IconProps) => React.JSX.Element>
   ssh: IconSsh,
   adb: IconPhone,
   winuser: IconWindows,
+  reverse: IconReverse,
 }
 
 export function KindIcon({ kind, size = 20 }: { kind: string | undefined; size?: number }) {

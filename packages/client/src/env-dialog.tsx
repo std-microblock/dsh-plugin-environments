@@ -3,11 +3,19 @@ import { useEffect, useState, type InputHTMLAttributes, type ReactNode } from 'r
 import { Button, Modal, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import { call, invalidate, messageOf } from './api.ts'
 import type { Translate } from './host-api.ts'
-import { IconCheck, IconSpinner, KindIcon } from './icons.tsx'
-import type { EnvConfigView, EnvKind, EnvView, TestResultView } from './types.ts'
+import { IconCheck, IconCopy, IconSpinner, KindIcon } from './icons.tsx'
+import type {
+  EnvConfigView,
+  EnvKind,
+  EnvView,
+  ReverseRevealView,
+  ReverseSettingsView,
+  ReverseStatusView,
+  TestResultView,
+} from './types.ts'
 
 type AddableKind = Exclude<EnvKind, 'local'>
-const ADDABLE: AddableKind[] = ['server', 'ssh', 'adb', 'winuser']
+const ADDABLE: AddableKind[] = ['server', 'ssh', 'reverse', 'adb', 'winuser']
 
 /** Same rule as the host's aliasFor(). */
 function aliasOf(name: string): string {
@@ -57,6 +65,7 @@ const DEFAULTS: Record<AddableKind, EnvConfigView> = {
   ssh: { port: 22 },
   adb: {},
   winuser: {},
+  reverse: {},
 }
 
 interface EnvDialogProps {
@@ -79,6 +88,7 @@ export function EnvDialog({ open, environment, platform, onClose, t }: EnvDialog
   const [exclusive, setExclusive] = useState(false)
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<{ ok: boolean; text: string } | undefined>(undefined)
+  const [reveal, setReveal] = useState<ReverseRevealView | undefined>(undefined)
 
   useEffect(() => {
     if (!open) return
@@ -90,6 +100,7 @@ export function EnvDialog({ open, environment, platform, onClose, t }: EnvDialog
     setConfig(environment?.config ?? {})
     setExclusive(environment?.exclusive ?? false)
     setResult(undefined)
+    setReveal(undefined)
     setBusy(false)
   }, [open, environment])
 
@@ -106,7 +117,8 @@ export function EnvDialog({ open, environment, platform, onClose, t }: EnvDialog
   const valid =
     kind &&
     name.trim() &&
-    ((kind === 'server' && config.host && config.port) ||
+    ((kind === 'server' && (config.url || (config.host && config.port))) ||
+      kind === 'reverse' ||
       (kind === 'ssh' && config.host) ||
       (kind === 'adb' && config.serial) ||
       (kind === 'winuser' && config.account))
@@ -116,6 +128,17 @@ export function EnvDialog({ open, environment, platform, onClose, t }: EnvDialog
     setResult(undefined)
     try {
       let saved: EnvView
+      if (kind === 'reverse') {
+        const r = await call<{ environment: EnvView; reverse?: ReverseRevealView }>('save', {
+          environment: { id: effectiveId, name: name.trim(), kind, description, exclusive, config },
+        })
+        invalidate()
+        setIdTouched(true)
+        setId(r.environment.id)
+        if (r.reverse) setReveal(r.reverse)
+        else onClose()
+        return
+      }
       if (kind === 'winuser' && !editing) {
         saved = (
           await call<{ environment: EnvView }>('winuser.create', { name: config.account, environmentName: name.trim() })
@@ -169,9 +192,15 @@ export function EnvDialog({ open, environment, platform, onClose, t }: EnvDialog
       <Button variant="ghost" onClick={onClose}>
         {t('action.cancel')}
       </Button>
-      <Button variant="primary" disabled={!valid || busy} onClick={() => void save()}>
-        {busy ? t('action.testing') : t('action.saveAndTest')}
-      </Button>
+      {reveal ? (
+        <Button variant="primary" onClick={onClose}>
+          {t('action.done')}
+        </Button>
+      ) : (
+        <Button variant="primary" disabled={!valid || busy} onClick={() => void save()}>
+          {busy ? t('action.testing') : kind === 'reverse' ? t('action.save') : t('action.saveAndTest')}
+        </Button>
+      )}
     </div>
   ) : undefined
 
@@ -225,6 +254,14 @@ export function EnvDialog({ open, environment, platform, onClose, t }: EnvDialog
 
           {kind === 'server' && (
             <>
+              <Field label={t('field.url')} hint={t('field.url.hint')}>
+                <TextInput
+                  value={config.url}
+                  onChange={v => set('url', v.trim())}
+                  placeholder="wss://env.example.com/dsh-env"
+                  mono
+                />
+              </Field>
               <div className="envx-field-row">
                 <Field label={t('field.host')}>
                   <TextInput value={config.host} onChange={v => set('host', v)} placeholder="192.168.1.20" mono />
@@ -244,9 +281,18 @@ export function EnvDialog({ open, environment, platform, onClose, t }: EnvDialog
               <div className="envx-help">
                 <strong>{t('server.help.title')}</strong>
                 {t('server.help.body')}
-                <code>dsh-env-server serve --listen 0.0.0.0:7461</code>
+                <code>dsh-env-server serve --listen 0.0.0.0:7461 --token-file token.txt</code>
+                <code>dsh-env-server serve --listen ws://127.0.0.1:7461/dsh-env --token-file token.txt</code>
               </div>
             </>
+          )}
+
+          {kind === 'reverse' && (
+            <ReverseSection environment={environment} envId={effectiveId} reveal={reveal} onReveal={setReveal} t={t}>
+              <Field label={t('field.cwd')}>
+                <TextInput value={config.cwd} onChange={v => set('cwd', v)} placeholder="/home/me/project" mono />
+              </Field>
+            </ReverseSection>
           )}
 
           {kind === 'ssh' && (
@@ -359,6 +405,230 @@ export function EnvDialog({ open, environment, platform, onClose, t }: EnvDialog
         </div>
       )}
     </Modal>
+  )
+}
+
+function CopyLine({ label, text, t }: { label: string; text: string; t: Translate }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <div className="envx-field">
+      <label>{label}</label>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+        <code
+          className="envx-input"
+          data-mono=""
+          style={{ flex: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-all', userSelect: 'all' }}
+        >
+          {text}
+        </code>
+        <Button
+          variant="ghost"
+          aria-label={t('action.copy')}
+          onClick={() => {
+            void navigator.clipboard?.writeText(text).then(() => {
+              setCopied(true)
+              setTimeout(() => setCopied(false), 1500)
+            })
+          }}
+        >
+          {copied ? <IconCheck size={16} /> : <IconCopy size={16} />}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+interface ReverseSectionProps {
+  environment: EnvView | undefined
+  envId: string
+  reveal: ReverseRevealView | undefined
+  onReveal: (r: ReverseRevealView) => void
+  t: Translate
+  children: ReactNode
+}
+
+/** Reverse environments: listener settings, connection state and the one-time connect command. */
+function ReverseSection({ environment, envId, reveal, onReveal, t, children }: ReverseSectionProps) {
+  const [status, setStatus] = useState<ReverseStatusView | undefined>(undefined)
+  const [settings, setSettings] = useState<ReverseSettingsView>({})
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | undefined>(undefined)
+
+  useEffect(() => {
+    let live = true
+    void call<{ status: ReverseStatusView; settings: ReverseSettingsView }>('reverse.settings', {}).then(
+      r => {
+        if (!live) return
+        setStatus(r.status)
+        setSettings(r.settings)
+      },
+      (e: unknown) => live && setError(messageOf(e)),
+    )
+    return () => {
+      live = false
+    }
+  }, [])
+
+  const apply = async () => {
+    setBusy(true)
+    setError(undefined)
+    try {
+      const r = await call<{ status: ReverseStatusView; settings: ReverseSettingsView }>('reverse.settings', {
+        settings,
+      })
+      setStatus(r.status)
+      setSettings(r.settings)
+      invalidate()
+    } catch (e) {
+      setError(messageOf(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const rotate = async () => {
+    setBusy(true)
+    setError(undefined)
+    try {
+      onReveal((await call<{ reverse: ReverseRevealView }>('reverse.rotate', { id: envId })).reverse)
+      invalidate()
+    } catch (e) {
+      setError(messageOf(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const listenerText = (l: ReverseStatusView['tcp'] | undefined) =>
+    !l?.enabled ? t('reverse.listener.off') : l.listening ? t('reverse.listener.on', { port: l.port }) : (l.error ?? '')
+  const conn = environment?.connection
+  const tcp = settings.tcp ?? {}
+  const ws = settings.ws ?? {}
+
+  return (
+    <>
+      {children}
+      <div className="envx-help">
+        <strong>{t('reverse.listener.title')}</strong>
+        {t('reverse.listener.body')}
+      </div>
+      <div className="envx-switch-row">
+        <div>
+          <span>TCP</span>
+          <small>{listenerText(status?.tcp)}</small>
+        </div>
+        <Switch
+          checked={!!tcp.enabled}
+          onChange={v => setSettings(s => ({ ...s, tcp: { ...s.tcp, enabled: v } }))}
+          label="TCP"
+        />
+      </div>
+      {tcp.enabled && (
+        <div className="envx-field-row" data-even="">
+          <Field label={t('reverse.bind')}>
+            <TextInput
+              value={tcp.host}
+              onChange={v => setSettings(s => ({ ...s, tcp: { ...s.tcp, host: v } }))}
+              placeholder="0.0.0.0"
+              mono
+            />
+          </Field>
+          <Field label={t('field.port')}>
+            <TextInput
+              value={tcp.port}
+              onChange={v => setSettings(s => ({ ...s, tcp: { ...s.tcp, port: Number(v.replace(/\D/g, '')) } }))}
+              inputMode="numeric"
+              placeholder="7462"
+              mono
+            />
+          </Field>
+        </div>
+      )}
+      <div className="envx-switch-row">
+        <div>
+          <span>WebSocket</span>
+          <small>{listenerText(status?.ws)}</small>
+        </div>
+        <Switch
+          checked={!!ws.enabled}
+          onChange={v => setSettings(s => ({ ...s, ws: { ...s.ws, enabled: v } }))}
+          label="WebSocket"
+        />
+      </div>
+      {ws.enabled && (
+        <div className="envx-field-row">
+          <Field label={t('reverse.bind')}>
+            <TextInput
+              value={ws.host}
+              onChange={v => setSettings(s => ({ ...s, ws: { ...s.ws, host: v } }))}
+              placeholder="0.0.0.0"
+              mono
+            />
+          </Field>
+          <Field label={t('field.port')}>
+            <TextInput
+              value={ws.port}
+              onChange={v => setSettings(s => ({ ...s, ws: { ...s.ws, port: Number(v.replace(/\D/g, '')) } }))}
+              inputMode="numeric"
+              placeholder="7463"
+              mono
+            />
+          </Field>
+          <Field label={t('reverse.path')}>
+            <TextInput
+              value={ws.path}
+              onChange={v => setSettings(s => ({ ...s, ws: { ...s.ws, path: v } }))}
+              placeholder="/dsh-env"
+              mono
+            />
+          </Field>
+        </div>
+      )}
+      <Field label={t('reverse.publicHost')} hint={t('reverse.publicHost.hint', { host: status?.publicHost ?? '' })}>
+        <TextInput
+          value={settings.publicHost}
+          onChange={v => setSettings(s => ({ ...s, publicHost: v }))}
+          placeholder={status?.publicHost}
+          mono
+        />
+      </Field>
+      <div className="envx-footer" style={{ padding: 0 }}>
+        <span className="envx-spacer" />
+        {environment && (
+          <Button variant="ghost" disabled={busy} onClick={() => void rotate()}>
+            {t('reverse.rotate')}
+          </Button>
+        )}
+        <Button variant="ghost" disabled={busy} onClick={() => void apply()}>
+          {t('action.apply')}
+        </Button>
+      </div>
+      {environment && (
+        <div className="envx-result" data-ok={String(!!conn && conn.idle + conn.active > 0)}>
+          <span>
+            {conn && conn.idle + conn.active > 0
+              ? t('reverse.connected', { peer: conn.peer ?? '', active: conn.active })
+              : t('reverse.waiting')}
+          </span>
+        </div>
+      )}
+      {reveal && (
+        <>
+          <div className="envx-help">
+            <strong>{t('reverse.command.title')}</strong>
+            {reveal.posix ? t('reverse.command.body') : t('reverse.command.noListener')}
+          </div>
+          {reveal.posix && <CopyLine label={t('reverse.command.posix')} text={reveal.posix} t={t} />}
+          {reveal.windows && <CopyLine label={t('reverse.command.windows')} text={reveal.windows} t={t} />}
+          <CopyLine label={t('reverse.secret')} text={reveal.secret} t={t} />
+        </>
+      )}
+      {error && (
+        <div className="envx-result" data-ok="false">
+          <span>{error}</span>
+        </div>
+      )}
+    </>
   )
 }
 

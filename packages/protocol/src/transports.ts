@@ -24,6 +24,25 @@ export class CallbackTransport extends EventEmitter<TransportEvents> implements 
     this.writeFn = fns.write
     this.endFn = fns.end
     this.destroyFn = fns.destroy
+    this.on('newListener', (event: string | symbol) => {
+      if (event !== 'data' || !this.early || this.flushing) return
+      this.flushing = true
+      // The listener is attached right after this event; deliver held bytes in order once it is.
+      queueMicrotask(() => {
+        const queued = this.early ?? []
+        this.early = undefined
+        for (const d of queued) this.emit('data', d)
+      })
+    })
+  }
+
+  private early: Buffer[] | undefined = []
+  private flushing = false
+
+  /** Deliver received bytes; bytes pushed before anyone listens for `data` are held, not dropped. */
+  push(data: Buffer): void {
+    if (this.early) this.early.push(data)
+    else this.emit('data', data)
   }
 
   write(data: Buffer): unknown {

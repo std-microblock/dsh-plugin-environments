@@ -4,6 +4,8 @@ use serde_json::{Map, Value, json};
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+/// Protocol version announced in `hello` (docs/protocol.md).
+pub const PROTOCOL_VERSION: u64 = 2;
 /// Largest accepted frame body (header + payload + 4).
 pub const MAX_FRAME: usize = 16 * 1024 * 1024 + 64 * 1024;
 /// Largest payload chunk the server emits on a stream channel.

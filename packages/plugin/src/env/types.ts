@@ -27,7 +27,7 @@ export type {
 } from '@dsh-environments/protocol'
 
 /** Environment implementations. `host` is the harness's own filesystem (transfers only). */
-export type EnvironmentKind = 'local' | 'server' | 'ssh' | 'adb' | 'winuser' | 'host'
+export type EnvironmentKind = 'local' | 'server' | 'ssh' | 'adb' | 'winuser' | 'reverse' | 'host'
 
 export interface SignalOptions {
   signal?: AbortSignal | undefined

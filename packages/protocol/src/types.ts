@@ -1,7 +1,7 @@
 // Message vocabulary of the dsh environment protocol (docs/protocol.md).
 
 /** Protocol version sent in the handshake. */
-export const PROTOCOL_VERSION = 1
+export const PROTOCOL_VERSION = 2
 
 /** Client identification sent in the handshake. */
 export const CLIENT_ID = 'dsh-plugin-environments/0.1.0'

@@ -20,6 +20,11 @@ export interface SshConfig {
   serverPath?: string
   /** `off` disables uploading the bundled server. */
   install?: 'off' | 'auto'
+  /**
+   * How to reach the server: `auto` = SSH port forwarding to a loopback listener, falling back
+   * to stdio over the exec channel when forwarding is refused; `stdio` = always stdio.
+   */
+  transport?: 'auto' | 'stdio'
 }
 
 /** Build ssh2 connect options from an environment config. */

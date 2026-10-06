@@ -4,9 +4,10 @@ import path from 'node:path'
 import { EnvError, errorCode, errorMessage, type Info } from '@dsh-environments/protocol'
 import { ACCOUNT_RE, createWindowsAccount, deleteWindowsAccount, listWindowsAccounts } from '../env/winuser/accounts.ts'
 import type { Borrowing } from '../borrowing/index.ts'
+import { reverseCommands, sanitizeReverseSettings } from '../env/server/reverse.ts'
 import { sessionStarted, type PluginContext } from '../host-api.ts'
 import { AvailabilityChecker } from '../manager/availability.ts'
-import type { DefinitionInput } from '../manager/definitions.ts'
+import type { DefinitionInput, EnvironmentDefinition } from '../manager/definitions.ts'
 import type { EnvironmentManager } from '../manager/manager.ts'
 import type { SessionMount, SessionSettings, WorkspaceDefaultMount, WorkspaceSettings } from '../manager/state.ts'
 import type { Mounting } from '../mount/index.ts'
@@ -120,6 +121,7 @@ export function createActions(
       status: manager.status(d),
       info: describeInfo(infoCache.get(d.id)?.info),
       lastError: infoCache.get(d.id)?.error,
+      ...(d.kind === 'reverse' ? { connection: manager.reverse.state(d.id) } : {}),
     }))
     return {
       platform: process.platform,
@@ -129,16 +131,35 @@ export function createActions(
       workspaces: manager.state.workspaces,
       leases: [...manager.leases.values()].map(l => ({ ...l.describe(), name: l.def.name })),
       session: sessionState(str(sessionId)),
+      reverse: { ...manager.reverse.describe(), settings: manager.reverseSettings() },
     }
   }
+
+  /** The secret of a reverse environment and the commands that use it (shown once). */
+  const reveal = (def: EnvironmentDefinition, secret: string) => ({
+    secret,
+    ...reverseCommands({ id: def.id, secret, status: manager.reverse.describe(), cwd: def.config.cwd }),
+  })
 
   return {
     state,
     async save({ environment }) {
-      const def = manager.upsert(environment as DefinitionInput)
+      const input = environment as DefinitionInput
+      const previous = input.id ? manager.get(String(input.id))?.config.token : undefined
+      const def = manager.upsert(input)
       infoCache.delete(def.id)
       availability.invalidate(def.id)
-      return { environment: manager.publicDef(def) }
+      const fresh = def.kind === 'reverse' && def.config.token && def.config.token !== previous
+      return { environment: manager.publicDef(def), ...(fresh ? { reverse: reveal(def, def.config.token ?? '') } : {}) }
+    },
+    async 'reverse.rotate'({ id }) {
+      const def = manager.require(text(id))
+      const secret = manager.rotateReverseSecret(def.id)
+      return { reverse: reveal(def, secret) }
+    },
+    async 'reverse.settings'({ settings }) {
+      if (settings !== undefined) await manager.setReverseSettings(sanitizeReverseSettings(settings))
+      return { status: manager.reverse.describe(), settings: manager.reverseSettings() }
     },
     async delete({ id }) {
       const envId = text(id)

@@ -23,13 +23,28 @@ dsh plugin --profile desktop add link:G:/dsh-plugin-remote-environments/packages
 
 ## 环境类型
 
-| 类型                   | 连接方式                                                                                                                                                                                                                                            | 能力                                                                                                                         |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| 本机 `local`           | 把随插件附带的 `dsh-env-server` 作为 stdio 子进程启动                                                                                                                                                                                               | 全部能力：文件、进程/PTY、TCP/UDP 正反向隧道、glob/grep、截图、键鼠输入                                                      |
-| 环境服务器 `server`    | 通过 TCP 连接到在目标机器上运行的 `dsh-env-server serve --listen 0.0.0.0:7461`，用令牌认证                                                                                                                                                          | 同上；截图和输入目前仅限 Windows 目标                                                                                        |
-| SSH `ssh`              | 使用 ssh2 连接，支持密码、私钥或 ssh-agent。目标是 Linux x64/arm64 时，自动通过 SFTP 上传对应的静态 `dsh-env-server`（存放在 `~/.dsh-env/bin/`），再通过 exec 通道运行，从而获得完整能力。上传失败或目标是其他系统时，退回到 SFTP + exec + TCP 转发 | 完整能力，或退回后的基础能力                                                                                                 |
-| Android `adb`          | 调用 adb CLI。`adb devices` 发现的设备会自动列出，可以一键加入列表                                                                                                                                                                                  | 文件（push/pull/exec-out）、shell（含 PTY）、TCP forward/reverse、截图、输入，以及 `install_apk`、`app`、`ui_dump`、`logcat` |
-| Windows 账户 `winuser` | 创建一个本地标准账户（需要管理员确认），密码用 DPAPI 加密保存。连接时用 `CreateProcessWithLogonW` 以该账户身份在当前交互桌面上启动 `dsh-env-server`                                                                                                 | 全部能力。该账户启动的图形界面程序会显示在当前桌面，智能体可以截图并操作                                                     |
+| 类型                   | 连接方式                                                                                                                                                                                                                                                                                                                                                | 能力                                                                                                                         |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| 本机 `local`           | 把随插件附带的 `dsh-env-server` 作为 stdio 子进程启动                                                                                                                                                                                                                                                                                                   | 全部能力：文件、进程/PTY、TCP/UDP 正反向隧道、glob/grep、截图、键鼠输入                                                      |
+| 环境服务器 `server`    | 连接到目标机器上运行的 `dsh-env-server serve`，地址可以是 `host:port`、`tcp://`、`ws://`，或经 TLS 反向代理的 `wss://`。用共享密钥做双向认证并加密（见下文“网络连接”）                                                                                                                                                                                  | 同上；截图和输入目前仅限 Windows 目标                                                                                        |
+| SSH `ssh`              | 使用 ssh2 连接，支持密码、私钥或 ssh-agent。自动识别远端系统和架构（Linux x64/ia32/arm64、macOS arm64、Windows x64 OpenSSH），按内容哈希只上传一次对应的 `dsh-env-server`（`~/.dsh-env/bin/`，目录权限 0700）；连接时才启动、断开即退出，数据走 SSH 端口转发。SSH 服务端禁止转发时退回 exec 通道的 stdio；没有合适的二进制时退回 SFTP + exec + TCP 转发 | 完整能力，或退回后的基础能力                                                                                                 |
+| 反向连接 `reverse`     | 目标机器运行 `dsh-env-server connect` 主动连到插件开启的 TCP / WebSocket 监听，适合目标机器没有公网地址的情况；断线后自动重连                                                                                                                                                                                                                           | 与环境服务器相同                                                                                                             |
+| Android `adb`          | 调用 adb CLI。`adb devices` 发现的设备会自动列出，可以一键加入列表                                                                                                                                                                                                                                                                                      | 文件（push/pull/exec-out）、shell（含 PTY）、TCP forward/reverse、截图、输入，以及 `install_apk`、`app`、`ui_dump`、`logcat` |
+| Windows 账户 `winuser` | 创建一个本地标准账户（需要管理员确认），密码用 DPAPI 加密保存。连接时用 `CreateProcessWithLogonW` 以该账户身份在当前交互桌面上启动 `dsh-env-server`                                                                                                                                                                                                     | 全部能力。该账户启动的图形界面程序会显示在当前桌面，智能体可以截图并操作                                                     |
+
+## 网络连接
+
+`server` 和 `reverse` 两种环境的连接可能经过公网，所以总是先建立一层安全通道：双方用每个环境独立的高熵共享密钥互相认证，再派生出两个方向各自的 ChaCha20-Poly1305 密钥加密全部流量。密钥本身从不在网络上传输，也不需要证书。细节见 [docs/protocol.md](docs/protocol.md#secure-channel)。
+
+| 谁有公网地址 | 做法                                                                                                                                                                                 |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 目标机器     | 在目标机器上运行 `dsh-env-server serve --listen 0.0.0.0:7461 --token-file token.txt`（或 `--listen ws://0.0.0.0:7461/dsh-env`），然后添加“环境服务器”，填入地址和 token.txt 里的密钥 |
+| dsh 这台电脑 | 添加“反向连接”环境，在对话框里开启 TCP 和/或 WebSocket 监听。保存后会显示一次可以直接复制的命令（Linux/macOS 和 PowerShell 两种），在目标机器上运行即可                              |
+
+- 密钥通过文件（`--token-file`）或标准输入（`--token-stdin`）交给 `dsh-env-server`。`--token` 会出现在其他用户可见的进程列表里，不建议使用。
+- 需要 TLS 时，把 `ws://` 监听放在 nginx、Caddy 等反向代理之后，插件一侧直接填 `wss://` 地址；`dsh-env-server` 本身不带 TLS。
+- 反向监听默认端口是 TCP 7462、WebSocket 7463（路径 `/dsh-env`），默认关闭。也可以在插件配置里用 `reverse: { tcp: { enabled, host, port }, ws: { enabled, host, port, path }, publicHost }` 预设；在界面里改过之后以界面为准。
+- 重新生成密钥会立即断开该环境现有的反向连接。
 
 ## 远程工作区（挂载）
 
@@ -95,6 +110,7 @@ Android 上非 ASCII 文本需要设备装有 [ADB Keyboard](https://github.com/
 
 - 每个连接、租约和隧道都绑定在 Cordis 的 fiber/scope 上，智能体销毁、归还或插件卸载时会自动清理。
 - `dsh-env-server` 在连接断开时会结束它启动的所有进程树（Windows 用 Job Object，Unix 用进程组），并关闭监听和套接字。
+- SSH 环境的服务端只在连接期间存在：它以 `--lifeline --exit-idle` 启动，SSH 通道关闭（主动断开、插件卸载或网络中断）或它唯一的会话结束时立即退出，不会留下孤儿进程。每次启动都使用新的随机密钥，经标准输入传入。
 
 ## Windows 账户环境（`winuser`）
 
@@ -144,13 +160,13 @@ Android 上非 ASCII 文本需要设备装有 [ADB Keyboard](https://github.com/
 ```sh
 pnpm install
 pnpm lint && pnpm typecheck    # ESLint（type-aware）+ tsc
-pnpm test                      # 协议单元测试 + 插件集成测试：env-server、ssh、adb（模拟设备）、租约、挂载映射
+pnpm test                      # 协议单元测试（安全通道、WebSocket）+ 插件集成测试：env-server、ssh、反向连接、adb（模拟设备）、租约、挂载映射
 pnpm build:server              # cargo 构建 crates/dsh-env-server，并放到 packages/plugin/bin/
 pnpm build:plugin              # packages/plugin/dist/index.js
 pnpm build:client              # packages/plugin/client.js
 ```
 
-`crates/dsh-env-server` 是 Rust 写的 `dsh-env-server`，子命令有 `serve`、`stdio`、`winuser create|delete|list|launch|grant`。Linux 静态二进制通过 `rust-lld` 交叉编译，不需要额外的工具链。
+`crates/dsh-env-server` 是 Rust 写的 `dsh-env-server`，子命令有 `serve`、`connect`、`stdio`、`winuser create|delete|list|launch|grant`。WebSocket 和安全通道是手写的小实现，加密只依赖 RustCrypto 的 `chacha20poly1305`、`hkdf`、`hmac`、`sha2` / `sha1`。Linux 静态二进制通过 `rust-lld` 交叉编译，不需要额外的工具链。
 
 ## 已知限制
 
@@ -160,3 +176,4 @@ pnpm build:client              # packages/plugin/client.js
 - DSH 没有为工作区行和工作区菜单提供插件扩展位，侧边栏里的链接图标、环境名称和“环境设置…”菜单项是按工作区行的 `data-row-key` 属性插入到页面里的。DSH 改变侧边栏结构后，这些装饰可能不再显示，但不会影响其他功能。
 - 同一台 Windows 机器上同一时间只有一个交互桌面，Windows 账户环境的程序和当前用户共用这个桌面（其他限制见上面的“Windows 账户环境”）。
 - Windows 上默认的 UTF-8 模式下，`proc.spawn` 返回的 `pid` 是 `__utf8-console` 包装进程的 pid。
+- 安全通道只基于共享密钥，没有前向保密：密钥泄露后，录下的旧流量可以被解密。发现泄露请在界面里重新生成密钥（反向连接）或更换 token 文件（环境服务器）。
