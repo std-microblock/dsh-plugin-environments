@@ -19,6 +19,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 fn resolve_cwd(cwd: Option<PathBuf>) -> PathBuf {
+    // `~` is the home directory of whoever runs the server (e.g. a winuser account).
+    let home = || std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+    let cwd = match cwd {
+        Some(p) if p.as_os_str() == "~" => home().map(PathBuf::from),
+        other => other,
+    };
     let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     std::fs::canonicalize(&cwd)
         .map(fs_ops::clean_path)

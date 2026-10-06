@@ -270,8 +270,7 @@ export function createActions(
         for (const l of manager.leasesOf(d.id)) await l.release('account deleted')
         manager.remove(d.id)
       }
-      await deleteWindowsAccount(account, { dataDir: manager.dataDir })
-      return {}
+      return await deleteWindowsAccount(account, { dataDir: manager.dataDir })
     },
     async defaults() {
       return { home: os.homedir(), mountsDir, sep: path.sep }

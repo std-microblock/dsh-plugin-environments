@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { EnvError } from '@dsh-environments/protocol'
-import { runHost, type RunHostResult } from '../host-process.ts'
+import { decodeHostText, runHost, type RunHostResult } from '../host-process.ts'
 import { serverBinary } from '../server/connect.ts'
 
 export const ACCOUNT_RE = /^[A-Za-z][A-Za-z0-9_-]{0,19}$/
@@ -67,7 +67,8 @@ async function runElevated(
   }
   let text = ''
   try {
-    text = fs.readFileSync(out, 'utf8')
+    // UTF-8 JSON from the helper, possibly after code-page text from tools it ran.
+    text = decodeHostText(fs.readFileSync(out))
   } catch {
     // no output: cancelled
   }
@@ -89,13 +90,20 @@ async function runElevated(
 }
 
 /** One account reported by `dsh-env-server winuser list`. */
-export type WindowsAccount = Record<string, unknown>
+export interface WindowsAccount {
+  name: string
+  sid: string | null
+  /** Registered profile directory; null before the account's first logon. */
+  profile: string | null
+  profileExists: boolean
+  [key: string]: unknown
+}
 
 export async function listWindowsAccounts(): Promise<WindowsAccount[]> {
   if (process.platform !== 'win32') return []
   const r = await runHost(serverBinary(), ['winuser', 'list'], { timeoutMs: 20000 })
   try {
-    return JSON.parse(r.stdout.toString()) as WindowsAccount[]
+    return JSON.parse(decodeHostText(r.stdout)) as WindowsAccount[]
   } catch {
     return []
   }
@@ -115,12 +123,17 @@ export async function createWindowsAccount(
   return { name, secret }
 }
 
+/**
+ * Delete the account (ending its processes) and, by default, its profile. Resolves with a
+ * warning when the account is gone but its profile could not be removed.
+ */
 export async function deleteWindowsAccount(
   name: string,
   { dataDir, purgeProfile = true }: { dataDir: string; purgeProfile?: boolean },
-): Promise<void> {
-  await runElevated(['winuser', 'delete', '--name', name, ...(purgeProfile ? ['--purge-profile'] : [])])
+): Promise<{ warning?: string }> {
+  const r = await runElevated(['winuser', 'delete', '--name', name, ...(purgeProfile ? ['--purge-profile'] : [])])
   fs.rmSync(secretPath(dataDir, name), { force: true })
+  return typeof r['warning'] === 'string' ? { warning: r['warning'] } : {}
 }
 
 export async function grantWindowsAccount(name: string, dir: string): Promise<void> {
