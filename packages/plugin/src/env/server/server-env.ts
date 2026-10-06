@@ -49,6 +49,10 @@ export class ServerEnvironment extends Environment {
   account: string | undefined = undefined
   /** Process id of a server launched for this environment, when known. */
   serverPid: number | undefined = undefined
+  /** How the connection is carried (diagnostics), e.g. `ssh-forward`, `ssh-stdio`. */
+  transportMode: string | undefined = undefined
+  /** Address of the server as seen from its host, when it listens on one. */
+  remoteEndpoint: string | undefined = undefined
   private readonly onCloseHook: (() => Promise<void> | void) | undefined
 
   constructor(opts: ServerEnvironmentOptions) {

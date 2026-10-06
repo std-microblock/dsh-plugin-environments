@@ -26,6 +26,8 @@ export interface EnvironmentConfig {
   passphrase?: string
   serverPath?: string
   install?: 'off' | 'auto'
+  /** ssh: `auto` (port forwarding, else stdio over exec) or `stdio` */
+  transport?: 'auto' | 'stdio'
   readyTimeoutMs?: number
   /** local, ssh, winuser, reverse (passed to the generated connect command) */
   cwd?: string
