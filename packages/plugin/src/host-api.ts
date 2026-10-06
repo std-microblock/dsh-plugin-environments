@@ -158,6 +158,15 @@ export function sessionIdOf(agent: Agent): string {
   return agent.session.header.id ?? agent.session.id
 }
 
+/** Whether the agent's session has issued its first request (its mount can no longer change). */
+export function sessionStarted(agent: Agent): boolean {
+  try {
+    return agent.session.requestHeader?.() !== undefined
+  } catch {
+    return false
+  }
+}
+
 /** View a structurally typed plugin context as the Cordis context the DSH base classes expect. */
 export function asCordisContext(ctx: PluginContext): Context {
   return ctx as unknown as Context

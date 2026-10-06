@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { EnvError, type DirEntry, type Stat } from '@dsh-environments/protocol'
 import { Environment } from '../environment.ts'
-import { HostChildProcess, runHost, type RunHostOptions, type RunHostResult } from '../host-process.ts'
+import { decodeHostText, HostChildProcess, runHost, type RunHostOptions, type RunHostResult } from '../host-process.ts'
 import {
   filterGlob,
   findScript,
@@ -86,15 +86,15 @@ export class AdbEnvironment extends Environment {
   /** Run a script with `adb shell -T`. */
   async sh(script: string, opts: RunHostOptions = {}): Promise<ShellResult> {
     const r = await runHost(this.adb, this.args('shell', '-T', script), opts)
-    return { ...r, out: r.stdout.toString() }
+    return { ...r, out: decodeHostText(r.stdout) }
   }
 
   async open(): Promise<this> {
     const r = await runHost(this.adb, this.args('get-state'), { timeoutMs: 15000 })
-    if (r.code !== 0 || !r.stdout.toString().includes('device')) {
+    if (r.code !== 0 || !decodeHostText(r.stdout).includes('device')) {
       throw new EnvError(
         'EIO',
-        `device ${this.serial ?? ''} is not available: ${r.stderr.trim() || r.stdout.toString().trim()}`,
+        `device ${this.serial ?? ''} is not available: ${r.stderr.trim() || decodeHostText(r.stdout).trim()}`,
       )
     }
     const props = await this.sh(
@@ -170,8 +170,8 @@ export class AdbEnvironment extends Environment {
       const r = await runHost(this.adb, this.args('push', tmp, remote))
       if (r.code !== 0) {
         throw new EnvError(
-          /Permission denied|Read-only/.test(r.stderr + r.stdout.toString()) ? 'EACCES' : 'EIO',
-          `adb push failed: ${(r.stderr || r.stdout.toString()).trim()}`,
+          /Permission denied|Read-only/.test(r.stderr + decodeHostText(r.stdout)) ? 'EACCES' : 'EIO',
+          `adb push failed: ${(r.stderr || decodeHostText(r.stdout)).trim()}`,
         )
       }
     } finally {
@@ -182,13 +182,13 @@ export class AdbEnvironment extends Environment {
   /** Push a host file to the device. */
   async pushFile(hostPath: string, remote: string): Promise<void> {
     const r = await runHost(this.adb, this.args('push', hostPath, remote), { timeoutMs: 30 * 60 * 1000 })
-    if (r.code !== 0) throw new EnvError('EIO', `adb push failed: ${(r.stderr || r.stdout.toString()).trim()}`)
+    if (r.code !== 0) throw new EnvError('EIO', `adb push failed: ${(r.stderr || decodeHostText(r.stdout)).trim()}`)
   }
 
   /** Pull a device file to the host. */
   async pullFile(remote: string, hostPath: string): Promise<void> {
     const r = await runHost(this.adb, this.args('pull', remote, hostPath), { timeoutMs: 30 * 60 * 1000 })
-    if (r.code !== 0) throw new EnvError('EIO', `adb pull failed: ${(r.stderr || r.stdout.toString()).trim()}`)
+    if (r.code !== 0) throw new EnvError('EIO', `adb pull failed: ${(r.stderr || decodeHostText(r.stdout)).trim()}`)
   }
 
   /** Run a script, map a non-zero exit to an EnvError by its message, and return the output. */
@@ -283,7 +283,7 @@ export class AdbEnvironment extends Environment {
     }
     const r = await runHost(this.adb, this.args('forward', `tcp:${localPort}`, `tcp:${remotePort}`))
     if (r.code !== 0) throw new EnvError('EIO', `adb forward failed: ${r.stderr.trim()}`)
-    const port = localPort === 0 ? Number(r.stdout.toString().trim()) : localPort
+    const port = localPort === 0 ? Number(decodeHostText(r.stdout).trim()) : localPort
     return this.trackTunnel({
       kind: 'forward',
       proto,
@@ -307,7 +307,7 @@ export class AdbEnvironment extends Environment {
     if (proto !== 'tcp') throw new EnvError('UNSUPPORTED', 'adb can only reverse-forward TCP')
     const r = await runHost(this.adb, this.args('reverse', `tcp:${remotePort}`, `tcp:${localPort}`))
     if (r.code !== 0) throw new EnvError('EIO', `adb reverse failed: ${r.stderr.trim()}`)
-    const port = remotePort === 0 ? Number(r.stdout.toString().trim()) : remotePort
+    const port = remotePort === 0 ? Number(decodeHostText(r.stdout).trim()) : remotePort
     return this.trackTunnel({
       kind: 'reverse',
       proto,
@@ -383,7 +383,7 @@ export class AdbEnvironment extends Environment {
       hostApkPath,
     )
     const r = await runHost(this.adb, args, { timeoutMs: 15 * 60 * 1000 })
-    const text = `${r.stdout.toString()}${r.stderr}`.trim()
+    const text = `${decodeHostText(r.stdout)}${r.stderr}`.trim()
     if (r.code !== 0 || !/Success/.test(text)) throw new EnvError('EIO', `install failed: ${text}`)
     return text
   }

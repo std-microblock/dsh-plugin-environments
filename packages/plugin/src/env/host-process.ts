@@ -1,8 +1,69 @@
 // Running commands on the harness host (adb, elevation helpers, ...).
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { isUtf8 } from 'node:buffer'
 import type { Readable, Writable } from 'node:stream'
 import { EnvError, type ExitInfo } from '@dsh-environments/protocol'
 import type { EnvProcess } from './types.ts'
+
+/** WHATWG encoding label for a Windows code page (approximate for OEM-only pages). */
+export function codePageLabel(cp: number): string {
+  const known: Record<number, string> = {
+    936: 'gbk',
+    54936: 'gb18030',
+    950: 'big5',
+    932: 'shift_jis',
+    949: 'euc-kr',
+    866: 'ibm866',
+    874: 'windows-874',
+    20866: 'koi8-r',
+    65001: 'utf-8',
+  }
+  const label = known[cp]
+  if (label) return label
+  if (cp >= 1250 && cp <= 1258) return `windows-${cp}`
+  return 'windows-1252'
+}
+
+let legacy: TextDecoder | undefined
+
+/** Decoder for the host's OEM code page (what console programs write into pipes). */
+function legacyDecoder(): TextDecoder {
+  if (legacy) return legacy
+  let cp = 437
+  try {
+    // A fresh windowless console starts with the OEM code page; chcp prints it.
+    const out = execFileSync('cmd.exe', ['/d', '/c', 'chcp'], { windowsHide: true, timeout: 5000 }).toString('latin1')
+    cp = Number(/(\d+)\s*$/.exec(out.trim())?.[1] ?? cp)
+  } catch {
+    // keep the default
+  }
+  try {
+    legacy = new TextDecoder(codePageLabel(cp))
+  } catch {
+    legacy = new TextDecoder('windows-1252')
+  }
+  return legacy
+}
+
+/**
+ * Text from a host program's output: valid UTF-8 lines are kept, other lines (console programs
+ * on a non-UTF-8 code page, e.g. GBK on Chinese Windows) are decoded with the OEM code page.
+ */
+export function decodeHostText(buf: Uint8Array, decoder?: () => TextDecoder): string {
+  if (isUtf8(buf)) return Buffer.from(buf).toString('utf8')
+  if (!decoder && process.platform !== 'win32') return Buffer.from(buf).toString('utf8')
+  const dec = (decoder ?? legacyDecoder)()
+  let out = ''
+  let start = 0
+  while (start < buf.length) {
+    const nl = buf.indexOf(0x0a, start)
+    const end = nl < 0 ? buf.length : nl + 1
+    const line = buf.subarray(start, end)
+    out += isUtf8(line) ? Buffer.from(line).toString('utf8') : dec.decode(line)
+    start = end
+  }
+  return out
+}
 
 export interface RunHostOptions {
   input?: Uint8Array | string | undefined
@@ -53,7 +114,7 @@ export function runHost(
         reject(new EnvError('ETOOBIG', `output exceeds ${maxBytes} bytes`))
         return
       }
-      resolve({ code, stdout: Buffer.concat(out), stderr: Buffer.concat(err).toString() })
+      resolve({ code, stdout: Buffer.concat(out), stderr: decodeHostText(Buffer.concat(err)) })
     })
     child.stdin.on('error', () => {})
     if (input !== undefined) child.stdin.end(input)

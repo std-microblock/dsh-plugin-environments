@@ -40,8 +40,11 @@ pub mod job {
             unsafe { AssignProcessToJobObject(self.0, process) != 0 }
         }
         pub fn terminate(&self) {
+            self.terminate_with(1);
+        }
+        pub fn terminate_with(&self, code: u32) {
             unsafe {
-                TerminateJobObject(self.0, 1);
+                TerminateJobObject(self.0, code);
             }
         }
     }
@@ -55,8 +58,94 @@ pub mod job {
     }
 }
 
+/// How pipe output of a Windows child is turned into the bytes sent to the client
+/// (`encoding` of `proc.spawn`; ignored elsewhere and for terminals).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Encoding {
+    /// Forward the bytes untouched.
+    Raw,
+    /// Run the child on a UTF-8 console and transcode leftover code-page text.
+    Utf8,
+    /// Leave the console code page alone; transcode code-page text to UTF-8.
+    Auto,
+}
+
+fn encoding(a: &Args<'_>) -> Result<Encoding, OpError> {
+    match a.opt_str("encoding") {
+        None | Some("utf8") => Ok(Encoding::Utf8),
+        Some("auto") => Ok(Encoding::Auto),
+        Some("raw") => Ok(Encoding::Raw),
+        Some(other) => Err(OpError::invalid(format!(
+            "encoding must be raw, utf8 or auto (got {other})"
+        ))),
+    }
+}
+
+/// Hidden subcommand: `dsh-env-server __utf8-console -- <program> <args>...` switches its
+/// (inherited, windowless) console to UTF-8 and runs the program on it.
+pub const UTF8_TRAMPOLINE: &str = "__utf8-console";
+
+/// Body of [`UTF8_TRAMPOLINE`]; returns the program's exit code.
+#[cfg(windows)]
+pub fn utf8_trampoline(args: &[std::ffi::OsString]) -> i32 {
+    use windows_sys::Win32::System::Console::{SetConsoleCP, SetConsoleOutputCP};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    const CP_UTF8: u32 = 65001;
+    let args = match args.first() {
+        Some(a) if a == "--" => &args[1..],
+        _ => args,
+    };
+    let Some((program, rest)) = args.split_first() else {
+        eprintln!("dsh-env-server: {UTF8_TRAMPOLINE}: missing program");
+        return 2;
+    };
+    unsafe {
+        SetConsoleCP(CP_UTF8);
+        SetConsoleOutputCP(CP_UTF8);
+    }
+    // Our own kill-on-close job (nested in the server's once that assigns us) so the
+    // program's tree cannot outlive us, whichever happens first.
+    let job = job::Job::new().filter(|j| j.assign(unsafe { GetCurrentProcess() }));
+    let code = match std::process::Command::new(program).args(rest).status() {
+        Ok(st) => st.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!(
+                "dsh-env-server: failed to spawn {}: {e}",
+                program.to_string_lossy()
+            );
+            1
+        }
+    };
+    // Closing a kill-on-close job that contains us while exiting would replace our exit
+    // code; end the job (leftover descendants and us) with the program's code instead.
+    if let Some(j) = &job {
+        j.terminate_with(code as u32);
+    }
+    code
+}
+
+/// Whether `program` can be found the way `CreateProcess` callers usually search.
+#[cfg(windows)]
+fn program_exists(
+    program: &str,
+    env: &[(String, Option<String>)],
+    clear: bool,
+    cwd: &std::path::Path,
+) -> bool {
+    if program.contains(['/', '\\', ':']) {
+        let p = cwd.join(program);
+        return p.is_file()
+            || [".exe", ".com", ".bat", ".cmd"].iter().any(|e| {
+                let mut s = p.clone().into_os_string();
+                s.push(e);
+                PathBuf::from(s).is_file()
+            });
+    }
+    crate::pty::resolve_program(program, &crate::pty::apply_env(env, clear), cwd) != program
+}
+
 /// Resolve the argv for a spawn request.
-fn build_argv(a: &Args<'_>) -> Result<Vec<String>, OpError> {
+fn build_argv(a: &Args<'_>, enc: Encoding) -> Result<Vec<String>, OpError> {
     if let Some(argv) = a.0.get("argv").and_then(Value::as_array) {
         let argv: Vec<String> = argv
             .iter()
@@ -69,7 +158,15 @@ fn build_argv(a: &Args<'_>) -> Result<Vec<String>, OpError> {
     }
     if let Some(command) = a.opt_str("command") {
         let (prog, mut prefix) = crate::sys::shell_invocation();
-        prefix.push(command.to_string());
+        // Windows PowerShell pipes strings into native programs as ASCII by default. On
+        // its own line so error positions still quote the caller's code (from line 2).
+        if cfg!(windows) && enc == Encoding::Utf8 && a.0.get("pty").is_none_or(Value::is_null) {
+            prefix.push(format!(
+                "try{{$OutputEncoding=[Text.UTF8Encoding]::new($false)}}catch{{}}\n{command}"
+            ));
+        } else {
+            prefix.push(command.to_string());
+        }
         let mut argv = vec![prog];
         argv.extend(prefix);
         return Ok(argv);
@@ -89,7 +186,8 @@ fn env_ops(a: &Args<'_>) -> Vec<(String, Option<String>)> {
 }
 
 pub async fn spawn(s: &Arc<Session>, a: Args<'_>) -> OpResult {
-    let argv = build_argv(&a)?;
+    let enc = encoding(&a)?;
+    let argv = build_argv(&a, enc)?;
     let cwd = s.resolve(a.opt_str("cwd").unwrap_or("."), None);
     if !cwd.is_dir() {
         return Err(OpError::new(
@@ -112,7 +210,7 @@ pub async fn spawn(s: &Arc<Session>, a: Args<'_>) -> OpResult {
             .clamp(2, 1000) as u16;
         spawn_pty(s, argv, cwd, env, clear_env, rows, cols)
     } else {
-        spawn_pipes(s, argv, cwd, env, clear_env)
+        spawn_pipes(s, argv, cwd, env, clear_env, enc)
     }
 }
 
@@ -172,11 +270,41 @@ fn spawn_pipes(
     cwd: PathBuf,
     env: Vec<(String, Option<String>)>,
     clear_env: bool,
+    enc: Encoding,
 ) -> OpResult {
     use std::process::Stdio;
-    let mut cmd = tokio::process::Command::new(&argv[0]);
-    cmd.args(&argv[1..])
-        .current_dir(&cwd)
+    #[cfg(windows)]
+    let program = if enc == Encoding::Utf8 {
+        // The console code page can only be set from inside the child's console, so a
+        // copy of ourselves sets it and runs the program there.
+        if !program_exists(&argv[0], &env, clear_env, &cwd) {
+            return Err(OpError::new(
+                "ENOENT",
+                format!("failed to spawn {}: program not found", argv[0]),
+            ));
+        }
+        std::env::current_exe().ok()
+    } else {
+        None
+    };
+    #[cfg(not(windows))]
+    let program: Option<PathBuf> = {
+        let _ = enc;
+        None
+    };
+    let mut cmd = match &program {
+        Some(exe) => {
+            let mut c = tokio::process::Command::new(exe);
+            c.args([UTF8_TRAMPOLINE, "--"]).args(&argv);
+            c
+        }
+        None => {
+            let mut c = tokio::process::Command::new(&argv[0]);
+            c.args(&argv[1..]);
+            c
+        }
+    };
+    cmd.current_dir(&cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -230,26 +358,46 @@ fn spawn_pipes(
         ch: u64,
         fd: u8,
         mut r: R,
+        enc: Encoding,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             use tokio::io::AsyncReadExt;
+            #[cfg(windows)]
+            let mut decoder = (enc != Encoding::Raw)
+                .then(|| crate::util::codepage::StreamDecoder::new(crate::util::codepage::oem()));
+            #[cfg(not(windows))]
+            let _ = enc;
             let mut buf = vec![0u8; 64 * 1024];
             loop {
                 match r.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if !s.send_data(ch, Some(fd), buf[..n].to_vec()).await {
+                        #[cfg(windows)]
+                        let data = match &mut decoder {
+                            Some(d) => d.push(&buf[..n]),
+                            None => buf[..n].to_vec(),
+                        };
+                        #[cfg(not(windows))]
+                        let data = buf[..n].to_vec();
+                        if !data.is_empty() && !s.send_data(ch, Some(fd), data).await {
                             return;
                         }
                     }
+                }
+            }
+            #[cfg(windows)]
+            if let Some(d) = &mut decoder {
+                let rest = d.finish();
+                if !rest.is_empty() && !s.send_data(ch, Some(fd), rest).await {
+                    return;
                 }
             }
             s.send_eof(ch, Some(fd));
         })
     }
 
-    let out_task = stdout.map(|o| pump(s.clone(), ch, 1, o));
-    let err_task = stderr.map(|e| pump(s.clone(), ch, 2, e));
+    let out_task = stdout.map(|o| pump(s.clone(), ch, 1, o, enc));
+    let err_task = stderr.map(|e| pump(s.clone(), ch, 2, e, enc));
     if let Some(t) = &out_task {
         s.attach_task(ch, t.abort_handle());
     }

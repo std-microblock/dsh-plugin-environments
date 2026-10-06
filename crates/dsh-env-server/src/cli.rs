@@ -15,7 +15,7 @@ Commands:
              --token-file <PATH>  Read the shared secret from a file
              --token <TOKEN>      Shared secret (visible to other users in ps; avoid)
                                   Without a secret a random one is generated and printed.
-             --cwd <PATH>         Working directory for relative paths
+             --cwd <PATH>         Working directory for relative paths (`~` = home)
              --once               Exit after the first connection ends
              --exit-idle          Exit when the last session ends
              --lifeline           Exit (killing every spawned process) when stdin closes
@@ -31,7 +31,7 @@ Commands:
              create --name <N> --secret-out <PATH>
              delete --name <N> [--purge-profile]
              list
-             launch --name <N> --secret-file <PATH> [--cwd <PATH>] -- <PROGRAM>...
+             launch --name <N> --secret-file <PATH> [--cwd <PATH>] [--supervise] -- <PROGRAM>...
              grant  --name <N> --path <PATH>
 
 Options:
@@ -55,6 +55,9 @@ pub enum WinUserCmd {
         secret_file: String,
         cwd: Option<String>,
         program: Vec<String>,
+        /// Stay alive, holding the process in a kill-on-close job, until it exits or
+        /// stdin closes.
+        supervise: bool,
     },
     Grant {
         name: String,
@@ -300,7 +303,7 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
                     WinUserCmd::List
                 }
                 "launch" => {
-                    let o = Opts::parse(rest, &[], &["name", "secret-file", "cwd"])?;
+                    let o = Opts::parse(rest, &["supervise"], &["name", "secret-file", "cwd"])?;
                     if o.has("help") {
                         return Ok(Cmd::Help);
                     }
@@ -314,6 +317,7 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
                         name: o.req("name")?,
                         secret_file: o.req("secret-file")?,
                         cwd: o.get("cwd"),
+                        supervise: o.has("supervise"),
                         program: o.rest,
                     }
                 }
@@ -435,9 +439,27 @@ mod tests {
                 name: "u".into(),
                 secret_file: "s".into(),
                 cwd: None,
-                program: vec!["a.exe".into(), "--flag".into()]
+                program: vec!["a.exe".into(), "--flag".into()],
+                supervise: false,
             })
         );
+        assert!(matches!(
+            p(&[
+                "winuser",
+                "launch",
+                "--name",
+                "u",
+                "--secret-file",
+                "s",
+                "--supervise",
+                "--",
+                "a"
+            ]),
+            Ok(Cmd::Winuser(WinUserCmd::Launch {
+                supervise: true,
+                ..
+            }))
+        ));
         assert!(p(&["winuser", "launch", "--name", "u", "--secret-file", "s"]).is_err());
         assert_eq!(
             p(&["winuser", "list"]).unwrap(),
