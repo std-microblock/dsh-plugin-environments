@@ -74,6 +74,9 @@ export class BindingsStore {
 
   private async load(signal: AbortSignal): Promise<BindingsSnapshot> {
     const workspaces = this.workspaces
+    if (workspaces.length === 0) {
+      return { ...this.snapshot, view: { bindings: [], availability: {}, environments: [] }, byId: new Map() }
+    }
     if (this.snapshot.supported !== false) {
       try {
         const view = await call<BindingsView>('workspace.bindings', { workspaces }, signal)
