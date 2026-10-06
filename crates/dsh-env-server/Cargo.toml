@@ -6,22 +6,24 @@ description = "Remote environment server for the DeepSeek Harness environments p
 license = "MIT"
 repository = "https://github.com/std-microblock/dsh-plugin-environments"
 
+# Dependencies are deliberately few and feature-trimmed: the binary ships for five
+# targets inside the plugin package. See docs/building-server.md before adding any.
 [dependencies]
-anyhow = "1"
 getrandom = "0.3"
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 regex-lite = "0.1"
 serde_json = { version = "1", default-features = false, features = ["std"] }
-tokio = { version = "1", default-features = false, features = ["rt", "net", "io-util", "io-std", "process", "time", "sync", "macros", "fs"] }
-portable-pty = "0.9"
+tokio = { version = "1", default-features = false, features = ["rt", "net", "io-util", "io-std", "process", "time", "sync", "fs"] }
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Globalization",
+  "Win32_Storage_FileSystem",
   "Win32_System_JobObjects",
   "Win32_System_Threading",
   "Win32_System_Console",
+  "Win32_System_Pipes",
   "Win32_Security",
   "Win32_Security_Cryptography",
   "Win32_NetworkManagement_NetManagement",
@@ -41,3 +43,9 @@ codegen-units = 1
 panic = "abort"
 strip = true
 debug = false
+incremental = false
+
+# Used by the nightly `-Zbuild-std` builds (see .cargo/config.toml aliases and
+# docs/building-server.md); identical to release otherwise.
+[profile.dist]
+inherits = "release"

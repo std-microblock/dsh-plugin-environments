@@ -58,7 +58,10 @@ pub mod job {
 /// Resolve the argv for a spawn request.
 fn build_argv(a: &Args<'_>) -> Result<Vec<String>, OpError> {
     if let Some(argv) = a.0.get("argv").and_then(Value::as_array) {
-        let argv: Vec<String> = argv.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+        let argv: Vec<String> = argv
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
         if argv.is_empty() {
             return Err(OpError::invalid("argv must not be empty"));
         }
@@ -77,7 +80,11 @@ fn build_argv(a: &Args<'_>) -> Result<Vec<String>, OpError> {
 fn env_ops(a: &Args<'_>) -> Vec<(String, Option<String>)> {
     a.0.get("env")
         .and_then(Value::as_object)
-        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().map(str::to_string))).collect())
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().map(str::to_string)))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -85,13 +92,24 @@ pub async fn spawn(s: &Arc<Session>, a: Args<'_>) -> OpResult {
     let argv = build_argv(&a)?;
     let cwd = s.resolve(a.opt_str("cwd").unwrap_or("."), None);
     if !cwd.is_dir() {
-        return Err(OpError::new("ENOENT", format!("cwd does not exist: {}", cwd.display())));
+        return Err(OpError::new(
+            "ENOENT",
+            format!("cwd does not exist: {}", cwd.display()),
+        ));
     }
     let env = env_ops(&a);
     let clear_env = a.bool("clearEnv", false);
     if let Some(pty) = a.0.get("pty").filter(|v| v.is_object()) {
-        let rows = pty.get("rows").and_then(Value::as_u64).unwrap_or(24).clamp(2, 1000) as u16;
-        let cols = pty.get("cols").and_then(Value::as_u64).unwrap_or(80).clamp(2, 1000) as u16;
+        let rows = pty
+            .get("rows")
+            .and_then(Value::as_u64)
+            .unwrap_or(24)
+            .clamp(2, 1000) as u16;
+        let cols = pty
+            .get("cols")
+            .and_then(Value::as_u64)
+            .unwrap_or(80)
+            .clamp(2, 1000) as u16;
         spawn_pty(s, argv, cwd, env, clear_env, rows, cols)
     } else {
         spawn_pipes(s, argv, cwd, env, clear_env)
@@ -247,10 +265,10 @@ fn spawn_pipes(
             match ev {
                 Inbound::Data(_, data) => {
                     let n = data.len();
-                    if let Some(w) = stdin.as_mut() {
-                        if w.write_all(&data).await.is_err() || w.flush().await.is_err() {
-                            stdin = None;
-                        }
+                    if let Some(w) = stdin.as_mut()
+                        && (w.write_all(&data).await.is_err() || w.flush().await.is_err())
+                    {
+                        stdin = None;
                     }
                     sin.grant(ch, Some(0), n);
                 }
@@ -297,8 +315,8 @@ fn spawn_pipes(
 // ---------------------------------------------------------------- pty
 
 struct PtyControl {
-    master: Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>,
-    killer: Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>,
+    master: Mutex<Option<crate::pty::PtyMaster>>,
+    killer: crate::pty::PtyKiller,
     #[cfg(windows)]
     job: Option<Arc<job::Job>>,
 }
@@ -306,16 +324,18 @@ struct PtyControl {
 impl ChannelControl for PtyControl {
     fn resize(&self, rows: u16, cols: u16) -> Result<(), OpError> {
         let guard = self.master.lock().unwrap();
-        let m = guard.as_ref().ok_or_else(|| OpError::invalid("terminal closed"))?;
-        m.resize(portable_pty::PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        let m = guard
+            .as_ref()
+            .ok_or_else(|| OpError::invalid("terminal closed"))?;
+        m.resize(rows, cols)
             .map_err(|e| OpError::new("EIO", e.to_string()))
     }
-    fn kill(&self, _signal: &str) -> Result<(), OpError> {
+    fn kill(&self, signal: &str) -> Result<(), OpError> {
         #[cfg(windows)]
         if let Some(j) = &self.job {
             j.terminate();
         }
-        let _ = self.killer.lock().unwrap().kill();
+        self.killer.kill(signal);
         Ok(())
     }
 }
@@ -331,60 +351,40 @@ fn spawn_pty(
     s: &Arc<Session>,
     argv: Vec<String>,
     cwd: PathBuf,
-    env: Vec<(String, Option<String>)>,
+    mut env: Vec<(String, Option<String>)>,
     clear_env: bool,
     rows: u16,
     cols: u16,
 ) -> OpResult {
-    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-    let system = native_pty_system();
-    let pair = system
-        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-        .map_err(|e| OpError::new("EIO", format!("openpty failed: {e}")))?;
-    let mut cmd = CommandBuilder::new(&argv[0]);
-    cmd.args(&argv[1..]);
-    cmd.cwd(&cwd);
-    if clear_env {
-        cmd.env_clear();
-    }
     if std::env::var_os("TERM").is_none() {
-        cmd.env("TERM", "xterm-256color");
+        env.insert(0, ("TERM".into(), Some("xterm-256color".into())));
     }
-    for (k, v) in &env {
-        match v {
-            Some(v) => cmd.env(k, v),
-            None => cmd.env_remove(k),
-        }
-    }
-    let mut child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| OpError::new("ENOENT", format!("failed to spawn {}: {e}", argv[0])))?;
-    drop(pair.slave);
-    let pid = child.process_id().unwrap_or(0);
-    let mut reader = pair.master.try_clone_reader().map_err(|e| OpError::new("EIO", e.to_string()))?;
-    let mut writer = pair.master.take_writer().map_err(|e| OpError::new("EIO", e.to_string()))?;
-    let killer = child.clone_killer();
-
-    #[cfg(windows)]
-    let job = {
-        let job = job::Job::new().map(Arc::new);
-        if let Some(j) = &job {
-            use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
-            unsafe {
-                let h = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
-                if !h.is_null() {
-                    j.assign(h);
-                    windows_sys::Win32::Foundation::CloseHandle(h);
-                }
-            }
-        }
-        job
+    let cmd = crate::pty::PtyCommand {
+        argv,
+        cwd,
+        env,
+        clear_env,
     };
+    #[cfg(windows)]
+    let job = job::Job::new().map(Arc::new);
+    #[cfg(windows)]
+    let spawned = crate::pty::spawn(&cmd, rows, cols, job.as_deref());
+    #[cfg(unix)]
+    let spawned = crate::pty::spawn(&cmd, rows, cols);
+    let (master, child) = spawned.map_err(|e| {
+        let mut err: OpError = e.into();
+        err.message = format!("failed to spawn {}: {}", cmd.argv[0], err.message);
+        err
+    })?;
+    let pid = child.pid();
+    let io_err = |e: std::io::Error| OpError::new("EIO", e.to_string());
+    let mut reader = master.reader().map_err(io_err)?;
+    let mut writer = master.writer().map_err(io_err)?;
+    let killer = child.killer();
 
     let control = Arc::new(PtyControl {
-        master: Mutex::new(Some(pair.master)),
-        killer: Mutex::new(killer),
+        master: Mutex::new(Some(master)),
+        killer,
         #[cfg(windows)]
         job,
     });
@@ -448,7 +448,11 @@ fn spawn_pty(
                 }
                 Inbound::Eof(_) => {
                     // A terminal has no stdin EOF; send ^D on posix, ^Z on Windows.
-                    let eof = if cfg!(windows) { b"\x1a\r".to_vec() } else { vec![4u8] };
+                    let eof = if cfg!(windows) {
+                        b"\x1a\r".to_vec()
+                    } else {
+                        vec![4u8]
+                    };
                     let _ = wtx.send(Some(eof));
                 }
                 Inbound::Close => break,
@@ -459,14 +463,13 @@ fn spawn_pty(
     s.attach_task(ch, stdin_task.abort_handle());
 
     // Wait thread.
-    let (etx, erx) = tokio::sync::oneshot::channel::<Option<i32>>();
+    let (etx, erx) = tokio::sync::oneshot::channel::<Option<crate::pty::PtyExit>>();
     std::thread::spawn(move || {
-        let code = child.wait().ok().map(|st| st.exit_code() as i32);
-        let _ = etx.send(code);
+        let _ = etx.send(child.wait().ok());
     });
     let sw = s.clone();
     let wait_task = tokio::spawn(async move {
-        let code = erx.await.ok().flatten();
+        let status = erx.await.ok().flatten();
         // Give the reader a moment to drain, then drop the master so ConPTY reports EOF.
         tokio::time::sleep(Duration::from_millis(150)).await;
         if let Some(c) = weak_control.upgrade() {
@@ -474,7 +477,11 @@ fn spawn_pty(
         }
         let _ = tokio::time::timeout(Duration::from_secs(2), forward).await;
         if sw.channel_open(ch) {
-            sw.send_json(exit_json(ch, code, None));
+            let (code, signal) = match status {
+                Some(st) => (Some(st.code), st.signal),
+                None => (None, None),
+            };
+            sw.send_json(exit_json(ch, code, signal));
             sw.close_channel(ch, None, None);
         }
     });

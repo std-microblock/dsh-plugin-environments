@@ -40,7 +40,11 @@ pub async fn dispatch(s: &Arc<Session>, op: &str, args: &Value, payload: Vec<u8>
         "net.listen" => crate::net::listen(s, Args(args)).await,
         "net.unlisten" => {
             let id = Args(args).u64("id")?;
-            if s.remove_listener(id) { ok(json!({})) } else { Err(OpError::invalid(format!("unknown listener {id}"))) }
+            if s.remove_listener(id) {
+                ok(json!({}))
+            } else {
+                Err(OpError::invalid(format!("unknown listener {id}")))
+            }
         }
         _ => Err(OpError::unsupported(format!("unknown op `{op}`"))),
     }

@@ -36,13 +36,21 @@ fn mtime_ms(meta: &fs::Metadata) -> f64 {
 #[cfg(unix)]
 fn mode_ino(meta: &fs::Metadata) -> (u32, Option<String>, Option<String>) {
     use std::os::unix::fs::MetadataExt;
-    (meta.mode(), Some(meta.ino().to_string()), Some(meta.dev().to_string()))
+    (
+        meta.mode(),
+        Some(meta.ino().to_string()),
+        Some(meta.dev().to_string()),
+    )
 }
 
 #[cfg(not(unix))]
 fn mode_ino(meta: &fs::Metadata) -> (u32, Option<String>, Option<String>) {
     let base = if meta.is_dir() { 0o755 } else { 0o644 };
-    let mode = if meta.permissions().readonly() { base & !0o222 } else { base };
+    let mode = if meta.permissions().readonly() {
+        base & !0o222
+    } else {
+        base
+    };
     (mode, None, None)
 }
 
@@ -96,11 +104,19 @@ pub async fn stat(s: &Arc<Session>, a: Args<'_>) -> OpResult {
     let path = s.resolve(a.str("path")?, a.opt_str("cwd"));
     let follow = a.bool("follow", true);
     blocking(move || {
-        let meta = if follow { fs::metadata(&path) } else { fs::symlink_metadata(&path) };
+        let meta = if follow {
+            fs::metadata(&path)
+        } else {
+            fs::symlink_metadata(&path)
+        };
         match meta {
             Ok(m) => ok(stat_json(&m)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => ok(Value::Null),
-            Err(e) if e.raw_os_error() == Some(20) || e.raw_os_error() == Some(3) || e.raw_os_error() == Some(267) => {
+            Err(e)
+                if e.raw_os_error() == Some(20)
+                    || e.raw_os_error() == Some(3)
+                    || e.raw_os_error() == Some(267) =>
+            {
                 ok(Value::Null)
             }
             Err(e) => Err(e.into()),
@@ -114,7 +130,10 @@ pub async fn readdir(s: &Arc<Session>, a: Args<'_>) -> OpResult {
     blocking(move || {
         let meta = fs::metadata(&path)?;
         if !meta.is_dir() {
-            return Err(OpError::new("ENOTDIR", format!("not a directory: {}", path.display())));
+            return Err(OpError::new(
+                "ENOTDIR",
+                format!("not a directory: {}", path.display()),
+            ));
         }
         let mut entries = Vec::new();
         for entry in fs::read_dir(&path)? {
@@ -155,7 +174,10 @@ pub async fn read(s: &Arc<Session>, a: Args<'_>) -> OpResult {
         let mut f = fs::File::open(&path)?;
         let meta = f.metadata()?;
         if meta.is_dir() {
-            return Err(OpError::new("EISDIR", format!("is a directory: {}", path.display())));
+            return Err(OpError::new(
+                "EISDIR",
+                format!("is a directory: {}", path.display()),
+            ));
         }
         let size = meta.len();
         let available = size.saturating_sub(offset);
@@ -164,7 +186,10 @@ pub async fn read(s: &Arc<Session>, a: Args<'_>) -> OpResult {
             None => available,
         };
         if want > max {
-            return Err(OpError::new("ETOOBIG", format!("{} bytes exceeds limit {}", want, max)));
+            return Err(OpError::new(
+                "ETOOBIG",
+                format!("{} bytes exceeds limit {}", want, max),
+            ));
         }
         f.seek(SeekFrom::Start(offset))?;
         let mut buf = Vec::with_capacity(want as usize);
@@ -176,19 +201,26 @@ pub async fn read(s: &Arc<Session>, a: Args<'_>) -> OpResult {
 }
 
 fn temp_sibling(path: &Path) -> PathBuf {
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let rnd: u64 = rand::random();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let rnd: u64 = crate::util::random_u64();
     path.with_file_name(format!(".{name}.dsh-tmp-{rnd:016x}"))
 }
 
 fn ensure_parent(path: &Path, mkdirs: bool) -> Result<(), OpError> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            if mkdirs {
-                fs::create_dir_all(parent)?;
-            } else {
-                return Err(OpError::new("ENOENT", format!("parent directory does not exist: {}", parent.display())));
-            }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        if mkdirs {
+            fs::create_dir_all(parent)?;
+        } else {
+            return Err(OpError::new(
+                "ENOENT",
+                format!("parent directory does not exist: {}", parent.display()),
+            ));
         }
     }
     Ok(())
@@ -199,15 +231,15 @@ fn rename_replace(from: &Path, to: &Path) -> io::Result<()> {
         Ok(()) => Ok(()),
         Err(e) => {
             // Windows refuses to replace read-only targets; retry once after clearing the flag.
-            if to.exists() {
-                if let Ok(meta) = fs::metadata(to) {
-                    let mut p = meta.permissions();
-                    if p.readonly() {
-                        #[allow(clippy::permissions_set_readonly_false)]
-                        p.set_readonly(false);
-                        let _ = fs::set_permissions(to, p);
-                        return fs::rename(from, to);
-                    }
+            if to.exists()
+                && let Ok(meta) = fs::metadata(to)
+            {
+                let mut p = meta.permissions();
+                if p.readonly() {
+                    #[allow(clippy::permissions_set_readonly_false)]
+                    p.set_readonly(false);
+                    let _ = fs::set_permissions(to, p);
+                    return fs::rename(from, to);
                 }
             }
             Err(e)
@@ -215,19 +247,34 @@ fn rename_replace(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
-pub fn write_file(path: &Path, mode: &str, atomic: bool, mkdirs: bool, data: &[u8]) -> Result<Value, OpError> {
+pub fn write_file(
+    path: &Path,
+    mode: &str,
+    atomic: bool,
+    mkdirs: bool,
+    data: &[u8],
+) -> Result<Value, OpError> {
     ensure_parent(path, mkdirs)?;
     if let Ok(meta) = fs::metadata(path) {
         if meta.is_dir() {
-            return Err(OpError::new("EISDIR", format!("is a directory: {}", path.display())));
+            return Err(OpError::new(
+                "EISDIR",
+                format!("is a directory: {}", path.display()),
+            ));
         }
         if mode == "create" {
-            return Err(OpError::new("EEXIST", format!("already exists: {}", path.display())));
+            return Err(OpError::new(
+                "EEXIST",
+                format!("already exists: {}", path.display()),
+            ));
         }
     }
     match mode {
         "append" => {
-            let mut f = fs::OpenOptions::new().create(true).append(true).open(path)?;
+            let mut f = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
             f.write_all(data)?;
         }
         "create" | "overwrite" => {
@@ -239,7 +286,10 @@ pub fn write_file(path: &Path, mode: &str, atomic: bool, mkdirs: bool, data: &[u
                     f.sync_all()?;
                     drop(f);
                     if mode == "create" && path.exists() {
-                        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "already exists"));
+                        return Err(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            "already exists",
+                        ));
                     }
                     rename_replace(&tmp, path)
                 })();
@@ -248,7 +298,10 @@ pub fn write_file(path: &Path, mode: &str, atomic: bool, mkdirs: bool, data: &[u
                     return Err(e.into());
                 }
             } else if mode == "create" {
-                let mut f = fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+                let mut f = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)?;
                 f.write_all(data)?;
             } else {
                 fs::write(path, data)?;
@@ -312,7 +365,10 @@ pub async fn rename(s: &Arc<Session>, a: Args<'_>) -> OpResult {
     blocking(move || {
         fs::symlink_metadata(&from)?;
         if !overwrite && fs::symlink_metadata(&to).is_ok() {
-            return Err(OpError::new("EEXIST", format!("already exists: {}", to.display())));
+            return Err(OpError::new(
+                "EEXIST",
+                format!("already exists: {}", to.display()),
+            ));
         }
         rename_replace(&from, &to)?;
         ok(json!({}))
@@ -330,7 +386,10 @@ fn copy_recursive(from: &Path, to: &Path, overwrite: bool) -> Result<(), OpError
         }
     } else {
         if !overwrite && to.exists() {
-            return Err(OpError::new("EEXIST", format!("already exists: {}", to.display())));
+            return Err(OpError::new(
+                "EEXIST",
+                format!("already exists: {}", to.display()),
+            ));
         }
         fs::copy(from, to)?;
     }
@@ -345,7 +404,10 @@ pub async fn copy(s: &Arc<Session>, a: Args<'_>) -> OpResult {
     blocking(move || {
         let meta = fs::metadata(&from)?;
         if meta.is_dir() && !recursive {
-            return Err(OpError::new("EISDIR", "source is a directory; pass recursive"));
+            return Err(OpError::new(
+                "EISDIR",
+                "source is a directory; pass recursive",
+            ));
         }
         copy_recursive(&from, &to, overwrite)?;
         ok(json!({}))
@@ -367,7 +429,10 @@ pub async fn read_stream(s: &Arc<Session>, a: Args<'_>) -> OpResult {
     let file = tokio::fs::File::open(&path).await?;
     let meta = file.metadata().await?;
     if meta.is_dir() {
-        return Err(OpError::new("EISDIR", format!("is a directory: {}", path.display())));
+        return Err(OpError::new(
+            "EISDIR",
+            format!("is a directory: {}", path.display()),
+        ));
     }
     let handle = s.open_channel(&[1], None);
     let ch = handle.ch;
@@ -408,12 +473,19 @@ pub async fn write_stream(s: &Arc<Session>, a: Args<'_>) -> OpResult {
         let p = path.clone();
         blocking(move || ensure_parent(&p, mkdirs)).await?;
     }
-    if let Ok(meta) = tokio::fs::metadata(&path).await {
-        if meta.is_dir() {
-            return Err(OpError::new("EISDIR", format!("is a directory: {}", path.display())));
-        }
+    if let Ok(meta) = tokio::fs::metadata(&path).await
+        && meta.is_dir()
+    {
+        return Err(OpError::new(
+            "EISDIR",
+            format!("is a directory: {}", path.display()),
+        ));
     }
-    let target = if atomic { temp_sibling(&path) } else { path.clone() };
+    let target = if atomic {
+        temp_sibling(&path)
+    } else {
+        path.clone()
+    };
     let file = tokio::fs::File::create(&target).await?;
     let mut handle = s.open_channel(&[], None);
     let ch = handle.ch;

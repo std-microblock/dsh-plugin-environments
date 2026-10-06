@@ -1,100 +1,100 @@
 #![allow(dead_code)]
+mod cli;
 mod fs_ops;
 mod net;
 mod ops;
 mod proc;
 mod protocol;
+mod pty;
 mod search;
 mod session;
 mod sys;
+mod util;
+mod walk;
 mod winuser;
 
-use clap::{Parser, Subcommand};
+use cli::Cmd;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[derive(Parser, Debug)]
-#[command(name = "dsh-env-server", version, about = "Remote environment server for the DeepSeek Harness environments plugin")]
-struct Cli {
-    #[command(subcommand)]
-    cmd: Cmd,
-}
-
-#[derive(Subcommand, Debug)]
-enum Cmd {
-    /// Serve the environment protocol over TCP.
-    Serve {
-        /// Address to listen on, e.g. 0.0.0.0:7461 or 127.0.0.1:0.
-        #[arg(long, default_value = "127.0.0.1:7461")]
-        listen: String,
-        /// Shared secret clients must present.
-        #[arg(long)]
-        token: Option<String>,
-        /// Read the shared secret from a file.
-        #[arg(long)]
-        token_file: Option<PathBuf>,
-        /// Working directory for relative paths.
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-        /// Exit after the first connection ends.
-        #[arg(long)]
-        once: bool,
-    },
-    /// Serve exactly one session on stdin/stdout.
-    Stdio {
-        #[arg(long)]
-        cwd: Option<PathBuf>,
-    },
-    /// Manage dsh-managed local Windows accounts.
-    Winuser {
-        #[command(subcommand)]
-        cmd: winuser::WinUserCmd,
-    },
-}
-
 fn resolve_cwd(cwd: Option<PathBuf>) -> PathBuf {
     let cwd = cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    std::fs::canonicalize(&cwd).map(fs_ops::clean_path).unwrap_or(cwd)
+    std::fs::canonicalize(&cwd)
+        .map(fs_ops::clean_path)
+        .unwrap_or(cwd)
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(64)
+        .build()
+        .expect("tokio runtime")
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let cmd = match cli::parse(&args) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}\n\n{}", cli::USAGE);
+            std::process::exit(2);
+        }
+    };
     #[cfg(windows)]
     sys::win::init_dpi();
-    let code = match cli.cmd {
-        Cmd::Winuser { cmd } => match winuser::run(cmd) {
+    let code = match cmd {
+        Cmd::Help => {
+            print!("{}", cli::USAGE);
+            0
+        }
+        Cmd::Version => {
+            println!("dsh-env-server {}", sys::VERSION);
+            0
+        }
+        Cmd::Winuser(cmd) => match winuser::run(cmd) {
             Ok(v) => {
                 println!("{v}");
                 0
             }
             Err(e) => {
-                println!("{}", serde_json::json!({"ok": false, "error": format!("{e:#}")}));
+                println!("{}", serde_json::json!({"ok": false, "error": e}));
                 1
             }
         },
-        Cmd::Serve { listen, token, token_file, cwd, once } => {
-            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        Cmd::Serve {
+            listen,
+            token,
+            token_file,
+            cwd,
+            once,
+        } => {
+            let rt = runtime();
             match rt.block_on(serve(listen, token, token_file, resolve_cwd(cwd), once)) {
                 Ok(()) => 0,
                 Err(e) => {
-                    eprintln!("dsh-env-server: {e:#}");
+                    eprintln!("dsh-env-server: {e}");
                     1
                 }
             }
         }
         Cmd::Stdio { cwd } => {
-            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            let rt = runtime();
             let cwd = resolve_cwd(cwd);
             let r = rt.block_on(async move {
-                let opts = session::ConnOptions { token: None, cwd, idle_timeout: None };
+                let opts = session::ConnOptions {
+                    token: None,
+                    cwd,
+                    idle_timeout: None,
+                };
                 session::serve_connection(tokio::io::stdin(), tokio::io::stdout(), opts).await
             });
             rt.shutdown_timeout(Duration::from_millis(500));
             match r {
                 Ok(()) => 0,
                 Err(e) => {
-                    eprintln!("dsh-env-server: {e:#}");
+                    eprintln!("dsh-env-server: {e}");
                     1
                 }
             }
@@ -103,13 +103,20 @@ fn main() {
     std::process::exit(code);
 }
 
-async fn serve(listen: String, token: Option<String>, token_file: Option<PathBuf>, cwd: PathBuf, once: bool) -> anyhow::Result<()> {
+async fn serve(
+    listen: String,
+    token: Option<String>,
+    token_file: Option<PathBuf>,
+    cwd: PathBuf,
+    once: bool,
+) -> std::io::Result<()> {
     let token = match (token, token_file) {
         (Some(t), _) => t,
         (None, Some(f)) => std::fs::read_to_string(f)?.trim().to_string(),
         (None, None) => {
-            let bytes: [u8; 32] = rand::random();
-            let t: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let mut bytes = [0u8; 32];
+            util::random_bytes(&mut bytes);
+            let t = util::hex(&bytes);
             println!("DSH_ENV_SERVER token={t}");
             t
         }
@@ -124,9 +131,13 @@ async fn serve(listen: String, token: Option<String>, token_file: Option<PathBuf
         let cwd = cwd.clone();
         let task = tokio::spawn(async move {
             let (r, w) = stream.into_split();
-            let opts = session::ConnOptions { token: Some(token), cwd, idle_timeout: Some(Duration::from_secs(60)) };
+            let opts = session::ConnOptions {
+                token: Some(token),
+                cwd,
+                idle_timeout: Some(Duration::from_secs(60)),
+            };
             if let Err(e) = session::serve_connection(r, w, opts).await {
-                eprintln!("dsh-env-server: session {peer} ended: {e:#}");
+                eprintln!("dsh-env-server: session {peer} ended: {e}");
             }
         });
         if once {
