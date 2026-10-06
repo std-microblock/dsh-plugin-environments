@@ -105,7 +105,9 @@ fn bridge_udp_connected(s: &Arc<Session>, sock: UdpSocket, mut handle: ChannelHa
                 }
                 Err(e) => {
                     // ICMP port unreachable surfaces as ConnectionReset on Windows; keep going.
-                    if e.kind() == std::io::ErrorKind::ConnectionReset || e.kind() == std::io::ErrorKind::ConnectionRefused {
+                    if e.kind() == std::io::ErrorKind::ConnectionReset
+                        || e.kind() == std::io::ErrorKind::ConnectionRefused
+                    {
                         continue;
                     }
                     sr.close_channel(ch, None, Some(e.into()));
@@ -148,7 +150,11 @@ pub async fn connect(s: &Arc<Session>, a: Args<'_>) -> OpResult {
             ok(json!({ "ch": ch }))
         }
         "udp" => {
-            let bind: SocketAddr = if addr.is_ipv4() { "0.0.0.0:0".parse().unwrap() } else { "[::]:0".parse().unwrap() };
+            let bind: SocketAddr = if addr.is_ipv4() {
+                "0.0.0.0:0".parse().unwrap()
+            } else {
+                "[::]:0".parse().unwrap()
+            };
             let sock = UdpSocket::bind(bind).await?;
             sock.connect(addr).await?;
             let handle = s.open_channel(&[1], None);
@@ -173,10 +179,14 @@ pub async fn listen(s: &Arc<Session>, a: Args<'_>) -> OpResult {
             let sl = s.clone();
             let task = tokio::spawn(async move {
                 loop {
-                    let Ok((stream, peer)) = listener.accept().await else { break };
+                    let Ok((stream, peer)) = listener.accept().await else {
+                        break;
+                    };
                     let ch = sl.alloc_id();
                     let handle = sl.open_channel_with_id(ch, &[1], None, Some(id));
-                    sl.send_json(json!({"t":"accept","listener":id,"ch":ch,"peer":peer.to_string()}));
+                    sl.send_json(
+                        json!({"t":"accept","listener":id,"ch":ch,"peer":peer.to_string()}),
+                    );
                     bridge_tcp(&sl, stream, handle);
                 }
             });
@@ -191,10 +201,12 @@ pub async fn listen(s: &Arc<Session>, a: Args<'_>) -> OpResult {
                 let mut peers: HashMap<SocketAddr, (u64, Instant)> = HashMap::new();
                 let mut buf = vec![0u8; 65536];
                 loop {
-                    let r = tokio::time::timeout(Duration::from_secs(10), sock.recv_from(&mut buf)).await;
+                    let r = tokio::time::timeout(Duration::from_secs(10), sock.recv_from(&mut buf))
+                        .await;
                     let now = Instant::now();
                     peers.retain(|_, (ch, last)| {
-                        let alive = sl.channel_open(*ch) && now.duration_since(*last) < Duration::from_secs(120);
+                        let alive = sl.channel_open(*ch)
+                            && now.duration_since(*last) < Duration::from_secs(120);
                         if !alive {
                             sl.close_channel(*ch, None, None);
                         }
@@ -214,7 +226,9 @@ pub async fn listen(s: &Arc<Session>, a: Args<'_>) -> OpResult {
                         None => {
                             let ch = sl.alloc_id();
                             let mut handle = sl.open_channel_with_id(ch, &[1], None, Some(id));
-                            sl.send_json(json!({"t":"accept","listener":id,"ch":ch,"peer":peer.to_string()}));
+                            sl.send_json(
+                                json!({"t":"accept","listener":id,"ch":ch,"peer":peer.to_string()}),
+                            );
                             let ws = sock.clone();
                             let sw = sl.clone();
                             let writer = tokio::spawn(async move {

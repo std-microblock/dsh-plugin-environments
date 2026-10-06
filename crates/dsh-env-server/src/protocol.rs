@@ -58,18 +58,27 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Opti
     }
     let frame_len = u32::from_be_bytes(len_buf) as usize;
     if !(4..=MAX_FRAME).contains(&frame_len) {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("bad frame length {frame_len}")));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("bad frame length {frame_len}"),
+        ));
     }
     let mut body = vec![0u8; frame_len];
     reader.read_exact(&mut body).await?;
     let header_len = u32::from_be_bytes([body[0], body[1], body[2], body[3]]) as usize;
     if header_len > frame_len - 4 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "bad header length"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bad header length",
+        ));
     }
     let header: Value = serde_json::from_slice(&body[4..4 + header_len])
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad header json: {e}")))?;
     let Value::Object(header) = header else {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "header is not an object"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "header is not an object",
+        ));
     };
     let payload = body.split_off(4 + header_len);
     Ok(Some(Frame { header, payload }))
@@ -100,7 +109,10 @@ pub struct OpError {
 
 impl OpError {
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
-        OpError { code, message: message.into() }
+        OpError {
+            code,
+            message: message.into(),
+        }
     }
 
     pub fn invalid(message: impl Into<String>) -> Self {
@@ -138,15 +150,6 @@ impl From<io::Error> for OpError {
             },
         };
         OpError::new(code, e.to_string())
-    }
-}
-
-impl From<anyhow::Error> for OpError {
-    fn from(e: anyhow::Error) -> Self {
-        match e.downcast::<io::Error>() {
-            Ok(io) => io.into(),
-            Err(e) => OpError::new("EIO", format!("{e:#}")),
-        }
     }
 }
 

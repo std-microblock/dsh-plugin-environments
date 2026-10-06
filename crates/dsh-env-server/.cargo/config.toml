@@ -1,0 +1,31 @@
+# Build configuration for dsh-env-server. See docs/building-server.md.
+#
+# Plain `cargo build --release --target <triple>` works on stable for every
+# shipped target. The `dist` alias is the optional, smaller nightly build:
+#
+#   cargo +nightly dist --target <triple>
+#   -> target/<triple>/dist/dsh-env-server[.exe]
+#
+# It rebuilds std with the size-optimised feature set and immediate-abort
+# panics (no unwinding/formatting machinery). Note: a RUSTFLAGS environment
+# variable overrides `build.rustflags`, so leave RUSTFLAGS unset when using it.
+
+[alias]
+dist = [
+  "build",
+  "--profile", "dist",
+  "-Zbuild-std=std,panic_abort",
+  "-Zbuild-std-features=optimize_for_size",
+  "--config", "build.rustflags=['-Zunstable-options','-Cpanic=immediate-abort']",
+]
+
+# Static musl binaries link with the bundled LLD and Rust's self-contained musl
+# CRT, so no cross toolchain is needed (works from Windows, Linux and macOS hosts).
+[target.x86_64-unknown-linux-musl]
+linker = "rust-lld"
+
+[target.i686-unknown-linux-musl]
+linker = "rust-lld"
+
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"

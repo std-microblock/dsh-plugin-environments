@@ -2,8 +2,7 @@
 
 #[cfg(windows)]
 mod imp {
-    use anyhow::{Context, Result, bail};
-    use base64::Engine;
+    use super::{Result, bail};
     use serde_json::json;
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
@@ -17,7 +16,10 @@ mod imp {
     pub const COMMENT: &str = "dsh-env managed";
 
     fn wide(s: &str) -> Vec<u16> {
-        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+        OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     }
 
     unsafe fn from_wide(p: *const u16) -> String {
@@ -34,16 +36,21 @@ mod imp {
     }
 
     fn random_password() -> String {
-        const SETS: [&[u8]; 4] = [b"ABCDEFGHJKLMNPQRSTUVWXYZ", b"abcdefghijkmnopqrstuvwxyz", b"23456789", b"!#%+-=?@_"];
+        const SETS: [&[u8]; 4] = [
+            b"ABCDEFGHJKLMNPQRSTUVWXYZ",
+            b"abcdefghijkmnopqrstuvwxyz",
+            b"23456789",
+            b"!#%+-=?@_",
+        ];
         let mut out = Vec::new();
         for set in SETS {
             for _ in 0..5 {
-                out.push(set[rand::random::<u32>() as usize % set.len()]);
+                out.push(set[crate::util::random_u32() as usize % set.len()]);
             }
         }
         // Fisher-Yates shuffle
         for i in (1..out.len()).rev() {
-            let j = rand::random::<u32>() as usize % (i + 1);
+            let j = crate::util::random_u32() as usize % (i + 1);
             out.swap(i, j);
         }
         String::from_utf8(out).unwrap()
@@ -51,10 +58,28 @@ mod imp {
 
     fn dpapi_protect(data: &[u8]) -> Result<Vec<u8>> {
         unsafe {
-            let input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
-            let mut output = CRYPT_INTEGER_BLOB { cbData: 0, pbData: null_mut() };
-            if CryptProtectData(&input, null(), null(), null(), null(), CRYPTPROTECT_UI_FORBIDDEN, &mut output) == 0 {
-                bail!("CryptProtectData failed: {}", std::io::Error::last_os_error());
+            let input = CRYPT_INTEGER_BLOB {
+                cbData: data.len() as u32,
+                pbData: data.as_ptr() as *mut u8,
+            };
+            let mut output = CRYPT_INTEGER_BLOB {
+                cbData: 0,
+                pbData: null_mut(),
+            };
+            if CryptProtectData(
+                &input,
+                null(),
+                null(),
+                null(),
+                null(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            ) == 0
+            {
+                bail!(
+                    "CryptProtectData failed: {}",
+                    std::io::Error::last_os_error()
+                );
             }
             let v = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
             LocalFree(output.pbData as _);
@@ -64,10 +89,28 @@ mod imp {
 
     fn dpapi_unprotect(data: &[u8]) -> Result<Vec<u8>> {
         unsafe {
-            let input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
-            let mut output = CRYPT_INTEGER_BLOB { cbData: 0, pbData: null_mut() };
-            if CryptUnprotectData(&input, null_mut(), null(), null(), null(), CRYPTPROTECT_UI_FORBIDDEN, &mut output) == 0 {
-                bail!("CryptUnprotectData failed: {}", std::io::Error::last_os_error());
+            let input = CRYPT_INTEGER_BLOB {
+                cbData: data.len() as u32,
+                pbData: data.as_ptr() as *mut u8,
+            };
+            let mut output = CRYPT_INTEGER_BLOB {
+                cbData: 0,
+                pbData: null_mut(),
+            };
+            if CryptUnprotectData(
+                &input,
+                null_mut(),
+                null(),
+                null(),
+                null(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            ) == 0
+            {
+                bail!(
+                    "CryptUnprotectData failed: {}",
+                    std::io::Error::last_os_error()
+                );
             }
             let v = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
             LocalFree(output.pbData as _);
@@ -107,8 +150,8 @@ mod imp {
             bail!("NetUserAdd failed with code {rc} (parameter {parm_err})");
         }
         let protected = dpapi_protect(password.as_bytes())?;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(protected);
-        std::fs::write(secret_out, encoded).with_context(|| format!("writing {secret_out}"))?;
+        let encoded = crate::util::base64_encode(&protected);
+        std::fs::write(secret_out, encoded).map_err(|e| format!("writing {secret_out}: {e}"))?;
         Ok(json!({"ok": true, "name": name}))
     }
 
@@ -120,7 +163,16 @@ mod imp {
             let mut read = 0u32;
             let mut total = 0u32;
             let rc = unsafe {
-                NetUserEnum(null(), 1, FILTER_NORMAL_ACCOUNT, &mut buf, MAX_PREFERRED_LENGTH, &mut read, &mut total, &mut resume)
+                NetUserEnum(
+                    null(),
+                    1,
+                    FILTER_NORMAL_ACCOUNT,
+                    &mut buf,
+                    MAX_PREFERRED_LENGTH,
+                    &mut read,
+                    &mut total,
+                    &mut resume,
+                )
             };
             if rc != 0 && rc != 234 {
                 bail!("NetUserEnum failed with code {rc}");
@@ -148,7 +200,12 @@ mod imp {
 
     pub fn delete(name: &str, purge: bool) -> Result<serde_json::Value> {
         let managed = list()?.as_array().cloned().unwrap_or_default();
-        if !managed.iter().any(|u| u["name"].as_str().map(|n| n.eq_ignore_ascii_case(name)).unwrap_or(false)) {
+        if !managed.iter().any(|u| {
+            u["name"]
+                .as_str()
+                .map(|n| n.eq_ignore_ascii_case(name))
+                .unwrap_or(false)
+        }) {
             bail!("`{name}` is not a dsh-managed account");
         }
         let wname = wide(name);
@@ -203,14 +260,25 @@ mod imp {
         out
     }
 
-    pub fn launch(name: &str, secret_file: &str, cwd: Option<&str>, program: &[String]) -> Result<serde_json::Value> {
+    pub fn launch(
+        name: &str,
+        secret_file: &str,
+        cwd: Option<&str>,
+        program: &[String],
+    ) -> Result<serde_json::Value> {
         if program.is_empty() {
             bail!("missing program");
         }
-        let encoded = std::fs::read_to_string(secret_file).with_context(|| format!("reading {secret_file}"))?;
-        let protected = base64::engine::general_purpose::STANDARD.decode(encoded.trim())?;
-        let password = String::from_utf8(dpapi_unprotect(&protected)?)?;
-        let cmdline = program.iter().map(|a| quote_arg(a)).collect::<Vec<_>>().join(" ");
+        let encoded = std::fs::read_to_string(secret_file)
+            .map_err(|e| format!("reading {secret_file}: {e}"))?;
+        let protected = crate::util::base64_decode(encoded.trim())?;
+        let password =
+            String::from_utf8(dpapi_unprotect(&protected)?).map_err(|e| e.to_string())?;
+        let cmdline = program
+            .iter()
+            .map(|a| quote_arg(a))
+            .collect::<Vec<_>>()
+            .join(" ");
         let mut wcmd = wide(&cmdline);
         let wuser = wide(name);
         let wdomain = wide(".");
@@ -242,7 +310,10 @@ mod imp {
                 &mut pi,
             );
             if ok == 0 {
-                bail!("CreateProcessWithLogonW failed: {}", std::io::Error::last_os_error());
+                bail!(
+                    "CreateProcessWithLogonW failed: {}",
+                    std::io::Error::last_os_error()
+                );
             }
             let pid = pi.dwProcessId;
             // Report an immediate failure (e.g. 0xC0000142 when the account cannot reach the desktop).
@@ -255,67 +326,78 @@ mod imp {
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
             match early_exit {
-                Some(code) => Ok(json!({"ok": false, "pid": pid, "exitCode": code, "error": format!("the process exited immediately with code 0x{code:08X}")})),
+                Some(code) => Ok(
+                    json!({"ok": false, "pid": pid, "exitCode": code, "error": format!("the process exited immediately with code 0x{code:08X}")}),
+                ),
                 None => Ok(json!({"ok": true, "pid": pid})),
             }
         }
     }
 }
 
-use clap::Subcommand;
+/// Error type for winuser commands (message only).
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct Error(pub String);
 
-#[derive(Subcommand, Debug)]
-pub enum WinUserCmd {
-    /// Create a dsh-managed standard local account (requires administrator rights).
-    Create {
-        #[arg(long)]
-        name: String,
-        #[arg(long)]
-        secret_out: String,
-    },
-    /// Delete a dsh-managed account.
-    Delete {
-        #[arg(long)]
-        name: String,
-        #[arg(long)]
-        purge_profile: bool,
-    },
-    /// List dsh-managed accounts.
-    List,
-    /// Start a program as a dsh-managed account on the interactive desktop.
-    Launch {
-        #[arg(long)]
-        name: String,
-        #[arg(long)]
-        secret_file: String,
-        #[arg(long)]
-        cwd: Option<String>,
-        #[arg(last = true, required = true)]
-        program: Vec<String>,
-    },
-    /// Grant the account modify rights on a directory tree.
-    Grant {
-        #[arg(long)]
-        name: String,
-        #[arg(long)]
-        path: String,
-    },
+#[cfg(windows)]
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
-pub fn run(cmd: WinUserCmd) -> anyhow::Result<serde_json::Value> {
+#[cfg(windows)]
+impl From<String> for Error {
+    fn from(s: String) -> Self {
+        Error(s)
+    }
+}
+
+#[cfg(windows)]
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Error(e.to_string())
+    }
+}
+
+#[cfg(windows)]
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(windows)]
+macro_rules! bail {
+    ($($t:tt)*) => {
+        return Err($crate::winuser::Error(format!($($t)*)))
+    };
+}
+#[cfg(windows)]
+pub(crate) use bail;
+
+pub use crate::cli::WinUserCmd;
+
+pub fn run(cmd: WinUserCmd) -> std::result::Result<serde_json::Value, String> {
     #[cfg(windows)]
     {
-        match cmd {
+        let r = match cmd {
             WinUserCmd::Create { name, secret_out } => imp::create(&name, &secret_out),
-            WinUserCmd::Delete { name, purge_profile } => imp::delete(&name, purge_profile),
+            WinUserCmd::Delete {
+                name,
+                purge_profile,
+            } => imp::delete(&name, purge_profile),
             WinUserCmd::List => imp::list(),
-            WinUserCmd::Launch { name, secret_file, cwd, program } => imp::launch(&name, &secret_file, cwd.as_deref(), &program),
+            WinUserCmd::Launch {
+                name,
+                secret_file,
+                cwd,
+                program,
+            } => imp::launch(&name, &secret_file, cwd.as_deref(), &program),
             WinUserCmd::Grant { name, path } => imp::grant(&name, &path),
-        }
+        };
+        r.map_err(|e| e.0)
     }
     #[cfg(not(windows))]
     {
         let _ = cmd;
-        anyhow::bail!("winuser commands are only available on Windows")
+        Err("winuser commands are only available on Windows".into())
     }
 }

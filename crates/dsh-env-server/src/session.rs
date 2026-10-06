@@ -79,7 +79,11 @@ impl Session {
         match cwd {
             Some(c) if !c.is_empty() => {
                 let base = PathBuf::from(c);
-                let base = if base.is_absolute() { base } else { self.cwd.join(base) };
+                let base = if base.is_absolute() {
+                    base
+                } else {
+                    self.cwd.join(base)
+                };
                 base.join(p)
             }
             _ => self.cwd.join(p),
@@ -87,7 +91,11 @@ impl Session {
     }
 
     /// Register a channel whose server→client output uses the given fds.
-    pub fn open_channel(&self, fds: &[u8], control: Option<Arc<dyn ChannelControl>>) -> ChannelHandle {
+    pub fn open_channel(
+        &self,
+        fds: &[u8],
+        control: Option<Arc<dyn ChannelControl>>,
+    ) -> ChannelHandle {
         let ch = self.alloc_id();
         self.open_channel_with_id(ch, fds, control, None)
     }
@@ -100,15 +108,24 @@ impl Session {
         listener: Option<u64>,
     ) -> ChannelHandle {
         let (tx, rx) = mpsc::unbounded_channel();
-        let windows = fds.iter().map(|fd| (*fd, Arc::new(Semaphore::new(WINDOW)))).collect();
+        let windows = fds
+            .iter()
+            .map(|fd| (*fd, Arc::new(Semaphore::new(WINDOW))))
+            .collect();
         self.channels.lock().unwrap().insert(
             ch,
-            Channel { inbound: tx, windows, control, tasks: Vec::new(), listener },
+            Channel {
+                inbound: tx,
+                windows,
+                control,
+                tasks: Vec::new(),
+                listener,
+            },
         );
-        if let Some(id) = listener {
-            if let Some(l) = self.listeners.lock().unwrap().get_mut(&id) {
-                l.channels.push(ch);
-            }
+        if let Some(id) = listener
+            && let Some(l) = self.listeners.lock().unwrap().get_mut(&id)
+        {
+            l.channels.push(ch);
         }
         ChannelHandle { ch, inbound: rx }
     }
@@ -206,10 +223,10 @@ impl Session {
         if notify_owner {
             let _ = entry.inbound.send(Inbound::Close);
         }
-        if let Some(id) = entry.listener {
-            if let Some(l) = self.listeners.lock().unwrap().get_mut(&id) {
-                l.channels.retain(|c| *c != ch);
-            }
+        if let Some(id) = entry.listener
+            && let Some(l) = self.listeners.lock().unwrap().get_mut(&id)
+        {
+            l.channels.retain(|c| *c != ch);
         }
         drop(entry.control);
         for t in entry.tasks {
@@ -219,12 +236,22 @@ impl Session {
 
     pub fn control(&self, ch: u64) -> Result<Arc<dyn ChannelControl>, OpError> {
         let map = self.channels.lock().unwrap();
-        let c = map.get(&ch).ok_or_else(|| OpError::invalid(format!("unknown channel {ch}")))?;
-        c.control.clone().ok_or_else(|| OpError::unsupported("channel has no controls"))
+        let c = map
+            .get(&ch)
+            .ok_or_else(|| OpError::invalid(format!("unknown channel {ch}")))?;
+        c.control
+            .clone()
+            .ok_or_else(|| OpError::unsupported("channel has no controls"))
     }
 
     pub fn add_listener(&self, id: u64, task: AbortHandle) {
-        self.listeners.lock().unwrap().insert(id, Listener { task, channels: Vec::new() });
+        self.listeners.lock().unwrap().insert(
+            id,
+            Listener {
+                task,
+                channels: Vec::new(),
+            },
+        );
     }
 
     pub fn remove_listener(&self, id: u64) -> bool {
@@ -248,7 +275,9 @@ impl Session {
             "data" => {
                 let map = self.channels.lock().unwrap();
                 if let Some(c) = map.get(&ch) {
-                    let _ = c.inbound.send(Inbound::Data(fd.unwrap_or(0), frame.payload.clone()));
+                    let _ = c
+                        .inbound
+                        .send(Inbound::Data(fd.unwrap_or(0), frame.payload.clone()));
                 }
             }
             "eof" => {
@@ -307,28 +336,42 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Serve one connection until it closes.
-pub async fn serve_connection<R, W>(mut reader: R, writer: W, opts: ConnOptions) -> anyhow::Result<()>
+pub async fn serve_connection<R, W>(
+    mut reader: R,
+    writer: W,
+    opts: ConnOptions,
+) -> std::io::Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let mut writer = BufWriter::new(writer);
     let idle = opts.idle_timeout;
-    async fn read_next<R: AsyncRead + Unpin>(reader: &mut R, timeout: Option<Duration>) -> std::io::Result<Option<Frame>> {
+    async fn read_next<R: AsyncRead + Unpin>(
+        reader: &mut R,
+        timeout: Option<Duration>,
+    ) -> std::io::Result<Option<Frame>> {
         match timeout {
             Some(t) => match tokio::time::timeout(t, read_frame(reader)).await {
                 Ok(r) => r,
-                Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "idle timeout")),
+                Err(_) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "idle timeout",
+                )),
             },
             None => read_frame(reader).await,
         }
     }
 
     // Handshake.
-    let Some(hello) = read_next(&mut reader, idle).await? else { return Ok(()) };
+    let Some(hello) = read_next(&mut reader, idle).await? else {
+        return Ok(());
+    };
     let info = crate::sys::info(&opts.cwd);
     if hello.kind() != "hello" {
-        let f = Frame::new(json!({"t":"hello","v":1,"ok":false,"error":{"code":"PROTOCOL","message":"expected hello"}}));
+        let f = Frame::new(
+            json!({"t":"hello","v":1,"ok":false,"error":{"code":"PROTOCOL","message":"expected hello"}}),
+        );
         write_frame(&mut writer, &f).await?;
         tokio::io::AsyncWriteExt::flush(&mut writer).await?;
         return Ok(());
@@ -336,7 +379,9 @@ where
     if let Some(expected) = &opts.token {
         let got = hello.str("token").unwrap_or("");
         if !constant_time_eq(expected.as_bytes(), got.as_bytes()) {
-            let f = Frame::new(json!({"t":"hello","v":1,"ok":false,"error":{"code":"AUTH","message":"invalid token"}}));
+            let f = Frame::new(
+                json!({"t":"hello","v":1,"ok":false,"error":{"code":"AUTH","message":"invalid token"}}),
+            );
             write_frame(&mut writer, &f).await?;
             tokio::io::AsyncWriteExt::flush(&mut writer).await?;
             return Ok(());
@@ -372,7 +417,7 @@ where
         }
     });
 
-    let result: anyhow::Result<()> = async {
+    let result: std::io::Result<()> = async {
         loop {
             let Some(frame) = read_next(&mut reader, idle).await? else { break };
             match frame.kind() {

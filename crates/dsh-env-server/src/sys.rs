@@ -10,12 +10,7 @@ fn os_name() -> &'static str {
     if cfg!(target_os = "android") {
         "android"
     } else {
-        match std::env::consts::OS {
-            "macos" => "macos",
-            "windows" => "windows",
-            "linux" => "linux",
-            other => other,
-        }
+        std::env::consts::OS
     }
 }
 
@@ -23,18 +18,30 @@ fn hostname() -> String {
     std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .ok()
-        .or_else(|| std::fs::read_to_string("/etc/hostname").ok().map(|s| s.trim().to_string()))
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+        })
         .unwrap_or_else(|| "unknown".into())
 }
 
 fn user() -> String {
-    std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "unknown".into())
+    std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "unknown".into())
 }
 
 fn home() -> String {
     std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| if cfg!(windows) { "C:\\".into() } else { "/".into() })
+        .unwrap_or_else(|_| {
+            if cfg!(windows) {
+                "C:\\".into()
+            } else {
+                "/".into()
+            }
+        })
 }
 
 pub fn which(name: &str) -> Option<std::path::PathBuf> {
@@ -62,16 +69,41 @@ pub fn which(name: &str) -> Option<std::path::PathBuf> {
 /// The shell program and its leading arguments for running a command string.
 pub fn shell_invocation() -> (String, Vec<String>) {
     if cfg!(windows) {
-        let prog = if which("pwsh").is_some() { "pwsh.exe" } else { "powershell.exe" };
-        (prog.into(), vec!["-NoLogo".into(), "-NoProfile".into(), "-NonInteractive".into(), "-Command".into()])
+        let prog = if which("pwsh").is_some() {
+            "pwsh.exe"
+        } else {
+            "powershell.exe"
+        };
+        (
+            prog.into(),
+            vec![
+                "-NoLogo".into(),
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-Command".into(),
+            ],
+        )
     } else {
-        let shell = std::env::var("SHELL").ok().filter(|s| Path::new(s).exists()).unwrap_or_else(|| "/bin/sh".into());
+        let shell = std::env::var("SHELL")
+            .ok()
+            .filter(|s| Path::new(s).exists())
+            .unwrap_or_else(|| "/bin/sh".into());
         (shell, vec!["-c".into()])
     }
 }
 
 pub fn caps() -> Vec<&'static str> {
-    let mut caps = vec!["fs", "glob", "grep", "proc", "pty", "tcp", "tcp-listen", "udp", "udp-listen"];
+    let mut caps = vec![
+        "fs",
+        "glob",
+        "grep",
+        "proc",
+        "pty",
+        "tcp",
+        "tcp-listen",
+        "udp",
+        "udp-listen",
+    ];
     if cfg!(windows) {
         caps.push("screenshot");
         caps.push("input");
@@ -107,17 +139,27 @@ pub async fn screenshot(a: Args<'_>) -> OpResult {
     }
     #[cfg(not(windows))]
     {
-        Err(OpError::unsupported("screenshots are only supported on Windows hosts"))
+        Err(OpError::unsupported(
+            "screenshots are only supported on Windows hosts",
+        ))
     }
 }
 
 pub async fn input(a: Args<'_>) -> OpResult {
-    let actions = a.0.get("actions").and_then(Value::as_array).cloned().unwrap_or_default();
+    let actions =
+        a.0.get("actions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
     #[cfg(windows)]
     {
         for action in actions {
             if action.get("kind").and_then(Value::as_str) == Some("wait") {
-                let ms = action.get("ms").and_then(Value::as_u64).unwrap_or(0).min(60_000);
+                let ms = action
+                    .get("ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    .min(60_000);
                 tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
                 continue;
             }
@@ -130,7 +172,9 @@ pub async fn input(a: Args<'_>) -> OpResult {
     #[cfg(not(windows))]
     {
         let _ = actions;
-        Err(OpError::unsupported("input injection is only supported on Windows hosts"))
+        Err(OpError::unsupported(
+            "input injection is only supported on Windows hosts",
+        ))
     }
 }
 
@@ -164,7 +208,10 @@ pub mod win {
     pub fn capture() -> Result<(u32, u32, Vec<u8>), OpError> {
         let (x, y, w, h) = virtual_screen();
         if w <= 0 || h <= 0 {
-            return Err(OpError::new("EIO", "no visible desktop (is this an interactive session?)"));
+            return Err(OpError::new(
+                "EIO",
+                "no visible desktop (is this an interactive session?)",
+            ));
         }
         let mut bgra = vec![0u8; (w * h * 4) as usize];
         unsafe {
@@ -182,29 +229,33 @@ pub mod win {
             bi.bmiHeader.biHeight = -h;
             bi.bmiHeader.biPlanes = 1;
             bi.bmiHeader.biBitCount = 32;
-            bi.bmiHeader.biCompression = BI_RGB as u32;
-            let lines = GetDIBits(mem, bmp, 0, h as u32, bgra.as_mut_ptr() as _, &mut bi, DIB_RGB_COLORS);
+            bi.bmiHeader.biCompression = BI_RGB;
+            let lines = GetDIBits(
+                mem,
+                bmp,
+                0,
+                h as u32,
+                bgra.as_mut_ptr() as _,
+                &mut bi,
+                DIB_RGB_COLORS,
+            );
             SelectObject(mem, old);
             DeleteObject(bmp as _);
             DeleteDC(mem);
             ReleaseDC(std::ptr::null_mut(), screen);
             if ok == 0 || lines == 0 {
-                return Err(OpError::new("EIO", "screen capture failed (desktop locked or not interactive?)"));
+                return Err(OpError::new(
+                    "EIO",
+                    "screen capture failed (desktop locked or not interactive?)",
+                ));
             }
         }
         let mut rgba = Vec::with_capacity(bgra.len() / 4 * 3);
-        for px in bgra.chunks_exact(4) {
+        for px in bgra.as_chunks::<4>().0 {
             rgba.extend_from_slice(&[px[2], px[1], px[0]]);
         }
-        let mut out = Vec::new();
-        {
-            let mut enc = png::Encoder::new(&mut out, w as u32, h as u32);
-            enc.set_color(png::ColorType::Rgb);
-            enc.set_depth(png::BitDepth::Eight);
-            enc.set_compression(png::Compression::Fast);
-            let mut writer = enc.write_header().map_err(|e| OpError::new("EIO", e.to_string()))?;
-            writer.write_image_data(&rgba).map_err(|e| OpError::new("EIO", e.to_string()))?;
-        }
+        drop(bgra);
+        let out = crate::util::png_rgb(w as u32, h as u32, &rgba);
         Ok((w as u32, h as u32, out))
     }
 
@@ -212,9 +263,18 @@ pub mod win {
         if inputs.is_empty() {
             return Ok(());
         }
-        let n = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), size_of::<INPUT>() as i32) };
+        let n = unsafe {
+            SendInput(
+                inputs.len() as u32,
+                inputs.as_ptr(),
+                size_of::<INPUT>() as i32,
+            )
+        };
         if n as usize != inputs.len() {
-            return Err(OpError::new("EACCES", "SendInput was blocked (UIPI or secure desktop)"));
+            return Err(OpError::new(
+                "EACCES",
+                "SendInput was blocked (UIPI or secure desktop)",
+            ));
         }
         Ok(())
     }
@@ -222,14 +282,27 @@ pub mod win {
     fn mouse(flags: u32, dx: i32, dy: i32, data: i32) -> INPUT {
         let mut i: INPUT = unsafe { zeroed() };
         i.r#type = INPUT_MOUSE;
-        i.Anonymous.mi = MOUSEINPUT { dx, dy, mouseData: data as _, dwFlags: flags, time: 0, dwExtraInfo: 0 };
+        i.Anonymous.mi = MOUSEINPUT {
+            dx,
+            dy,
+            mouseData: data as _,
+            dwFlags: flags,
+            time: 0,
+            dwExtraInfo: 0,
+        };
         i
     }
 
     fn key(vk: u16, scan: u16, flags: u32) -> INPUT {
         let mut i: INPUT = unsafe { zeroed() };
         i.r#type = INPUT_KEYBOARD;
-        i.Anonymous.ki = KEYBDINPUT { wVk: vk, wScan: scan, dwFlags: flags, time: 0, dwExtraInfo: 0 };
+        i.Anonymous.ki = KEYBDINPUT {
+            wVk: vk,
+            wScan: scan,
+            dwFlags: flags,
+            time: 0,
+            dwExtraInfo: 0,
+        };
         i
     }
 
@@ -237,7 +310,12 @@ pub mod win {
         let (vx, vy, vw, vh) = virtual_screen();
         let nx = (((x - vx as f64) * 65535.0) / ((vw - 1).max(1) as f64)).round() as i32;
         let ny = (((y - vy as f64) * 65535.0) / ((vh - 1).max(1) as f64)).round() as i32;
-        mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny, 0)
+        mouse(
+            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+            nx,
+            ny,
+            0,
+        )
     }
 
     fn vk_for(name: &str) -> Option<u16> {
@@ -265,10 +343,10 @@ pub mod win {
             "capslock" => VK_CAPITAL,
             "printscreen" => VK_SNAPSHOT,
             _ => {
-                if let Some(f) = n.strip_prefix('f').and_then(|d| d.parse::<u16>().ok()) {
-                    if (1..=24).contains(&f) {
-                        return Some(VK_F1 + f - 1);
-                    }
+                if let Some(f) = n.strip_prefix('f').and_then(|d| d.parse::<u16>().ok())
+                    && (1..=24).contains(&f)
+                {
+                    return Some(VK_F1 + f - 1);
                 }
                 let chars: Vec<char> = n.chars().collect();
                 if chars.len() == 1 {
@@ -294,19 +372,33 @@ pub mod win {
         let mut inputs = Vec::new();
         match kind {
             "move" => {
-                let (Some(x), Some(y)) = (fx, fy) else { return Err(OpError::invalid("move needs x and y")) };
+                let (Some(x), Some(y)) = (fx, fy) else {
+                    return Err(OpError::invalid("move needs x and y"));
+                };
                 inputs.push(move_to(x, y));
             }
             "click" => {
                 if let (Some(x), Some(y)) = (fx, fy) {
                     inputs.push(move_to(x, y));
                 }
-                let (down, up) = match action.get("button").and_then(Value::as_str).unwrap_or("left") {
+                let (down, up) = match action
+                    .get("button")
+                    .and_then(Value::as_str)
+                    .unwrap_or("left")
+                {
                     "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
                     "middle" => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
                     _ => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
                 };
-                let times = if action.get("double").and_then(Value::as_bool).unwrap_or(false) { 2 } else { 1 };
+                let times = if action
+                    .get("double")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    2
+                } else {
+                    1
+                };
                 for _ in 0..times {
                     inputs.push(mouse(down, 0, 0, 0));
                     inputs.push(mouse(up, 0, 0, 0));
@@ -341,7 +433,10 @@ pub mod win {
                 let combo = action.get("key").and_then(Value::as_str).unwrap_or("");
                 let mut vks = Vec::new();
                 for part in combo.split('+').map(str::trim).filter(|p| !p.is_empty()) {
-                    vks.push(vk_for(part).ok_or_else(|| OpError::invalid(format!("unknown key `{part}`")))?);
+                    vks.push(
+                        vk_for(part)
+                            .ok_or_else(|| OpError::invalid(format!("unknown key `{part}`")))?,
+                    );
                 }
                 for vk in &vks {
                     inputs.push(key(*vk, 0, 0));
