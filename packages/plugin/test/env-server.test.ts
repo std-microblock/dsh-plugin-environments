@@ -116,6 +116,15 @@ test('env-server over stdio and tcp', needsServer, async t => {
     assert.ok(raw.stdout.equals(bin), raw.stdout.toString('hex'))
     await assert.rejects(env.exec({ argv: ['no-such-program-文件'] }), { code: 'ENOENT' })
     await assert.rejects(env.exec({ argv: ['cmd.exe'], encoding: 'latin1' as 'raw' }), { code: 'EINVAL' })
+    // Non-ASCII paths in fs ops and as cwd.
+    const dir = path.join(tmp, '目录😀')
+    await env.writeFile(path.join(dir, '文件.txt'), '内容', { mkdirs: true })
+    assert.deepEqual(
+      (await env.readdir(dir)).map(e => e.name),
+      ['文件.txt'],
+    )
+    const here = await env.exec({ command: '(Get-Location).Path; Get-Content 文件.txt -Encoding UTF8', cwd: dir })
+    assert.deepEqual(here.stdout.toString('utf8').trim().split(/\r?\n/), [dir, '内容'])
   })
 
   await t.test('pty', async () => {
