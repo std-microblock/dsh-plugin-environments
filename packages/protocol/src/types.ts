@@ -150,7 +150,17 @@ export interface SpawnArgs {
   env?: Record<string, string | null>
   clearEnv?: boolean
   pty?: PtySize
+  /**
+   * How the server treats pipe output on Windows (ignored elsewhere and for PTYs, whose output is
+   * always UTF-8): `auto` (default) passes valid UTF-8 through and transcodes legacy code-page
+   * text (e.g. GBK) to UTF-8; `utf8` additionally forces the child's console to UTF-8 (default
+   * for `command`); `raw` forwards the bytes untouched (binary output).
+   */
+  encoding?: SpawnEncoding
 }
+
+/** See {@link SpawnArgs.encoding}. */
+export type SpawnEncoding = 'auto' | 'utf8' | 'raw'
 
 /** Pointer/keyboard action for `sys.input`. */
 export type InputAction =

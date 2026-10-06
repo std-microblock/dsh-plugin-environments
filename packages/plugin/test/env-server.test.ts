@@ -98,6 +98,26 @@ test('env-server over stdio and tcp', needsServer, async t => {
     assert.notEqual(exit.code, 0)
   })
 
+  await t.test('windows console encoding', { skip: isWin ? false : 'Windows only' }, async () => {
+    // Default (utf8): the child runs on a UTF-8 console, so even non-GBK text survives.
+    const r = await env.exec({ argv: ['cmd.exe', '/d', '/c', 'echo', '中文😀한국어'] })
+    assert.equal(r.stdout.toString('utf8').trim(), '中文😀한국어')
+    const exit = await env.exec({ argv: ['cmd.exe', '/d', '/c', 'exit 5'] })
+    assert.equal(exit.code, 5)
+    const ps = await env.exec({ command: '"管道中文" | findstr .; Write-Output "输出"' })
+    assert.deepEqual(ps.stdout.toString('utf8').trim().split(/\r?\n/), ['管道中文', '输出'])
+    // auto: the console keeps its code page; code-page text is transcoded.
+    const auto = await env.exec({ argv: ['cmd.exe', '/d', '/c', 'echo', '中文'], encoding: 'auto' })
+    assert.equal(auto.stdout.toString('utf8').trim(), '中文')
+    // raw: bytes are forwarded untouched.
+    const bin = Buffer.from([0x41, 0xd6, 0xd0, 0xff, 0x80, 0x0a, 0xe4, 0xb8])
+    fs.writeFileSync(path.join(tmp, 'bin.dat'), bin)
+    const raw = await env.exec({ argv: ['cmd.exe', '/d', '/c', 'type', 'bin.dat'], cwd: tmp, encoding: 'raw' })
+    assert.ok(raw.stdout.equals(bin), raw.stdout.toString('hex'))
+    await assert.rejects(env.exec({ argv: ['no-such-program-文件'] }), { code: 'ENOENT' })
+    await assert.rejects(env.exec({ argv: ['cmd.exe'], encoding: 'latin1' as 'raw' }), { code: 'EINVAL' })
+  })
+
   await t.test('pty', async () => {
     const p = await env.spawn({ command: 'echo ptyhello', pty: { rows: 24, cols: 80 } })
     let out = ''

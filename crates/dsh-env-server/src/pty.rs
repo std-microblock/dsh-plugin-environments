@@ -34,7 +34,15 @@ pub use windows::*;
 
 /// Build the child's environment: inherited (unless cleared) plus ordered edits.
 fn effective_env(cmd: &PtyCommand) -> Vec<(OsString, OsString)> {
-    let mut env: Vec<(OsString, OsString)> = if cmd.clear_env {
+    apply_env(&cmd.env, cmd.clear_env)
+}
+
+/// The inherited (unless `clear`) environment with ordered edits applied.
+pub(crate) fn apply_env(
+    edits: &[(String, Option<String>)],
+    clear: bool,
+) -> Vec<(OsString, OsString)> {
+    let mut env: Vec<(OsString, OsString)> = if clear {
         Vec::new()
     } else {
         std::env::vars_os().collect()
@@ -46,7 +54,7 @@ fn effective_env(cmd: &PtyCommand) -> Vec<(OsString, OsString)> {
             a.as_os_str() == b
         }
     };
-    for (k, v) in &cmd.env {
+    for (k, v) in edits {
         env.retain(|(ek, _)| !same(ek, k));
         if let Some(v) = v {
             env.push((k.into(), v.into()));
@@ -382,7 +390,11 @@ mod windows {
     }
 
     /// Resolve a bare program name through PATH / PATHEXT of the child environment.
-    fn resolve_program(name: &str, env: &[(OsString, OsString)], cwd: &std::path::Path) -> String {
+    pub fn resolve_program(
+        name: &str,
+        env: &[(OsString, OsString)],
+        cwd: &std::path::Path,
+    ) -> String {
         if name.contains(['/', '\\', ':']) {
             return name.to_string();
         }

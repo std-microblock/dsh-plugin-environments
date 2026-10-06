@@ -34,6 +34,13 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 fn main() {
+    #[cfg(windows)]
+    {
+        let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        if raw.first().is_some_and(|a| a == proc::UTF8_TRAMPOLINE) {
+            std::process::exit(proc::utf8_trampoline(&raw[1..]));
+        }
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = match cli::parse(&args) {
         Ok(c) => c,
