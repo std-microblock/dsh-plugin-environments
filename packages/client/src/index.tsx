@@ -1,12 +1,15 @@
-// Client module entry: registers the Environments page, its sidebar icon and the composer chip.
+// Client module entry: registers the Environments page, its sidebar icon, the composer chip and the
+// workspace-binding decorations of the sidebar (a `shell.overlay` entry, see workspace-decor.tsx).
 import * as React from 'react'
 import { useSyncExternalStore } from 'react'
+import { BindingsStore } from './bindings.ts'
 import { EnvironmentChip } from './chip.tsx'
 import type { ClientContext } from './host-api.ts'
 import { IconEnvironments } from './icons.tsx'
 import { NS, dictionaries } from './locales.ts'
 import { EnvironmentsPage } from './page.tsx'
 import CSS from './styles.css'
+import { WorkspaceDecorations, type UseWorkspaces } from './workspace-decor.tsx'
 
 const PANEL_ID = 'environments'
 
@@ -53,6 +56,12 @@ export function apply(ctx: ClientContext): void {
     return <EnvironmentChip sessionId={sessionId} t={t} openManager={openManager} />
   }
 
+  const bindings = new BindingsStore()
+  function Decorations({ useWorkspaces }: { useWorkspaces?: UseWorkspaces | undefined }) {
+    useSyncExternalStore(subscribeLocale, localeSnapshot)
+    return <WorkspaceDecorations store={bindings} t={t} useWorkspaces={useWorkspaces} />
+  }
+
   function PanelIcon({ size }: { size?: number }) {
     return <IconEnvironments size={size} />
   }
@@ -91,6 +100,18 @@ export function apply(ctx: ClientContext): void {
         inject: sessionId => ({ sessionId: sessionId === undefined ? undefined : String(sessionId) }),
       },
       Chip,
+    ),
+  )
+
+  // Workspace rows have no DSH seat; the frame-wide overlay list hosts the decoration driver.
+  ctx.slots.inject('shell.overlay', () =>
+    ctx.slots.register(
+      {
+        name: 'shell.overlay',
+        id: 'environments.workspace-bindings',
+        locale: NS,
+      },
+      Decorations,
     ),
   )
 }

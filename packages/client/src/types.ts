@@ -77,7 +77,7 @@ export interface SessionView {
   sessionId: string
   live: boolean
   cwd?: string
-  mount?: { envId: string; remoteRoot?: string; source: 'session' | 'workspace' }
+  mount?: { envId: string; remoteRoot?: string; source: 'session' | 'workspace' | 'default' }
   mountExplicitlyOff: boolean
   mountActive?: { envId: string; remoteRoot: string; since: number }
   mountError?: string
@@ -123,4 +123,35 @@ export interface TestResultView {
 export interface CreatedWorkspaceView {
   workspace: RemoteWorkspaceView
   workspaceId?: string
+}
+
+export type AvailabilityState = 'available' | 'busy' | 'offline' | 'error' | 'unknown'
+
+export interface AvailabilityView {
+  state: AvailabilityState
+  reason?: string
+  checkedAt?: number
+}
+
+/** What one workspace is bound to (`workspace.bindings`). */
+export interface BindingView {
+  workspaceId?: string
+  path: string
+  /** `remote`: a remote workspace; `default`: a host workspace with a default environment; `host`: neither. */
+  kind: 'remote' | 'default' | 'host'
+  envId?: string
+  remoteRoot?: string
+  remoteWorkspace?: { id: string; title: string }
+  borrowable?: string[]
+}
+
+export interface BindingsView {
+  bindings: BindingView[]
+  availability: Record<string, AvailabilityView>
+  environments: { id: string; name: string; kind: EnvKind }[]
+}
+
+export interface WorkspaceSettingsView {
+  borrowable?: string[]
+  defaultMount?: { envId: string; remoteRoot?: string }
 }

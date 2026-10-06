@@ -6,7 +6,8 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test \"test/**/*.test.ts\""
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.4",

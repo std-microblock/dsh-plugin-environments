@@ -4,10 +4,11 @@ import path from 'node:path'
 import { EnvError, errorCode, errorMessage, type Info } from '@dsh-environments/protocol'
 import { ACCOUNT_RE, createWindowsAccount, deleteWindowsAccount, listWindowsAccounts } from '../env/winuser/accounts.ts'
 import type { Borrowing } from '../borrowing/index.ts'
-import type { PluginContext } from '../host-api.ts'
+import { sessionStarted, type PluginContext } from '../host-api.ts'
+import { AvailabilityChecker } from '../manager/availability.ts'
 import type { DefinitionInput } from '../manager/definitions.ts'
 import type { EnvironmentManager } from '../manager/manager.ts'
-import type { SessionMount, SessionSettings } from '../manager/state.ts'
+import type { SessionMount, SessionSettings, WorkspaceDefaultMount, WorkspaceSettings } from '../manager/state.ts'
 import type { Mounting } from '../mount/index.ts'
 
 /** Public subset of an environment's Info. */
@@ -43,6 +44,8 @@ export interface ApiDeps {
   mounting: Mounting
   borrowing: Borrowing
   mountsDir: string
+  /** Availability checker (tests inject one with stubbed probes). */
+  availability?: AvailabilityChecker | undefined
 }
 
 /** A request field as a string (numbers and booleans are converted; anything else is absent). */
@@ -54,9 +57,22 @@ const text = (v: unknown): string => str(v) ?? ''
 export function createActions(
   ctx: PluginContext,
   manager: EnvironmentManager,
-  { mounting, borrowing, mountsDir }: ApiDeps,
+  { mounting, borrowing, mountsDir, availability = new AvailabilityChecker(manager) }: ApiDeps,
 ): Record<string, Action> {
   const infoCache = new Map<string, InfoCacheEntry>()
+
+  /** Host path of a workspace given by path or by DSH workspace id. */
+  const workspacePathOf = (workspacePath: unknown, workspaceId: unknown): string => {
+    let p = str(workspacePath)
+    if (!p && workspaceId) {
+      const id = text(workspaceId)
+      p =
+        ctx.get('workspaceRegistry')?.get(id)?.path ??
+        manager.state.remoteWorkspaces.find(w => w.workspaceId === id)?.hostPath
+    }
+    if (!p) throw new EnvError('EINVAL', 'workspace not found')
+    return p
+  }
 
   const agentFor = (sessionId: string) => {
     try {
@@ -71,18 +87,14 @@ export function createActions(
     const agent = agentFor(sessionId)
     const settings = manager.sessionSettings(sessionId)
     const cwd = agent?.session.header.cwd ?? settings.cwd
-    const mount = manager.mountFor(sessionId, cwd)
     const record = agent ? mounting.mountOf(agent) : undefined
     const borrowable = manager.borrowableFor(sessionId, cwd)
     const held = agent
       ? borrowing.heldOf(agent).map(e => ({ ...e.lease.describe(), name: e.lease.def.name, tools: e.tools.length }))
       : []
-    let started = false
-    try {
-      started = !!agent && agent.session.requestHeader?.() !== undefined
-    } catch {
-      // not started
-    }
+    const started = !!agent && sessionStarted(agent)
+    // A session that has not started yet previews its workspace's default environment.
+    const mount = manager.mountFor(sessionId, cwd, { fresh: !started })
     return {
       sessionId,
       live: !!agent,
@@ -125,18 +137,21 @@ export function createActions(
     async save({ environment }) {
       const def = manager.upsert(environment as DefinitionInput)
       infoCache.delete(def.id)
+      availability.invalidate(def.id)
       return { environment: manager.publicDef(def) }
     },
     async delete({ id }) {
       const envId = text(id)
       for (const l of manager.leasesOf(envId)) await l.release('environment deleted')
       manager.remove(envId)
+      availability.invalidate(envId)
       return {}
     },
     async test({ id }) {
       const envId = text(id)
       const def = manager.require(envId)
       const started = Date.now()
+      availability.invalidate(envId)
       try {
         const env = await manager.open(def)
         const info = env.info
@@ -213,6 +228,7 @@ export function createActions(
       if (mount !== undefined) {
         const m = mount as SessionMount | false | null
         patch.mount = m === null ? undefined : m === false ? false : { envId: m.envId, remoteRoot: m.remoteRoot }
+        patch.mountOrigin = undefined
         patch.mountError = undefined
       }
       if (borrowable !== undefined)
@@ -230,15 +246,53 @@ export function createActions(
       }
       return { session: sessionState(sid) }
     },
-    async 'workspace.set'({ workspacePath, workspaceId, borrowable }) {
-      let p = str(workspacePath)
-      if (!p && workspaceId) p = ctx.get('workspaceRegistry')?.get(text(workspaceId))?.path
-      if (!p) throw new EnvError('EINVAL', 'workspace not found')
-      return {
-        settings: manager.setWorkspaceSettings(p, {
-          borrowable: borrowable === null ? undefined : (borrowable as string[] | undefined),
-        }),
+    /**
+     * Change a workspace's defaults. Only the fields present in the body change:
+     * `borrowable` (string[] or null = every environment) and `defaultMount`
+     * ({ envId, remoteRoot? } or null = none).
+     */
+    async 'workspace.set'({ workspacePath, workspaceId, borrowable, defaultMount }) {
+      const p = workspacePathOf(workspacePath, workspaceId)
+      let settings: WorkspaceSettings = manager.workspaceSettings(p)
+      if (borrowable !== undefined) {
+        settings = manager.setWorkspaceSettings(p, {
+          borrowable: Array.isArray(borrowable) ? borrowable.map(String) : null,
+        })
       }
+      if (defaultMount !== undefined) {
+        settings = manager.setWorkspaceDefaultMount(p, parseDefaultMount(defaultMount))
+      }
+      return { settings, binding: manager.workspaceBinding(p, str(workspaceId)) }
+    },
+    /**
+     * Bindings of the workspaces the GUI lists, with the availability of every bound environment.
+     * Body: `{ workspaces: [{ workspaceId, path }] }`.
+     */
+    async 'workspace.bindings'({ workspaces }) {
+      const items = Array.isArray(workspaces) ? (workspaces as unknown[]) : []
+      const bindings = items.flatMap(item => {
+        if (!item || typeof item !== 'object') return []
+        const record = item as Record<string, unknown>
+        const workspaceId = str(record['workspaceId'])
+        let p = str(record['path'])
+        if (!p && workspaceId) {
+          try {
+            p = workspacePathOf(undefined, workspaceId)
+          } catch {
+            // unknown workspace: skipped
+          }
+        }
+        if (!p) return []
+        return [{ workspaceId, path: p, ...manager.workspaceBinding(p, workspaceId) }]
+      })
+      await manager.refreshDiscovery(false)
+      const envIds = [...new Set(bindings.flatMap(b => (b.envId ? [b.envId] : [])))]
+      const availabilityById = await availability.check(envIds)
+      const environments = envIds.flatMap(id => {
+        const def = manager.get(id)
+        return def ? [{ id: def.id, name: def.name, kind: def.kind }] : []
+      })
+      return { bindings, availability: availabilityById, environments }
     },
     async 'lease.release'({ leaseId }) {
       return { released: await borrowing.releaseLease(text(leaseId)) }
@@ -277,4 +331,15 @@ export function createActions(
       return { home: os.homedir(), mountsDir, sep: path.sep }
     },
   }
+}
+
+/** Parse the `defaultMount` field of `workspace.set`: an object with `envId`, or null/false to clear. */
+export function parseDefaultMount(value: unknown): WorkspaceDefaultMount | null {
+  if (value === null || value === false || value === '') return null
+  if (typeof value !== 'object') throw new EnvError('EINVAL', 'defaultMount must be { envId, remoteRoot? } or null')
+  const v = value as Record<string, unknown>
+  const envId = str(v['envId'])
+  if (!envId) throw new EnvError('EINVAL', 'defaultMount.envId is required')
+  const remoteRoot = str(v['remoteRoot'])
+  return remoteRoot ? { envId, remoteRoot } : { envId }
 }
