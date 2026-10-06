@@ -163,6 +163,11 @@ function wsTransport(socket: Duplex, head: Buffer, isClient: boolean): Transport
     }
   }
   socket.on('data', onData)
+  // Upgraded http.Server sockets allow half-open connections: finish ours when the peer does.
+  socket.on('end', () => {
+    socket.end()
+    close()
+  })
   socket.on('close', close)
   socket.on('error', (e: Error) => {
     if (!closed) t.emit('error', e)

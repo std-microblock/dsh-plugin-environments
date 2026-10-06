@@ -140,6 +140,37 @@ test('websocket frame codec', () => {
   }
 })
 
+test('websocket server notices a peer that vanishes without a close frame', async () => {
+  const server = http.createServer()
+  const accepted = new Promise<Transport>(resolve =>
+    server.on('upgrade', (req: http.IncomingMessage, socket, head) => {
+      const t = wsAccept(req, socket, head)
+      if (t) resolve(t)
+    }),
+  )
+  await new Promise<void>(r => server.listen(0, '127.0.0.1', r))
+  const port = (server.address() as net.AddressInfo).port
+  try {
+    const raw = await new Promise<net.Socket>((resolve, reject) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port,
+        headers: { Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==' },
+      })
+      req.on('upgrade', (_res, socket) => resolve(socket))
+      req.on('error', reject)
+      req.end()
+    })
+    const srv = await accepted
+    const closed = new Promise<void>(r => srv.on('close', r))
+    raw.end() // FIN only, like a killed process behind adb / a proxy
+    await closed
+  } finally {
+    server.close()
+    server.closeAllConnections()
+  }
+})
+
 test('websocket client and server over http upgrade', async () => {
   const server = http.createServer((_req, res) => res.writeHead(404).end())
   const accepted = new Promise<Transport>(resolve =>
