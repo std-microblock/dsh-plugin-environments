@@ -4,39 +4,19 @@ on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  node:
-    name: Node (lint, typecheck, test, build)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 12
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 26
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm format:check
-      - run: pnpm lint
-      - run: pnpm typecheck
-      # Tests that need a dsh-env-server binary skip themselves when none is staged in
-      # packages/plugin/bin (or set via DSH_ENV_SERVER_BIN); the Rust job will provide one.
-      - run: pnpm test
-      - run: pnpm build:plugin
-      - run: pnpm build:client
-      - uses: actions/upload-artifact@v4
-        with:
-          name: plugin-js
-          path: |
-            packages/plugin/dist
-            packages/plugin/client.js
-
-  # Rust jobs (build/test of crates/dsh-env-server, cross builds staged into
-  # packages/plugin/bin/<platform>-<arch>/) are added here.
+  # Everything lives in the reusable build workflow, shared with release.yml. CI falls back to a
+  # stable server build (with a warning) if the pinned nightly dist build breaks.
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      strict: false

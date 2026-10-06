@@ -1,0 +1,228 @@
+name: Build
+
+# Reusable: checks, server binaries for every shipped target, Node tests against the built server,
+# and the packaged plugin. Called by ci.yml (every push / PR) and release.yml (tags).
+on:
+  workflow_call:
+    inputs:
+      strict:
+        description: Fail instead of falling back to a stable build when the pinned nightly dist build fails.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  NODE_VERSION: 26
+  PNPM_VERSION: 12
+
+jobs:
+  rust-check:
+    name: Rust check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            test: true
+          - os: windows-latest
+            test: true
+          # macOS: clippy only (compile + lint check of the Unix/macOS code paths).
+          - os: macos-15
+            test: false
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: crates/dsh-env-server
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal -c rustfmt,clippy
+          rustup default stable
+          if [ "$RUNNER_OS" = Linux ]; then rustup target add x86_64-unknown-linux-musl; fi
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/dsh-env-server
+          key: check
+      - name: cargo fmt
+        if: runner.os == 'Linux'
+        run: cargo fmt --check
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: cargo clippy (musl)
+        if: runner.os == 'Linux'
+        run: cargo clippy --locked --all-targets --target x86_64-unknown-linux-musl -- -D warnings
+      - name: cargo test
+        if: matrix.test
+        run: cargo test --locked
+
+  binaries:
+    name: Server ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: win32-x64, triple: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: linux-x64, triple: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: linux-ia32, triple: i686-unknown-linux-musl, os: ubuntu-latest }
+          - { target: linux-arm64, triple: aarch64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: darwin-arm64, triple: aarch64-apple-darwin, os: macos-15 }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      # The nightly is pinned in scripts/dist-toolchain.txt (the only place to change it).
+      - name: Install toolchains
+        id: toolchain
+        env:
+          TRIPLE: ${{ matrix.triple }}
+        run: |
+          nightly=$(tr -d '[:space:]' < scripts/dist-toolchain.txt)
+          echo "nightly=$nightly" >> "$GITHUB_OUTPUT"
+          rustup toolchain install stable --profile minimal -t "$TRIPLE"
+          rustup toolchain install "$nightly" --profile minimal -c rust-src -t "$TRIPLE" \
+            || echo "::warning::could not install $nightly; the dist build will fail or fall back"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/dsh-env-server
+          key: ${{ matrix.triple }}-${{ steps.toolchain.outputs.nightly }}
+      - name: Build (nightly dist${{ !inputs.strict && ', stable fallback' || '' }})
+        run: node scripts/build-server.ts --dist ${{ !inputs.strict && '--fallback' || '' }} --target ${{ matrix.target }} --out bin
+      - name: Smoke test
+        if: matrix.target != 'linux-arm64'
+        run: bin/${{ matrix.target }}/dsh-env-server${{ runner.os == 'Windows' && '.exe' || '' }} --version
+      - uses: actions/upload-artifact@v7
+        with:
+          name: server-${{ matrix.target }}
+          path: bin/
+          if-no-files-found: error
+          retention-days: 14
+
+  node:
+    name: Node (${{ matrix.os }})
+    needs: binaries
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: linux-x64 }
+          - { os: windows-latest, target: win32-x64 }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - if: runner.os == 'Linux'
+        run: pnpm format:check
+      - if: runner.os == 'Linux'
+        run: pnpm lint
+      - if: runner.os == 'Linux'
+        run: pnpm typecheck
+      - uses: actions/download-artifact@v8
+        with:
+          name: server-${{ matrix.target }}
+          path: packages/plugin/bin
+      - run: chmod +x packages/plugin/bin/*/dsh-env-server*
+      # The env-server integration tests fail instead of skipping when no binary is found.
+      - run: pnpm test
+        env:
+          DSH_ENV_SERVER_REQUIRED: '1'
+
+  cross-smoke:
+    name: Server on ia32 / arm64 (qemu)
+    needs: binaries
+    # Pinned: the qemu-user-static package name differs across Ubuntu releases.
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: server-linux-{ia32,arm64}
+          merge-multiple: true
+          path: bin
+      - name: Install qemu-user
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends qemu-user-static
+      - name: Version smoke test
+        run: |
+          chmod +x bin/*/dsh-env-server
+          bin/linux-ia32/dsh-env-server --version
+          qemu-aarch64-static bin/linux-arm64/dsh-env-server --version
+          printf '#!/bin/sh\nexec qemu-aarch64-static "%s" "$@"\n' "$PWD/bin/linux-arm64/dsh-env-server" > "$RUNNER_TEMP/arm64-server"
+          chmod +x "$RUNNER_TEMP/arm64-server"
+      - name: env-server tests (linux-ia32, native 32-bit)
+        working-directory: packages/plugin
+        run: node --test --test-timeout=120000 test/env-server.test.ts
+        env:
+          DSH_ENV_SERVER_BIN: ${{ github.workspace }}/bin/linux-ia32/dsh-env-server
+          DSH_ENV_SERVER_REQUIRED: '1'
+      - name: env-server tests (linux-arm64, qemu; informational)
+        continue-on-error: true
+        working-directory: packages/plugin
+        run: node --test --test-timeout=300000 test/env-server.test.ts
+        env:
+          DSH_ENV_SERVER_BIN: ${{ runner.temp }}/arm64-server
+          DSH_ENV_SERVER_REQUIRED: '1'
+
+  package:
+    name: Package
+    needs: binaries
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: server-*
+          merge-multiple: true
+          path: packages/plugin/bin
+      - run: chmod +x packages/plugin/bin/*/dsh-env-server*
+      # Fails if any of the five targets is missing.
+      - run: pnpm run package
+      - uses: actions/upload-artifact@v7
+        with:
+          name: package
+          path: out/
+          if-no-files-found: error
+          retention-days: 30
