@@ -4,11 +4,13 @@ import { EventEmitter } from 'node:events'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { EnvError, errorMessage } from '@dsh-environments/protocol'
+import { EnvError, errorMessage, generateSecret } from '@dsh-environments/protocol'
 import { AdbEnvironment } from '../env/adb/adb-env.ts'
 import { listAdbDevices } from '../env/adb/devices.ts'
 import type { Environment } from '../env/environment.ts'
 import { openLocal, openServer } from '../env/server/connect.ts'
+import { ReverseHub, sanitizeReverseSettings, type ReverseListenerSettings } from '../env/server/reverse.ts'
+import { ServerEnvironment } from '../env/server/server-env.ts'
 import { openSsh } from '../env/ssh/open.ts'
 import { openWindowsAccount } from '../env/winuser/winuser-env.ts'
 import type { Logger } from '../host-api.ts'
@@ -42,6 +44,8 @@ export interface EnvironmentManagerOptions {
   autoDiscoverAdb?: boolean
   adb?: string
   logger?: Logger | undefined
+  /** Reverse-connection listener defaults (until changed in the GUI). */
+  reverse?: ReverseListenerSettings | undefined
 }
 
 export interface EnvironmentStatus {
@@ -101,14 +105,53 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
   private readonly browseConnections = new Map<string, BrowseEntry>()
   private saveTimer: NodeJS.Timeout | undefined
   disposed = false
+  /** Listeners and connection pool for everse environments. */
+  readonly reverse: ReverseHub
+  private readonly reverseDefaults: ReverseListenerSettings
 
-  constructor({ dataDir, autoDiscoverAdb = true, adb = 'adb', logger }: EnvironmentManagerOptions) {
+  constructor({ dataDir, autoDiscoverAdb = true, adb = 'adb', logger, reverse = {} }: EnvironmentManagerOptions) {
     super()
     this.dataDir = dataDir
     this.file = path.join(dataDir, 'environments.json')
     this.autoDiscoverAdb = autoDiscoverAdb
     this.adb = adb
     this.logger = logger
+    this.reverseDefaults = reverse
+    this.reverse = new ReverseHub(
+      id => {
+        const def = this.state.environments.find(e => e.id === id && e.kind === 'reverse')
+        return def?.config.token
+      },
+      msg => this.logger?.info('environments: %s', msg),
+    )
+    this.reverse.on('change', () => this.emit('change'))
+  }
+
+  /** Listener settings in effect: saved from the GUI, else the plugin config. */
+  reverseSettings(): ReverseListenerSettings {
+    return this.state.reverseListener ?? this.reverseDefaults
+  }
+
+  /** Persist and apply new reverse listener settings. */
+  async setReverseSettings(settings: ReverseListenerSettings): Promise<void> {
+    this.state.reverseListener = settings
+    this.save()
+    await this.reverse.configure(settings)
+  }
+
+  /** Start the reverse listeners configured at load time. */
+  async startReverse(): Promise<void> {
+    await this.reverse.configure(sanitizeReverseSettings(this.reverseSettings()))
+  }
+
+  /** Generate a new secret for a reverse environment, dropping its connections. Returns the secret. */
+  rotateReverseSecret(id: string): string {
+    const def = this.state.environments.find(e => e.id === id && e.kind === 'reverse')
+    if (!def) throw new EnvError('ENOENT', `unknown reverse environment ${id}`)
+    def.config.token = generateSecret()
+    this.save()
+    this.reverse.disconnect(id)
+    return def.config.token
   }
 
   // ---------------------------------------------------------------- persistence
@@ -238,8 +281,13 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
       if (config[k] === SECRET_MARKER) config[k] = existing?.config[k]
       if (config[k] === '' || config[k] === undefined) delete config[k]
     }
-    if (input.kind === 'server' && (!config['host'] || !config['port']))
-      throw new EnvError('EINVAL', 'host and port are required')
+    if (input.kind === 'server' && !config['url'] && (!config['host'] || !config['port']))
+      throw new EnvError('EINVAL', 'a URL, or host and port, is required')
+    if (input.kind === 'reverse') {
+      delete config['host']
+      delete config['port']
+      config['token'] ??= generateSecret()
+    }
     if (input.kind === 'ssh' && !config['host']) throw new EnvError('EINVAL', 'host is required')
     if (input.kind === 'adb' && !config['serial']) throw new EnvError('EINVAL', 'serial is required')
     if (input.kind === 'winuser' && !config['account']) throw new EnvError('EINVAL', 'account is required')
@@ -262,6 +310,7 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
   }
 
   remove(id: string): void {
+    this.reverse.disconnect(id)
     const before = this.state.environments.length
     this.state.environments = this.state.environments.filter(e => e.id !== id)
     if (this.state.environments.length === before) throw new EnvError('ENOENT', `unknown environment ${id}`)
@@ -289,7 +338,19 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
       case 'local':
         return openLocal({ ...base, cwd: c.cwd || os.homedir() })
       case 'server':
-        return openServer({ ...base, host: c.host ?? '', port: Number(c.port), token: c.token })
+        return c.url
+          ? openServer({ ...base, url: c.url, token: c.token })
+          : openServer({ ...base, host: c.host ?? '', port: Number(c.port), token: c.token })
+      case 'reverse': {
+        const transport = await this.reverse.take(def.id, { signal })
+        const env = new ServerEnvironment({ id: def.id, name: def.name, kind: 'reverse', transport })
+        try {
+          return await env.open(signal)
+        } catch (e) {
+          transport.destroy?.()
+          throw e
+        }
+      }
       case 'ssh':
         return openSsh({ ...base, config: { ...c, host: c.host ?? '' } })
       case 'adb': {
@@ -601,5 +662,6 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
       )
     }
     this.browseConnections.clear()
+    await this.reverse.dispose()
   }
 }

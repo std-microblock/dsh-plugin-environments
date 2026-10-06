@@ -5,6 +5,7 @@ import { installApi } from './api/index.ts'
 import { installBorrowing } from './borrowing/index.ts'
 import { loadDeps } from './deps.ts'
 import type { Logger, PluginContext } from './host-api.ts'
+import type { ReverseListenerSettings } from './env/server/reverse.ts'
 import { EnvironmentManager } from './manager/manager.ts'
 import { installMounting } from './mount/index.ts'
 
@@ -21,6 +22,11 @@ export interface Config {
   autoDiscoverAdb?: boolean
   /** adb executable (default `adb` on PATH). */
   adb?: string
+  /**
+   * Listeners for reverse connections (`dsh-env-server connect`), off by default. Settings
+   * changed in the GUI take precedence.
+   */
+  reverse?: ReverseListenerSettings
 }
 
 function dshHome(): string {
@@ -42,8 +48,10 @@ export async function apply(ctx: PluginContext, config: Config = {}): Promise<vo
     autoDiscoverAdb: config.autoDiscoverAdb !== false,
     adb: config.adb || 'adb',
     logger,
+    reverse: config.reverse,
   })
   manager.load()
+  void manager.startReverse().catch((e: unknown) => logger?.warn('environments: reverse listeners: %s', String(e)))
   ctx.effect(() => () => manager.dispose(), 'environments: manager')
 
   const titleOf = (sessionId: string) => sessionId.slice(0, 8)

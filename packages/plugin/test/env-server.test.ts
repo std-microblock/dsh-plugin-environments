@@ -165,13 +165,13 @@ test('env-server over stdio and tcp', needsServer, async t => {
     echo.close()
   })
 
-  await t.test('tcp serve with token', async () => {
+  await t.test('tcp serve with secret', async () => {
     const { port: servePort, token, child } = await startServeProcess({ cwd: tmp })
     try {
       await assert.rejects(openServer({ id: 'x', host: '127.0.0.1', port: servePort, token: 'wrong' }), {
         code: 'AUTH',
       })
-      const remote = await openServer({ id: 'x', host: '127.0.0.1', port: servePort, token })
+      const remote = await openServer({ id: 'x', url: `tcp://127.0.0.1:${servePort}`, token })
       const st = await remote.stat(tmp)
       assert.equal(st?.type, 'dir')
       await remote.close()
@@ -179,6 +179,55 @@ test('env-server over stdio and tcp', needsServer, async t => {
       child.kill()
     }
   })
+
+  await t.test('plugin dials a websocket server', async () => {
+    const { url, token, child } = await startServeProcess({ cwd: tmp, listen: 'ws://127.0.0.1:0/dsh-env' })
+    try {
+      assert.match(url ?? '', /^ws:\/\/127\.0\.0\.1:\d+\/dsh-env$/)
+      await assert.rejects(openServer({ id: 'w', url, token: 'wrong' }), { code: 'AUTH' })
+      await assert.rejects(openServer({ id: 'w', url: `${url}-other`, token }), { code: 'EIO' })
+      const remote = await openServer({ id: 'w', url, token })
+      const big = Buffer.alloc(3 * 1024 * 1024, 7)
+      await remote.writeFile(path.join(tmp, 'ws.bin'), big)
+      assert.ok((await remote.readFile(path.join(tmp, 'ws.bin'))).equals(big))
+      const r = await remote.exec({ command: 'echo over-ws' })
+      assert.match(r.stdout.toString(), /over-ws/)
+      await remote.close()
+    } finally {
+      child.kill()
+    }
+  })
+
+  await t.test('lifeline: server exits when stdin closes and when the last client leaves', async () => {
+    const a = await startServeProcess({ cwd: tmp, lifeline: true })
+    const exitedA = new Promise(r => a.child.once('exit', r))
+    a.child.stdin?.end()
+    await exitedA
+    const b = await startServeProcess({ cwd: tmp, lifeline: true })
+    const exitedB = new Promise(r => b.child.once('exit', r))
+    const remote = await openServer({ id: 'l', host: '127.0.0.1', port: b.port, token: b.token })
+    const sleeper = await remote.spawn(isWin ? { argv: ['ping', '-n', '60', '127.0.0.1'] } : { argv: ['sleep', '60'] })
+    sleeper.stdout.on('error', () => {})
+    sleeper.stderr.on('error', () => {})
+    await remote.close()
+    await exitedB
+    await waitGone(sleeper.pid)
+  })
 })
+
+/** Wait until a process id no longer exists. */
+async function waitGone(pid: number | undefined, ms = 10000): Promise<void> {
+  if (!pid) return
+  const deadline = Date.now() + ms
+  for (;;) {
+    try {
+      process.kill(pid, 0)
+    } catch {
+      return
+    }
+    if (Date.now() > deadline) assert.fail(`process ${pid} is still running`)
+    await new Promise(r => setTimeout(r, 100))
+  }
+}
 
 test.after(() => fs.rmSync(tmp, { recursive: true, force: true }))

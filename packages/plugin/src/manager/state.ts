@@ -1,4 +1,5 @@
 // Persisted plugin state (environments.json).
+import type { ReverseListenerSettings } from '../env/server/reverse.ts'
 import type { EnvironmentDefinition } from './definitions.ts'
 
 /** Mount requested for a session. */
@@ -45,6 +46,8 @@ export interface PluginState {
   workspaces: Record<string, WorkspaceSettings>
   sessions: Record<string, SessionSettings>
   remoteWorkspaces: RemoteWorkspace[]
+  /** Listeners for reverse connections (`dsh-env-server connect`); absent = plugin config defaults. */
+  reverseListener?: ReverseListenerSettings
 }
 
 /** The mount effective for a session, and where it came from. */
