@@ -220,7 +220,11 @@ mod imp {
         unsafe {
             let mut si: STARTUPINFOW = std::mem::zeroed();
             si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-            si.lpDesktop = desktop.as_mut_ptr();
+            // A null desktop makes the secondary logon service inherit the caller's
+            // window station/desktop AND grant the account access to it; naming
+            // "winsta0\default" explicitly would leave that grant to us.
+            si.lpDesktop = std::ptr::null_mut();
+            let _ = &mut desktop;
             si.dwFlags = STARTF_USESHOWWINDOW;
             si.wShowWindow = 0; // SW_HIDE for the server's own console
             let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
@@ -241,9 +245,19 @@ mod imp {
                 bail!("CreateProcessWithLogonW failed: {}", std::io::Error::last_os_error());
             }
             let pid = pi.dwProcessId;
+            // Report an immediate failure (e.g. 0xC0000142 when the account cannot reach the desktop).
+            let mut early_exit = None;
+            if WaitForSingleObject(pi.hProcess, 1500) == 0 {
+                let mut code = 0u32;
+                GetExitCodeProcess(pi.hProcess, &mut code);
+                early_exit = Some(code);
+            }
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
-            Ok(json!({"ok": true, "pid": pid}))
+            match early_exit {
+                Some(code) => Ok(json!({"ok": false, "pid": pid, "exitCode": code, "error": format!("the process exited immediately with code 0x{code:08X}")})),
+                None => Ok(json!({"ok": true, "pid": pid})),
+            }
         }
     }
 }
