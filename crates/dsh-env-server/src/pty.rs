@@ -199,7 +199,8 @@ mod unix {
                 &mut slave,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut ws,
+                // `*const` on Linux, `*mut` on macOS.
+                &raw mut ws,
             )
         })?;
         let master = unsafe { OwnedFd::from_raw_fd(master) };
