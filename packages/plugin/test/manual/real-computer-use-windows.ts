@@ -58,7 +58,8 @@ const find = (t: string) => {
 }
 await step('type unicode into the editor (click element + type)', async () => {
   const acts = await toEnvActions(s, [
-    { kind: 'type', element: find('Editor').index, text: 'Hello 世界 😀 éß\nsecond line\ttab' },
+    // No \t: in a WPF TextBox Tab moves the focus to the next control.
+    { kind: 'type', element: find('Editor').index, text: 'Hello 世界 😀 éß\nsecond line' },
   ])
   await env.input(acts)
   await sleep(400)
@@ -67,6 +68,7 @@ await step('type unicode into the editor (click element + type)', async () => {
 await step('key combo ctrl+a then type', async () => {
   await env.input(
     await toEnvActions(s, [
+      { kind: 'click', element: find('Editor').index },
       { kind: 'key', key: 'ctrl+a' },
       { kind: 'type', text: 'replaced 替换' },
     ]),
@@ -92,19 +94,23 @@ await step('UIA invoke + toggle + select', async () => {
   const after = (await listUia(env, win)).elements.filter(e => /clicks|Enable|Cherry/.test(e.text ?? ''))
   return `${r1.used} ${r2.used} ${r3.used} → ${after.map(e => `${e.text}[${e.flags.join('|')}]`).join(' ')}`
 })
-await step('scroll + right click in the window', async () => {
-  const lb = find('Items')
+const logText = async () =>
+  (await listUia(env, win, { filter: 'all', query: 'Log' })).elements.map(e => e.text ?? '').join(',') || '(log empty)'
+await step('scroll in the list', async () => {
+  await env.input(await toEnvActions(s, [{ kind: 'scroll', element: find('Items').index, dy: 2 }]))
+  await sleep(300)
+  return logText()
+})
+await step('right click in the editor', async () => {
   await env.input(
     await toEnvActions(s, [
-      { kind: 'scroll', element: lb.index, dy: 2 },
       { kind: 'click', element: find('Editor').index, button: 'right' },
+      { kind: 'wait', ms: 300 },
       { kind: 'key', key: 'esc' },
     ]),
   )
   await sleep(300)
-  return (
-    (await listUia(env, win, { filter: 'all', query: 'wheel' })).elements.map(e => e.text).join(',') || '(log empty)'
-  )
+  return logText()
 })
 await step('drag select in editor', async () => {
   const ed = find('Editor')
