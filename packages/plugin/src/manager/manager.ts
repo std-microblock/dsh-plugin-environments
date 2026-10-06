@@ -34,6 +34,8 @@ import {
   type PluginState,
   type RemoteWorkspace,
   type SessionSettings,
+  type WorkspaceBinding,
+  type WorkspaceDefaultMount,
   type WorkspaceSettings,
 } from './state.ts'
 
@@ -473,12 +475,68 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
     return this.state.workspaces[String(this.normPath(hostPath))] ?? {}
   }
 
-  setWorkspaceSettings(hostPath: string, patch: WorkspaceSettings): WorkspaceSettings {
+  /**
+   * Merge a patch into a workspace's settings. Keys absent from the patch are kept; keys
+   * present with `undefined`/`null` are cleared. Empty settings are dropped from the state.
+   */
+  setWorkspaceSettings(
+    hostPath: string,
+    patch: { [K in keyof WorkspaceSettings]?: WorkspaceSettings[K] | null },
+  ): WorkspaceSettings {
     const key = this.normPath(hostPath)
-    const next = { ...this.state.workspaces[key], ...patch }
-    this.state.workspaces[key] = next
+    const next: Record<string, unknown> = { ...this.state.workspaces[key] }
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === undefined || v === null) delete next[k]
+      else next[k] = v
+    }
+    const settings = next as WorkspaceSettings
+    if (Object.keys(settings).length === 0) delete this.state.workspaces[key]
+    else this.state.workspaces[key] = settings
     this.save()
-    return next
+    return settings
+  }
+
+  /** Set or clear the default environment of a host workspace (see `WorkspaceSettings.defaultMount`). */
+  setWorkspaceDefaultMount(hostPath: string, mount: WorkspaceDefaultMount | null): WorkspaceSettings {
+    if (mount) {
+      this.require(mount.envId)
+      if (this.remoteWorkspaceFor(hostPath)) {
+        throw new EnvError('EINVAL', 'a remote workspace is always bound to its own environment')
+      }
+    }
+    return this.setWorkspaceSettings(hostPath, {
+      defaultMount: mount ? { envId: mount.envId, ...(mount.remoteRoot ? { remoteRoot: mount.remoteRoot } : {}) } : null,
+    })
+  }
+
+  /**
+   * What a workspace is bound to. A remote workspace is bound to its environment; a host
+   * workspace may have a default environment for new sessions; otherwise it runs on the host.
+   */
+  workspaceBinding(hostPath: string, workspaceId?: string): WorkspaceBinding {
+    const remote =
+      (workspaceId ? this.state.remoteWorkspaces.find(w => w.workspaceId === workspaceId) : undefined) ??
+      this.remoteWorkspaceFor(hostPath)
+    const settings = this.workspaceSettings(remote?.hostPath ?? hostPath)
+    const borrowable = Array.isArray(settings.borrowable) ? settings.borrowable : undefined
+    if (remote) {
+      return {
+        kind: 'remote',
+        envId: remote.envId,
+        remoteRoot: remote.root,
+        remoteWorkspace: { id: remote.id, title: remote.title },
+        borrowable,
+      }
+    }
+    if (settings.defaultMount?.envId) {
+      return {
+        kind: 'default',
+        envId: settings.defaultMount.envId,
+        remoteRoot: settings.defaultMount.remoteRoot,
+        borrowable,
+      }
+    }
+    return { kind: 'host', borrowable }
   }
 
   sessionSettings(sessionId: string): SessionSettings {
@@ -508,15 +566,41 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
     })
   }
 
-  /** Mount effective for a session: explicit session choice, else its remote workspace. */
-  mountFor(sessionId: string, cwd: string | undefined): EffectiveMount | undefined {
+  /**
+   * Mount effective for a session, in precedence order:
+   * 1. the session's own choice (`false` turns every mount off),
+   * 2. its remote workspace,
+   * 3. only for a session that has not started yet (`fresh`): the workspace's default environment.
+   * A default that was applied is persisted into the session (`seedDefaultMount`), so it shows up
+   * in step 1 afterwards and later changes of the workspace default do not move the session.
+   */
+  mountFor(sessionId: string, cwd: string | undefined, { fresh = false }: { fresh?: boolean } = {}): EffectiveMount | undefined {
     const s = this.sessionSettings(sessionId)
     if (s.mount === false) return undefined
-    if (s.mount?.envId) return { ...s.mount, hostRoot: s.mount.hostRoot ?? cwd, source: 'session' }
+    if (s.mount?.envId) {
+      return {
+        ...s.mount,
+        hostRoot: s.mount.hostRoot ?? cwd,
+        source: s.mountOrigin === 'default' ? 'default' : 'session',
+      }
+    }
     const ws = this.remoteWorkspaceFor(cwd)
     if (ws)
       return { envId: ws.envId, remoteRoot: ws.root, hostRoot: ws.hostPath, source: 'workspace', workspace: ws.id }
+    const def = fresh ? this.workspaceSettings(cwd).defaultMount : undefined
+    if (def?.envId) return { envId: def.envId, remoteRoot: def.remoteRoot, hostRoot: cwd, source: 'default' }
     return undefined
+  }
+
+  /** Pin a workspace-default mount onto the session that is being mounted with it. */
+  seedDefaultMount(sessionId: string, mount: EffectiveMount): void {
+    if (mount.source !== 'default') return
+    const s = this.sessionSettings(sessionId)
+    if (s.mount !== undefined) return
+    this.setSessionSettings(sessionId, {
+      mount: { envId: mount.envId, remoteRoot: mount.remoteRoot, hostRoot: mount.hostRoot },
+      mountOrigin: 'default',
+    })
   }
 
   /** Environments a session may borrow: session list, else workspace list, else every borrowable env. */

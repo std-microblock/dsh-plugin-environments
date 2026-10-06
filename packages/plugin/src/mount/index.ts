@@ -2,7 +2,7 @@
 import { errorMessage } from '@dsh-environments/protocol'
 import type { HarnessDeps, HarnessScope } from '../deps.ts'
 import type { Environment } from '../env/environment.ts'
-import { sessionIdOf, type Agent, type PluginContext } from '../host-api.ts'
+import { sessionIdOf, sessionStarted, type Agent, type PluginContext } from '../host-api.ts'
 import type { Lease } from '../manager/lease.ts'
 import type { EnvironmentManager } from '../manager/manager.ts'
 import type { EffectiveMount } from '../manager/state.ts'
@@ -218,7 +218,8 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
 
   async function ensure(agent: Agent): Promise<MountRecord | undefined> {
     const sessionId = sessionIdOf(agent)
-    const want = manager.mountFor(sessionId, agent.session.header.cwd)
+    // The workspace default environment only applies to sessions that have not started yet.
+    const want = manager.mountFor(sessionId, agent.session.header.cwd, { fresh: !sessionStarted(agent) })
     const have = mounts.get(agent)
     if (
       have &&
@@ -232,6 +233,7 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
     if (!want) return undefined
     const record = await install(agent, want)
     record.requestedRoot = want.remoteRoot
+    manager.seedDefaultMount(sessionId, want)
     return record
   }
 
