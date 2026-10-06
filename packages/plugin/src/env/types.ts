@@ -1,12 +1,15 @@
 // Shared vocabulary of the environment abstraction.
 import type { Readable, Writable } from 'node:stream'
+import type { RgbImage } from '../image/codec.ts'
 import type {
   ExitInfo,
   GlobResult,
   GrepArgs,
   GrepResult,
   InputAction,
+  MouseButton,
   NetProto,
+  PixelRect,
   SpawnArgs,
   Stat,
   WriteMode,
@@ -151,9 +154,37 @@ export interface Screenshot {
   height: number
 }
 
+export type { DisplayInfo, PixelRect, WindowAction, WindowActionResult, WindowInfo } from '@dsh-environments/protocol'
+
+/** What to capture; environments ignore what they cannot do and report what they captured. */
+export interface CaptureOptions extends SignalOptions {
+  /** Display index (0 = primary, -1 = all displays). */
+  display?: number | undefined
+  /** Physical rectangle to capture (environments may return a larger area). */
+  rect?: PixelRect | undefined
+  /** Window handle to capture. */
+  window?: number | undefined
+  /** Downscale hints; the caller still resizes when the result is larger. */
+  maxWidth?: number | undefined
+  maxHeight?: number | undefined
+  cursor?: boolean | undefined
+}
+
+/** A captured image: encoded PNG and/or decoded RGB pixels, plus the physical area it shows. */
+export interface Capture {
+  png?: Buffer | undefined
+  image?: RgbImage | undefined
+  /** Image size in pixels. */
+  width: number
+  height: number
+  /** Physical rectangle covered by the image. */
+  rect: PixelRect
+  cursor?: { x: number; y: number } | undefined
+}
+
 /**
  * Input actions accepted by environments: the protocol's actions plus the touch gestures
- * understood by Android (`tap`, `swipe`, long press).
+ * understood by Android (`tap`, `swipe`, `long_press`).
  */
 export type EnvInputAction =
   | InputAction
@@ -163,28 +194,35 @@ export type EnvInputAction =
       y?: number
       double?: boolean
       long?: boolean
-      button?: 'left' | 'right' | 'middle'
+      count?: number
+      button?: MouseButton
     }
   | { kind: 'swipe'; x?: number; y?: number; x2?: number; y2?: number; durationMs?: number }
+  | { kind: 'long_press'; x: number; y: number; durationMs?: number }
 
 /** Every field any input action may carry; each {@link EnvInputAction} is assignable to it. */
 export interface InputActionFields {
   kind: EnvInputAction['kind']
-  x?: number
-  y?: number
-  x2?: number
-  y2?: number
-  dx?: number
-  dy?: number
-  button?: 'left' | 'right' | 'middle'
-  double?: boolean
-  long?: boolean
-  durationMs?: number
-  text?: string
-  key?: string
-  ms?: number
+  x?: number | undefined
+  y?: number | undefined
+  x2?: number | undefined
+  y2?: number | undefined
+  dx?: number | undefined
+  dy?: number | undefined
+  path?: readonly (readonly [number, number])[] | undefined
+  button?: MouseButton | undefined
+  double?: boolean | undefined
+  long?: boolean | undefined
+  count?: number | undefined
+  modifiers?: string | undefined
+  durationMs?: number | undefined
+  holdMs?: number | undefined
+  delayMs?: number | undefined
+  repeat?: number | undefined
+  text?: string | undefined
+  key?: string | undefined
+  ms?: number | undefined
 }
-
 /** Streamed write handle returned by `openWrite`. */
 export interface WriteHandle {
   stream: Writable

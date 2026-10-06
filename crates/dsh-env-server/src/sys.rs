@@ -105,8 +105,10 @@ pub fn caps() -> Vec<&'static str> {
         "udp-listen",
     ];
     if cfg!(windows) {
-        caps.push("screenshot");
-        caps.push("input");
+        caps.extend(["screenshot", "input", "displays", "windows"]);
+        if which("powershell").is_some() {
+            caps.push("uia");
+        }
     }
     caps
 }
@@ -128,45 +130,95 @@ pub fn info(cwd: &Path) -> Value {
     })
 }
 
+fn blocking_err(e: tokio::task::JoinError) -> OpError {
+    OpError::new("EIO", e.to_string())
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn capture_spec(a: &Args<'_>) -> Result<crate::screen::CaptureSpec, OpError> {
+    let rect = match a.0.get("rect") {
+        None | Some(Value::Null) => None,
+        Some(r) => {
+            let g = |k: &str| {
+                r.get(k)
+                    .and_then(Value::as_f64)
+                    .map(|v| v.round() as i32)
+                    .ok_or_else(|| OpError::invalid(format!("rect.{k} is required")))
+            };
+            let rect = crate::screen::Rect {
+                x: g("x")?,
+                y: g("y")?,
+                w: g("width")?,
+                h: g("height")?,
+            };
+            if rect.w <= 0 || rect.h <= 0 {
+                return Err(OpError::invalid("rect must have a positive size"));
+            }
+            Some(rect)
+        }
+    };
+    Ok(crate::screen::CaptureSpec {
+        display: a.0.get("display").and_then(Value::as_i64),
+        rect,
+        window: a.opt_u64("window"),
+        cursor: a.bool("cursor", false),
+    })
+}
+
+/// `sys.screenshot`: capture a display, a rectangle or a window; downscale to
+/// `maxWidth` x `maxHeight`; return a PNG payload.
 pub async fn screenshot(a: Args<'_>) -> OpResult {
-    let _display = a.opt_u64("display");
     #[cfg(windows)]
     {
-        let (w, h, png) = tokio::task::spawn_blocking(win::capture)
-            .await
-            .map_err(|e| OpError::new("EIO", e.to_string()))??;
-        Ok((json!({"width": w, "height": h, "format": "png"}), png))
+        let spec = capture_spec(&a)?;
+        let max_w = a.opt_u64("maxWidth").unwrap_or(0).min(16384) as u32;
+        let max_h = a.opt_u64("maxHeight").unwrap_or(0).min(16384) as u32;
+        tokio::task::spawn_blocking(move || {
+            let c = crate::screen::win::capture(&spec)?;
+            let (sw, sh) = (c.rect.w as u32, c.rect.h as u32);
+            let (w, h) = crate::screen::fit(sw, sh, max_w, max_h);
+            let rgb = crate::screen::resize_rgb(&c.rgb, sw, sh, w, h);
+            let png = crate::util::png_rgb(w, h, &rgb);
+            let mut meta = json!({
+                "width": w,
+                "height": h,
+                "format": "png",
+                "x": c.rect.x,
+                "y": c.rect.y,
+                "srcWidth": sw,
+                "srcHeight": sh,
+            });
+            if let Some((x, y)) = c.cursor {
+                meta["cursor"] = json!({"x": x, "y": y});
+            }
+            Ok((meta, png))
+        })
+        .await
+        .map_err(blocking_err)?
     }
     #[cfg(not(windows))]
     {
+        let _ = a;
         Err(OpError::unsupported(
             "screenshots are only supported on Windows hosts",
         ))
     }
 }
 
+/// `sys.input`: run a batch of pointer/keyboard actions in order.
 pub async fn input(a: Args<'_>) -> OpResult {
     let actions =
         a.0.get("actions")
             .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+            .ok_or_else(|| OpError::invalid("actions must be an array"))?
+            .iter()
+            .map(crate::input::parse_action)
+            .collect::<Result<Vec<_>, _>>()?;
     #[cfg(windows)]
     {
-        for action in actions {
-            if action.get("kind").and_then(Value::as_str) == Some("wait") {
-                let ms = action
-                    .get("ms")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0)
-                    .min(60_000);
-                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
-                continue;
-            }
-            tokio::task::spawn_blocking(move || win::perform(&action))
-                .await
-                .map_err(|e| OpError::new("EIO", e.to_string()))??;
-        }
+        tokio::task::spawn_blocking(move || crate::input::win::run(&actions))
+            .await
+            .map_err(blocking_err)??;
         Ok((json!({}), Vec::new()))
     }
     #[cfg(not(windows))]
@@ -178,275 +230,85 @@ pub async fn input(a: Args<'_>) -> OpResult {
     }
 }
 
+/// `sys.displays`: monitors with their physical rectangles and DPI.
+pub async fn displays(_a: Args<'_>) -> OpResult {
+    #[cfg(windows)]
+    {
+        let v = tokio::task::spawn_blocking(crate::screen::win::displays_json)
+            .await
+            .map_err(blocking_err)?;
+        Ok((v, Vec::new()))
+    }
+    #[cfg(not(windows))]
+    {
+        Err(OpError::unsupported(
+            "displays are only listed on Windows hosts",
+        ))
+    }
+}
+
+/// `sys.windows`: top-level windows in z-order.
+pub async fn windows(a: Args<'_>) -> OpResult {
+    #[cfg(windows)]
+    {
+        let all = a.bool("all", false);
+        let v = tokio::task::spawn_blocking(move || crate::screen::win::windows(all))
+            .await
+            .map_err(blocking_err)?;
+        Ok((v, Vec::new()))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = a;
+        Err(OpError::unsupported(
+            "windows are only listed on Windows hosts",
+        ))
+    }
+}
+
+/// `sys.window`: focus / minimize / maximize / restore / close / move a window.
+pub async fn window(a: Args<'_>) -> OpResult {
+    #[cfg(windows)]
+    {
+        let h = a.u64("hwnd")?;
+        let action = a.str("action")?.to_string();
+        let rect = match (
+            a.opt_f64("x"),
+            a.opt_f64("y"),
+            a.opt_f64("width"),
+            a.opt_f64("height"),
+        ) {
+            (Some(x), Some(y), Some(w), Some(h)) => Some(crate::screen::Rect {
+                x: x.round() as i32,
+                y: y.round() as i32,
+                w: w.round() as i32,
+                h: h.round() as i32,
+            }),
+            _ => None,
+        };
+        let v = tokio::task::spawn_blocking(move || {
+            crate::screen::win::window_action(h, &action, rect)
+        })
+        .await
+        .map_err(blocking_err)??;
+        Ok((v, Vec::new()))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = a;
+        Err(OpError::unsupported(
+            "windows can only be managed on Windows hosts",
+        ))
+    }
+}
+
 #[cfg(windows)]
 pub mod win {
-    use super::*;
-    use std::mem::{size_of, zeroed};
-    use windows_sys::Win32::Graphics::Gdi::*;
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
-    use windows_sys::Win32::UI::WindowsAndMessaging::*;
-
     pub fn init_dpi() {
         unsafe {
             windows_sys::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(
                 windows_sys::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
             );
         }
-    }
-
-    fn virtual_screen() -> (i32, i32, i32, i32) {
-        unsafe {
-            (
-                GetSystemMetrics(SM_XVIRTUALSCREEN),
-                GetSystemMetrics(SM_YVIRTUALSCREEN),
-                GetSystemMetrics(SM_CXVIRTUALSCREEN),
-                GetSystemMetrics(SM_CYVIRTUALSCREEN),
-            )
-        }
-    }
-
-    pub fn capture() -> Result<(u32, u32, Vec<u8>), OpError> {
-        let (x, y, w, h) = virtual_screen();
-        if w <= 0 || h <= 0 {
-            return Err(OpError::new(
-                "EIO",
-                "no visible desktop (is this an interactive session?)",
-            ));
-        }
-        let mut bgra = vec![0u8; (w * h * 4) as usize];
-        unsafe {
-            let screen = GetDC(std::ptr::null_mut());
-            if screen.is_null() {
-                return Err(OpError::new("EIO", "GetDC failed"));
-            }
-            let mem = CreateCompatibleDC(screen);
-            let bmp = CreateCompatibleBitmap(screen, w, h);
-            let old = SelectObject(mem, bmp as _);
-            let ok = BitBlt(mem, 0, 0, w, h, screen, x, y, SRCCOPY | CAPTUREBLT);
-            let mut bi: BITMAPINFO = zeroed();
-            bi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
-            bi.bmiHeader.biWidth = w;
-            bi.bmiHeader.biHeight = -h;
-            bi.bmiHeader.biPlanes = 1;
-            bi.bmiHeader.biBitCount = 32;
-            bi.bmiHeader.biCompression = BI_RGB;
-            let lines = GetDIBits(
-                mem,
-                bmp,
-                0,
-                h as u32,
-                bgra.as_mut_ptr() as _,
-                &mut bi,
-                DIB_RGB_COLORS,
-            );
-            SelectObject(mem, old);
-            DeleteObject(bmp as _);
-            DeleteDC(mem);
-            ReleaseDC(std::ptr::null_mut(), screen);
-            if ok == 0 || lines == 0 {
-                return Err(OpError::new(
-                    "EIO",
-                    "screen capture failed (desktop locked or not interactive?)",
-                ));
-            }
-        }
-        let mut rgba = Vec::with_capacity(bgra.len() / 4 * 3);
-        for px in bgra.as_chunks::<4>().0 {
-            rgba.extend_from_slice(&[px[2], px[1], px[0]]);
-        }
-        drop(bgra);
-        let out = crate::util::png_rgb(w as u32, h as u32, &rgba);
-        Ok((w as u32, h as u32, out))
-    }
-
-    fn send(inputs: &[INPUT]) -> Result<(), OpError> {
-        if inputs.is_empty() {
-            return Ok(());
-        }
-        let n = unsafe {
-            SendInput(
-                inputs.len() as u32,
-                inputs.as_ptr(),
-                size_of::<INPUT>() as i32,
-            )
-        };
-        if n as usize != inputs.len() {
-            return Err(OpError::new(
-                "EACCES",
-                "SendInput was blocked (UIPI or secure desktop)",
-            ));
-        }
-        Ok(())
-    }
-
-    fn mouse(flags: u32, dx: i32, dy: i32, data: i32) -> INPUT {
-        let mut i: INPUT = unsafe { zeroed() };
-        i.r#type = INPUT_MOUSE;
-        i.Anonymous.mi = MOUSEINPUT {
-            dx,
-            dy,
-            mouseData: data as _,
-            dwFlags: flags,
-            time: 0,
-            dwExtraInfo: 0,
-        };
-        i
-    }
-
-    fn key(vk: u16, scan: u16, flags: u32) -> INPUT {
-        let mut i: INPUT = unsafe { zeroed() };
-        i.r#type = INPUT_KEYBOARD;
-        i.Anonymous.ki = KEYBDINPUT {
-            wVk: vk,
-            wScan: scan,
-            dwFlags: flags,
-            time: 0,
-            dwExtraInfo: 0,
-        };
-        i
-    }
-
-    fn move_to(x: f64, y: f64) -> INPUT {
-        let (vx, vy, vw, vh) = virtual_screen();
-        let nx = (((x - vx as f64) * 65535.0) / ((vw - 1).max(1) as f64)).round() as i32;
-        let ny = (((y - vy as f64) * 65535.0) / ((vh - 1).max(1) as f64)).round() as i32;
-        mouse(
-            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
-            nx,
-            ny,
-            0,
-        )
-    }
-
-    fn vk_for(name: &str) -> Option<u16> {
-        let n = name.to_ascii_lowercase();
-        let vk = match n.as_str() {
-            "ctrl" | "control" => VK_CONTROL,
-            "shift" => VK_SHIFT,
-            "alt" | "menu" => VK_MENU,
-            "win" | "meta" | "super" | "cmd" => VK_LWIN,
-            "enter" | "return" => VK_RETURN,
-            "esc" | "escape" => VK_ESCAPE,
-            "tab" => VK_TAB,
-            "space" => VK_SPACE,
-            "backspace" => VK_BACK,
-            "delete" | "del" => VK_DELETE,
-            "insert" => VK_INSERT,
-            "home" => VK_HOME,
-            "end" => VK_END,
-            "pageup" => VK_PRIOR,
-            "pagedown" => VK_NEXT,
-            "up" => VK_UP,
-            "down" => VK_DOWN,
-            "left" => VK_LEFT,
-            "right" => VK_RIGHT,
-            "capslock" => VK_CAPITAL,
-            "printscreen" => VK_SNAPSHOT,
-            _ => {
-                if let Some(f) = n.strip_prefix('f').and_then(|d| d.parse::<u16>().ok())
-                    && (1..=24).contains(&f)
-                {
-                    return Some(VK_F1 + f - 1);
-                }
-                let chars: Vec<char> = n.chars().collect();
-                if chars.len() == 1 {
-                    let c = chars[0];
-                    if c.is_ascii_alphanumeric() {
-                        return Some(c.to_ascii_uppercase() as u16);
-                    }
-                    let r = unsafe { VkKeyScanW(c as u16) };
-                    if r != -1 {
-                        return Some((r & 0xff) as u16);
-                    }
-                }
-                return None;
-            }
-        };
-        Some(vk)
-    }
-
-    pub fn perform(action: &Value) -> Result<(), OpError> {
-        let kind = action.get("kind").and_then(Value::as_str).unwrap_or("");
-        let fx = action.get("x").and_then(Value::as_f64);
-        let fy = action.get("y").and_then(Value::as_f64);
-        let mut inputs = Vec::new();
-        match kind {
-            "move" => {
-                let (Some(x), Some(y)) = (fx, fy) else {
-                    return Err(OpError::invalid("move needs x and y"));
-                };
-                inputs.push(move_to(x, y));
-            }
-            "click" => {
-                if let (Some(x), Some(y)) = (fx, fy) {
-                    inputs.push(move_to(x, y));
-                }
-                let (down, up) = match action
-                    .get("button")
-                    .and_then(Value::as_str)
-                    .unwrap_or("left")
-                {
-                    "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
-                    "middle" => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
-                    _ => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
-                };
-                let times = if action
-                    .get("double")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    2
-                } else {
-                    1
-                };
-                for _ in 0..times {
-                    inputs.push(mouse(down, 0, 0, 0));
-                    inputs.push(mouse(up, 0, 0, 0));
-                }
-            }
-            "scroll" => {
-                if let (Some(x), Some(y)) = (fx, fy) {
-                    inputs.push(move_to(x, y));
-                }
-                let dy = action.get("dy").and_then(Value::as_f64).unwrap_or(0.0);
-                let dx = action.get("dx").and_then(Value::as_f64).unwrap_or(0.0);
-                if dy != 0.0 {
-                    inputs.push(mouse(MOUSEEVENTF_WHEEL, 0, 0, (-dy * 120.0) as i32));
-                }
-                if dx != 0.0 {
-                    inputs.push(mouse(MOUSEEVENTF_HWHEEL, 0, 0, (dx * 120.0) as i32));
-                }
-            }
-            "type" => {
-                let text = action.get("text").and_then(Value::as_str).unwrap_or("");
-                for unit in text.encode_utf16() {
-                    if unit == '\n' as u16 {
-                        inputs.push(key(VK_RETURN, 0, 0));
-                        inputs.push(key(VK_RETURN, 0, KEYEVENTF_KEYUP));
-                        continue;
-                    }
-                    inputs.push(key(0, unit, KEYEVENTF_UNICODE));
-                    inputs.push(key(0, unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
-                }
-            }
-            "key" => {
-                let combo = action.get("key").and_then(Value::as_str).unwrap_or("");
-                let mut vks = Vec::new();
-                for part in combo.split('+').map(str::trim).filter(|p| !p.is_empty()) {
-                    vks.push(
-                        vk_for(part)
-                            .ok_or_else(|| OpError::invalid(format!("unknown key `{part}`")))?,
-                    );
-                }
-                for vk in &vks {
-                    inputs.push(key(*vk, 0, 0));
-                }
-                for vk in vks.iter().rev() {
-                    inputs.push(key(*vk, 0, KEYEVENTF_KEYUP));
-                }
-            }
-            other => return Err(OpError::invalid(format!("unknown input action `{other}`"))),
-        }
-        send(&inputs)
     }
 }

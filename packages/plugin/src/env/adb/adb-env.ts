@@ -3,7 +3,9 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import zlib from 'node:zlib'
 import { EnvError, type DirEntry, type Stat } from '@dsh-environments/protocol'
+import { decodeScreencapRaw, encodePng, isPng, pngSize } from '../../image/codec.ts'
 import { Environment } from '../environment.ts'
 import { HostChildProcess, runHost, type RunHostOptions, type RunHostResult } from '../host-process.ts'
 import {
@@ -18,6 +20,8 @@ import {
   statScript,
 } from '../posix-shell.ts'
 import type {
+  Capture,
+  CaptureOptions,
   CopyOptions,
   ForwardOptions,
   GlobOptions,
@@ -37,7 +41,9 @@ import type {
   WriteFileOptions,
 } from '../types.ts'
 import { adbCommand, type AdbCommand } from './devices.ts'
-import { androidKey } from './keys.ts'
+import { actionScript, inputTextCommands, isAsciiTypable, type AndroidScreen } from './input.ts'
+
+const ADB_IME = 'com.android.adbkeyboard/.AdbIME'
 
 export interface AdbEnvironmentOptions {
   id: string
@@ -61,8 +67,6 @@ export interface InstallApkOptions {
 }
 
 type ShellResult = RunHostResult & { out: string }
-
-const round = (n: number | undefined) => Math.round(n ?? NaN)
 
 export class AdbEnvironment extends Environment {
   readonly serial: string | undefined
@@ -321,54 +325,115 @@ export class AdbEnvironment extends Environment {
     })
   }
 
+  /** Last known screen size in the current orientation. */
+  screen: AndroidScreen | undefined = undefined
+  private gzip: boolean | undefined = undefined
+  private adbKeyboard: boolean | undefined = undefined
+
   override async screenshot(opts: SignalOptions = {}): Promise<Screenshot> {
+    const cap = await this.capture(opts)
+    if (cap.png) return { png: cap.png, width: cap.width, height: cap.height }
+    const img = cap.image
+    if (!img) throw new EnvError('EIO', 'screencap returned no image')
+    return { png: encodePng(img), width: img.width, height: img.height }
+  }
+
+  /**
+   * Full-screen capture. Raw `screencap` piped through `gzip -1` is about twice as fast over
+   * USB as `screencap -p` (the device spends most of the time PNG-compressing).
+   */
+  override async capture(opts: CaptureOptions = {}): Promise<Capture> {
+    if (this.gzip === undefined) {
+      this.gzip = (await this.sh('command -v gzip >/dev/null 2>&1 && echo yes', opts)).out.trim() === 'yes'
+    }
+    if (this.gzip) {
+      const r = await runHost(this.adb, this.args('exec-out', 'screencap | gzip -1'), {
+        signal: opts.signal,
+        maxBytes: 256 * 1024 * 1024,
+      })
+      try {
+        const image = decodeScreencapRaw(zlib.gunzipSync(r.stdout))
+        this.screen = { width: image.width, height: image.height }
+        return { image, width: image.width, height: image.height, rect: { x: 0, y: 0, ...this.screen } }
+      } catch {
+        this.gzip = false
+      }
+    }
     const r = await runHost(this.adb, this.args('exec-out', 'screencap', '-p'), opts)
     const png = r.stdout
-    if (png.length < 24 || png.readUInt32BE(0) !== 0x89504e47)
-      throw new EnvError('EIO', `screencap failed: ${r.stderr.trim()}`)
-    return { png, width: png.readUInt32BE(16), height: png.readUInt32BE(20) }
+    if (!isPng(png)) throw new EnvError('EIO', `screencap failed: ${r.stderr.trim() || png.toString().slice(0, 200)}`)
+    const { width, height } = pngSize(png)
+    this.screen = { width, height }
+    return { png, width, height, rect: { x: 0, y: 0, width, height } }
+  }
+
+  /** Screen size in the current orientation (from `wm size` and the display rotation). */
+  async screenSize(opts: SignalOptions = {}): Promise<AndroidScreen> {
+    if (this.screen) return this.screen
+    const r = await this.sh("wm size; dumpsys input | grep -m1 -E 'SurfaceOrientation|Orientation:'", opts)
+    const m = /Override size:\s*(\d+)x(\d+)/.exec(r.out) ?? /Physical size:\s*(\d+)x(\d+)/.exec(r.out)
+    if (!m) throw new EnvError('EIO', `cannot read the screen size: ${r.out.trim()}`)
+    let w = Number(m[1])
+    let h = Number(m[2])
+    if (/(SurfaceOrientation:\s*[13])|(Orientation:\s*Rotation(90|270))/.test(r.out)) [w, h] = [h, w]
+    this.screen = { width: w, height: h }
+    return this.screen
   }
 
   override async input(actions: readonly InputActionFields[], opts: SignalOptions = {}): Promise<void> {
     for (const a of actions) {
-      switch (a.kind) {
-        case 'click':
-        case 'tap':
-          if (a.double)
-            await this.check(`input tap ${round(a.x)} ${round(a.y)}; input tap ${round(a.x)} ${round(a.y)}`, opts)
-          else if (a.long)
-            await this.check(`input swipe ${round(a.x)} ${round(a.y)} ${round(a.x)} ${round(a.y)} 800`, opts)
-          else await this.check(`input tap ${round(a.x)} ${round(a.y)}`, opts)
-          break
-        case 'swipe':
-          await this.check(
-            `input swipe ${round(a.x)} ${round(a.y)} ${round(a.x2)} ${round(a.y2)} ${Math.round(a.durationMs ?? 300)}`,
-            opts,
-          )
-          break
-        case 'scroll': {
-          const x = Math.round(a.x ?? 540)
-          const y = Math.round(a.y ?? 1200)
-          const dy = Math.round((a.dy ?? 0) * 300)
-          const dx = Math.round((a.dx ?? 0) * 300)
-          await this.check(`input swipe ${x} ${y} ${x - dx} ${y - dy} 300`, opts)
-          break
-        }
-        case 'type':
-          await this.check(`input text ${shq(String(a.text).replace(/ /g, '%s'))}`, opts)
-          break
-        case 'key':
-          await this.check(`input keyevent ${androidKey(a.key)}`, opts)
-          break
-        case 'wait':
-          await new Promise(r => setTimeout(r, Math.min(60000, a.ms ?? 0)))
-          break
-        default:
-          throw new EnvError('EINVAL', `unsupported input action ${a.kind}`)
+      if (a.kind === 'wait') {
+        await new Promise(res => setTimeout(res, Math.min(60000, a.ms ?? 0)))
+        continue
       }
+      if (a.kind === 'type') {
+        await this.typeText(a.text ?? '', opts)
+        continue
+      }
+      const screen = a.kind === 'scroll' ? await this.screenSize(opts) : (this.screen ?? { width: 1080, height: 1920 })
+      await this.check(actionScript(a, screen), opts)
     }
   }
 
+  /** Whether the ADB Keyboard IME (com.android.adbkeyboard) is installed. */
+  async hasAdbKeyboard(opts: SignalOptions = {}): Promise<boolean> {
+    if (this.adbKeyboard === undefined) {
+      this.adbKeyboard = (await this.sh('ime list -a -s 2>/dev/null', opts)).out.includes(ADB_IME)
+    }
+    return this.adbKeyboard
+  }
+
+  /**
+   * Type text into the focused field. ASCII goes through `input text`. Other text (Chinese,
+   * emoji, ...) needs the ADB Keyboard IME: it is switched on for the broadcast and the
+   * previous keyboard is restored afterwards.
+   */
+  async typeText(text: string, opts: SignalOptions = {}): Promise<void> {
+    if (isAsciiTypable(text)) {
+      for (const cmd of inputTextCommands(text)) await this.check(cmd, opts)
+      return
+    }
+    if (!(await this.hasAdbKeyboard(opts))) {
+      throw new EnvError(
+        'UNSUPPORTED',
+        "Android's `input text` cannot type non-ASCII characters and this device has no ADB Keyboard IME. " +
+          'Install ADB Keyboard (https://github.com/senzhk/ADBKeyBoard, package com.android.adbkeyboard) with install_apk ' +
+          'and retry: the tool then switches to it just for typing and restores the current keyboard. ' +
+          'Alternatively type ASCII only, or paste text the app already offers.',
+      )
+    }
+    const b64 = Buffer.from(text, 'utf8').toString('base64')
+    const script = [
+      'prev=$(settings get secure default_input_method)',
+      `ime enable ${ADB_IME} >/dev/null 2>&1`,
+      `ime set ${ADB_IME} >/dev/null`,
+      'sleep 0.6',
+      `am broadcast -a ADB_INPUT_B64 --es msg ${b64} >/dev/null`,
+      'sleep 0.3',
+      `if [ -n "$prev" ] && [ "$prev" != "null" ] && [ "$prev" != "${ADB_IME}" ]; then ime set "$prev" >/dev/null; fi`,
+    ].join('; ')
+    await this.check(script, opts)
+  }
   // ---- Android specifics ---------------------------------------------------
 
   async installApk(
@@ -388,11 +453,118 @@ export class AdbEnvironment extends Environment {
     return text
   }
 
+  /** uiautomator XML of the current screen (retried once: dumps fail while the UI animates). */
   async uiDump(opts: SignalOptions = {}): Promise<string> {
+    const file = `/data/local/tmp/.dsh-ui-${process.pid}.xml`
+    let last = ''
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const r = await this.sh(`uiautomator dump ${file} 2>&1 >/dev/null; cat ${file} 2>/dev/null; rm -f ${file}`, opts)
+      if (r.out.includes('<hierarchy'))
+        return r.out.slice(r.out.indexOf('<?xml') >= 0 ? r.out.indexOf('<?xml') : r.out.indexOf('<hierarchy'))
+      last = r.out.trim()
+      await new Promise(res => setTimeout(res, 500))
+    }
+    throw new EnvError('EIO', `uiautomator dump failed: ${last.slice(0, 300) || 'no output'}`)
+  }
+
+  /** Foreground package/activity. */
+  async foreground(opts: SignalOptions = {}): Promise<{ package?: string; activity?: string; raw: string }> {
     const r = await this.sh(
-      'uiautomator dump /data/local/tmp/.dsh-ui.xml >/dev/null 2>&1; cat /data/local/tmp/.dsh-ui.xml; rm -f /data/local/tmp/.dsh-ui.xml',
+      "dumpsys activity activities 2>/dev/null | grep -m1 -E 'topResumedActivity|mResumedActivity'; dumpsys window 2>/dev/null | grep -m1 mCurrentFocus",
       opts,
     )
-    return r.out
+    const m = /u\d+\s+([\w.]+)\/([\w.$]+)/.exec(r.out)
+    return { package: m?.[1], activity: m?.[2]?.startsWith('.') ? `${m[1]}${m[2]}` : m?.[2], raw: r.out.trim() }
   }
+
+  /** Screen on/off and lock state. */
+  async deviceState(opts: SignalOptions = {}): Promise<DeviceState> {
+    const r = await this.sh(
+      "dumpsys power | grep -m1 -E 'mWakefulness='; dumpsys window | grep -E '^ *(showing|secure)=|isKeyguardShowing|mDreamingLockscreen' ",
+      opts,
+    )
+    const awake = /mWakefulness=Awake/.test(r.out)
+    const locked = /isKeyguardShowing=true|^\s*showing=true|mDreamingLockscreen=true/m.test(r.out)
+    const secure = /^\s*secure=true/m.test(r.out)
+    return { awake, locked, secure }
+  }
+
+  /** Facts for the device tool. */
+  async deviceInfo(opts: SignalOptions = {}): Promise<Record<string, string | number | boolean | undefined>> {
+    this.screen = undefined
+    const [screen, state, fg, extra] = await Promise.all([
+      this.screenSize(opts),
+      this.deviceState(opts),
+      this.foreground(opts),
+      this.sh(
+        "wm density | tail -n1; settings get secure default_input_method; dumpsys battery | grep -m1 ' level'; dumpsys input | grep -m1 -E 'SurfaceOrientation|Orientation:'",
+        opts,
+      ),
+    ])
+    const lines = extra.out.split(/\r?\n/).map(s => s.trim())
+    return {
+      model: this.android?.model,
+      android: `${this.android?.release ?? '?'} (SDK ${this.android?.sdk ?? '?'})`,
+      abi: this.android?.abi,
+      screen: `${screen.width}x${screen.height} (current orientation)`,
+      density: lines[0]?.replace(/^.*:\s*/, ''),
+      rotation: lines[3]?.replace(/^.*(Rotation|Orientation:?)\s*/, ''),
+      foreground: fg.package ? `${fg.package}/${fg.activity ?? ''}` : fg.raw,
+      keyboard: lines[1],
+      adbKeyboard: (await this.hasAdbKeyboard(opts))
+        ? 'installed (non-ASCII typing available)'
+        : 'not installed (only ASCII typing)',
+      ...describeStateFields(state),
+      battery: lines[2]?.replace(/^.*:\s*/, ''),
+    }
+  }
+
+  /** Wake the screen and dismiss an insecure lock screen. */
+  async unlock(opts: SignalOptions = {}): Promise<string> {
+    let s = await this.deviceState(opts)
+    if (!s.awake) await this.check('input keyevent 224', opts)
+    s = await this.deviceState(opts)
+    if (!s.locked) return `${describeState(s)}; nothing to unlock`
+    await this.check('wm dismiss-keyguard 2>/dev/null; sleep 0.6', opts)
+    s = await this.deviceState(opts)
+    if (s.locked) {
+      // Swipe up from the bottom to open the bouncer / dismiss a swipe lock.
+      const scr = await this.screenSize(opts)
+      await this.check(
+        `input swipe ${Math.round(scr.width / 2)} ${Math.round(scr.height * 0.9)} ${Math.round(scr.width / 2)} ${Math.round(scr.height * 0.3)} 300; sleep 0.6`,
+        opts,
+      )
+      s = await this.deviceState(opts)
+    }
+    if (!s.locked) return `${describeState(s)}; unlocked`
+    return s.secure
+      ? 'The lock screen is protected by a PIN, pattern or password; it cannot be unlocked without the user. Ask the user to unlock the device.'
+      : `${describeState(s)}; the lock screen is still showing`
+  }
+}
+
+export interface DeviceState {
+  awake: boolean
+  locked: boolean
+  secure: boolean
+}
+
+function describeStateFields(s: DeviceState): Record<string, string> {
+  return {
+    screenOn: s.awake ? 'yes' : 'no',
+    locked: s.locked ? `yes${s.secure ? ' (secure: PIN/pattern/password)' : ''}` : 'no',
+  }
+}
+
+export function describeState(s: DeviceState): string {
+  const f = describeStateFields(s)
+  return `screen on: ${f['screenOn']}, locked: ${f['locked']}`
+}
+
+export function formatForeground(fg: {
+  package?: string | undefined
+  activity?: string | undefined
+  raw: string
+}): string {
+  return fg.package ? `Foreground: ${fg.package}/${fg.activity ?? '?'}` : `Foreground: ${fg.raw || 'unknown'}`
 }

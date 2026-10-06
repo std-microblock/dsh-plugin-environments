@@ -2,33 +2,10 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import type { AdbEnvironment } from '../../env/adb/adb-env.ts'
+import { describeState, formatForeground, type AdbEnvironment } from '../../env/adb/adb-env.ts'
+import { shq } from '../../env/adb/input.ts'
 import { TEXT_OUTPUT, baseName, clip } from '../common.ts'
 import type { LeaseToolContext } from './context.ts'
-
-/** Compact one-line-per-node description of a uiautomator dump. */
-export function compactUiXml(xml: string): string {
-  const nodes: string[] = []
-  const re = /<node\b([^>]*)\/?>/g
-  let m: RegExpExecArray | null
-  while ((m = re.exec(xml))) {
-    const attrs: Record<string, string | undefined> = {}
-    for (const [, key, value] of (m[1] ?? '').matchAll(/([\w-]+)="([^"]*)"/g)) if (key) attrs[key] = value
-    const label = attrs['text'] || attrs['content-desc']
-    const id = attrs['resource-id']
-    const clickable = attrs['clickable'] === 'true'
-    if (!label && !id && !clickable) continue
-    const cls = (attrs['class'] ?? '').split('.').pop()
-    const b = attrs['bounds']?.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/)
-    const center = b
-      ? ` @(${Math.round((+(b[1] ?? 0) + +(b[3] ?? 0)) / 2)},${Math.round((+(b[2] ?? 0) + +(b[4] ?? 0)) / 2)})`
-      : ''
-    nodes.push(
-      `${cls}${id ? ` #${id.split('/').pop()}` : ''}${label ? ` "${label}"` : ''}${clickable ? ' [clickable]' : ''}${attrs['checked'] === 'true' ? ' [checked]' : ''}${attrs['enabled'] === 'false' ? ' [disabled]' : ''}${center}`,
-    )
-  }
-  return nodes.join('\n')
-}
 
 export function addAndroidTools(t: LeaseToolContext, env: AdbEnvironment): void {
   const { label: name, add, workspaceOf } = t
@@ -69,16 +46,29 @@ export function addAndroidTools(t: LeaseToolContext, env: AdbEnvironment): void 
 
   add({
     name: 'app',
-    description: `Manage Android apps on ${name}: launch, stop, clear data, uninstall, show info, or list installed packages.`,
+    description: `Manage Android apps on ${name}: launch (by package), stop, clear data, uninstall, info, list installed packages, current (foreground app/activity), open_url (open a link or deep link with the default handler), start (am start with an explicit intent).`,
     parameters: {
       action: {
         type: 'string',
-        enum: ['launch', 'stop', 'clear', 'uninstall', 'info', 'list', 'current'],
+        enum: ['launch', 'stop', 'clear', 'uninstall', 'info', 'list', 'current', 'open_url', 'start'],
         required: true,
         description: 'Operation.',
       },
       package: { type: 'string', description: 'Package name, e.g. com.example.app (filter text for list).' },
-      activity: { type: 'string', description: 'Activity to launch (default: the launcher activity).' },
+      activity: {
+        type: 'string',
+        description: 'launch/start: activity class (".MainActivity" or full name) or a full component "pkg/.Activity".',
+      },
+      url: {
+        type: 'string',
+        description: 'open_url: http(s) URL or deep link (also used as the intent data for start).',
+      },
+      intent_action: { type: 'string', description: 'start: intent action, e.g. android.settings.WIFI_SETTINGS.' },
+      extras: {
+        type: 'object',
+        additionalProperties: true,
+        description: 'start: string extras {"key": "value"}.',
+      },
     },
     output: TEXT_OUTPUT,
     async execute(args, exec) {
@@ -90,53 +80,108 @@ export function addAndroidTools(t: LeaseToolContext, env: AdbEnvironment): void 
         const r = await env.exec({ command: cmd }, { signal: exec.signal, timeoutMs: 60000 })
         return `${r.stdout.toString()}${r.stderr.toString()}`.trim()
       }
+      const component = () => {
+        const act = args.activity
+        if (!act) return undefined
+        if (act.includes('/')) return act
+        if (!pkg) throw new Error('package is required with a bare activity name')
+        return `${pkg}/${act}`
+      }
       switch (args.action) {
         case 'launch':
           need()
           return args.activity
-            ? await run(`am start -W -n ${pkg}/${args.activity}`)
-            : await run(`monkey -p ${pkg} -c android.intent.category.LAUNCHER 1 2>&1 | tail -n 2`)
+            ? await run(`am start -W -n ${shq(component() ?? '')}`)
+            : await run(`monkey -p ${shq(pkg ?? '')} -c android.intent.category.LAUNCHER 1 2>&1 | tail -n 2`)
         case 'stop':
           need()
-          await run(`am force-stop ${pkg}`)
+          await run(`am force-stop ${shq(pkg ?? '')}`)
           return `stopped ${pkg}`
         case 'clear':
           need()
-          return await run(`pm clear ${pkg}`)
+          return await run(`pm clear ${shq(pkg ?? '')}`)
         case 'uninstall':
           need()
-          return await run(`pm uninstall ${pkg}`)
+          return await run(`pm uninstall ${shq(pkg ?? '')}`)
         case 'info':
           need()
           return clip(
             await run(
-              `dumpsys package ${pkg} | grep -E 'versionName|versionCode|firstInstallTime|lastUpdateTime|targetSdk|enabled=' | head -n 20`,
+              `dumpsys package ${shq(pkg ?? '')} | grep -E 'versionName|versionCode|firstInstallTime|lastUpdateTime|targetSdk|enabled=' | head -n 20`,
             ),
           )
         case 'current':
-          return await run(`dumpsys window | grep -E 'mCurrentFocus|mFocusedApp' | head -n 2`)
+          return formatForeground(await env.foreground({ signal: exec.signal }))
+        case 'open_url': {
+          if (!args.url) throw new Error('url is required')
+          const out = await run(
+            `am start -W -a android.intent.action.VIEW -d ${shq(args.url)}${pkg ? ` -p ${shq(pkg)}` : ''}`,
+          )
+          return `${clip(out)}\n${formatForeground(await env.foreground({ signal: exec.signal }))}`
+        }
+        case 'start': {
+          const parts = ['am start -W']
+          if (args.intent_action) parts.push(`-a ${shq(args.intent_action)}`)
+          if (args.url) parts.push(`-d ${shq(args.url)}`)
+          const comp = component()
+          if (comp) parts.push(`-n ${shq(comp)}`)
+          else if (pkg) parts.push(`-p ${shq(pkg)}`)
+          for (const [k, v] of Object.entries(args.extras ?? {}))
+            parts.push(`--es ${shq(k)} ${shq(typeof v === 'string' ? v : JSON.stringify(v))}`)
+          if (parts.length === 1) throw new Error('start needs intent_action, url, activity or package')
+          const out = await run(parts.join(' '))
+          return `${clip(out)}\n${formatForeground(await env.foreground({ signal: exec.signal }))}`
+        }
         case 'list':
         default:
           return (
-            clip(await run(`pm list packages -3${pkg ? ` | grep -i ${JSON.stringify(pkg)}` : ''}`)) ||
-            'No third-party packages'
+            clip(await run(`pm list packages -3${pkg ? ` | grep -i ${shq(pkg)}` : ''}`)) || 'No third-party packages'
           )
       }
     },
   })
 
   add({
-    name: 'ui_dump',
-    description: `Describe the current Android UI of ${name}: visible elements with text, resource ids, flags and tap coordinates. Prefer this over screenshots for locating controls.`,
-    parameters: { raw: { type: 'boolean', description: 'Return the raw uiautomator XML.' } },
+    name: 'device',
+    description: `Device state and controls of ${name}: info (model, Android version, screen size/density/rotation, foreground app, keyboard, screen on/locked, battery), wake, sleep, unlock (wake and dismiss a lock screen that has no PIN/pattern/password; reports when a secure lock needs the user), notifications / quick_settings (open the shade), collapse (close it). Navigation keys (back, home, recents) are ${t.alias}__input key actions.`,
+    parameters: {
+      action: {
+        type: 'string',
+        enum: ['info', 'wake', 'sleep', 'unlock', 'notifications', 'quick_settings', 'collapse'],
+        description: 'Default info.',
+      },
+    },
     output: TEXT_OUTPUT,
     async execute(args, exec) {
-      const xml = await env.uiDump({ signal: exec.signal })
-      if (!xml.includes('<hierarchy')) throw new Error(`uiautomator dump failed: ${xml.slice(0, 300)}`)
-      return clip(args.raw ? xml : compactUiXml(xml) || '(no labelled elements)')
+      const signal = exec.signal
+      switch (args.action ?? 'info') {
+        case 'wake':
+          await env.check('input keyevent 224', { signal })
+          return describeState(await env.deviceState({ signal }))
+        case 'sleep':
+          await env.check('input keyevent 223', { signal })
+          return 'screen off'
+        case 'unlock':
+          return await env.unlock({ signal })
+        case 'notifications':
+          await env.check('cmd statusbar expand-notifications', { signal })
+          return 'notification shade opened'
+        case 'quick_settings':
+          await env.check('cmd statusbar expand-settings', { signal })
+          return 'quick settings opened'
+        case 'collapse':
+          await env.check('cmd statusbar collapse', { signal })
+          return 'panels collapsed'
+        default: {
+          const info = await env.deviceInfo({ signal })
+          return Object.entries(info)
+            .filter(([, v]) => v !== undefined && v !== '')
+            .map(([k, v]) => `${k}: ${String(v)}`)
+            .join('\n')
+        }
+      }
     },
   })
-
   add({
     name: 'logcat',
     description: `Read recent Android log lines from ${name}.`,

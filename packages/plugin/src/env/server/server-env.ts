@@ -2,7 +2,14 @@
 import { EnvClient, EnvError, type DirEntry, type Info, type Stat, type Transport } from '@dsh-environments/protocol'
 import { Environment, type EnvironmentOptions } from '../environment.ts'
 import type {
+  Capture,
+  CaptureOptions,
   CopyOptions,
+  DisplayInfo,
+  PixelRect,
+  WindowAction,
+  WindowActionResult,
+  WindowInfo,
   InputActionFields,
   ForwardOptions,
   GlobOptions,
@@ -24,7 +31,7 @@ import type {
 import { ServerProcess } from './server-process.ts'
 import { forwardTcp, forwardUdp, reverseTunnel } from './tunnels.ts'
 import type { Readable } from 'node:stream'
-import type { InputAction } from '@dsh-environments/protocol'
+import type { InputAction, ScreenshotArgs } from '@dsh-environments/protocol'
 import type { Client as SshClient } from 'ssh2'
 
 /** Whole-file reads/writes above this size go through streams instead of single frames. */
@@ -243,6 +250,54 @@ export class ServerEnvironment extends Environment {
     if (!this.caps.has('screenshot')) throw new EnvError('UNSUPPORTED', `${this.name} cannot take screenshots`)
     const { result, payload } = await this.client.request('sys.screenshot', {}, undefined, opts.signal)
     return { png: payload, width: result.width, height: result.height }
+  }
+
+  override async capture(opts: CaptureOptions = {}): Promise<Capture> {
+    if (!this.caps.has('screenshot')) throw new EnvError('UNSUPPORTED', `${this.name} cannot take screenshots`)
+    // Servers without `displays` only understand `display` and always return the full screen.
+    const args: ScreenshotArgs = this.caps.has('displays')
+      ? {
+          ...(opts.display !== undefined ? { display: opts.display } : {}),
+          ...(opts.rect ? { rect: opts.rect } : {}),
+          ...(opts.window !== undefined ? { window: opts.window } : {}),
+          ...(opts.maxWidth ? { maxWidth: Math.round(opts.maxWidth) } : {}),
+          ...(opts.maxHeight ? { maxHeight: Math.round(opts.maxHeight) } : {}),
+          ...(opts.cursor ? { cursor: true } : {}),
+        }
+      : {}
+    const { result, payload } = await this.client.request('sys.screenshot', args, undefined, opts.signal)
+    return {
+      png: payload,
+      width: result.width,
+      height: result.height,
+      rect: {
+        x: result.x ?? 0,
+        y: result.y ?? 0,
+        width: result.srcWidth ?? result.width,
+        height: result.srcHeight ?? result.height,
+      },
+      cursor: result.cursor,
+    }
+  }
+
+  override async displays(opts: SignalOptions = {}): Promise<DisplayInfo[]> {
+    if (!this.caps.has('displays')) throw new EnvError('UNSUPPORTED', `${this.name} cannot list displays`)
+    return (await this.client.call('sys.displays', {}, undefined, opts.signal)).displays
+  }
+
+  override async windows(opts: SignalOptions & { all?: boolean } = {}): Promise<WindowInfo[]> {
+    if (!this.caps.has('windows')) throw new EnvError('UNSUPPORTED', `${this.name} cannot list windows`)
+    return (await this.client.call('sys.windows', { all: !!opts.all }, undefined, opts.signal)).windows
+  }
+
+  override async windowAction(
+    hwnd: number,
+    action: WindowAction,
+    rect?: PixelRect,
+    opts: SignalOptions = {},
+  ): Promise<WindowActionResult> {
+    if (!this.caps.has('windows')) throw new EnvError('UNSUPPORTED', `${this.name} cannot manage windows`)
+    return this.client.call('sys.window', { hwnd, action, ...(rect ?? {}) }, undefined, opts.signal)
   }
 
   override async input(actions: readonly InputActionFields[], opts: SignalOptions = {}): Promise<void> {

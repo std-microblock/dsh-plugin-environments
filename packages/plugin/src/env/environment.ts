@@ -3,7 +3,14 @@ import { EventEmitter } from 'node:events'
 import path from 'node:path'
 import { EnvError, type Capability, type DirEntry, type Info, type Stat } from '@dsh-environments/protocol'
 import type {
+  Capture,
+  CaptureOptions,
   CopyOptions,
+  DisplayInfo,
+  PixelRect,
+  WindowAction,
+  WindowActionResult,
+  WindowInfo,
   InputActionFields,
   EnvironmentKind,
   EnvProcess,
@@ -195,6 +202,31 @@ export abstract class Environment extends EventEmitter<EnvironmentEvents> {
   }
   input(_actions: readonly InputActionFields[], _opts?: SignalOptions): Promise<void> {
     return this.unsupported('input')
+  }
+  /**
+   * Capture the screen (or part of it) for computer use. The default takes a full
+   * {@link screenshot}; implementations may honour `opts` and return a smaller area.
+   */
+  async capture(opts: CaptureOptions = {}): Promise<Capture> {
+    const s = await this.screenshot(opts)
+    return { png: s.png, width: s.width, height: s.height, rect: { x: 0, y: 0, width: s.width, height: s.height } }
+  }
+  /** Attached displays (physical pixels). */
+  displays(_opts?: SignalOptions): Promise<DisplayInfo[]> {
+    return this.unsupported('displays')
+  }
+  /** Top-level windows in z-order (topmost first). */
+  windows(_opts?: SignalOptions & { all?: boolean }): Promise<WindowInfo[]> {
+    return this.unsupported('windows')
+  }
+  /** Focus, minimize, maximize, restore, close or move (`rect`, physical pixels) a window. */
+  windowAction(
+    _hwnd: number,
+    _action: WindowAction,
+    _rect?: PixelRect,
+    _opts?: SignalOptions,
+  ): Promise<WindowActionResult> {
+    return this.unsupported('windowAction')
   }
 
   private unsupported(op: string): Promise<never> {
