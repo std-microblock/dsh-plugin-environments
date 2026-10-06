@@ -1,4 +1,0 @@
-- insert:
-    - id: environments
-      name: 'dsh-plugin-environments'
-

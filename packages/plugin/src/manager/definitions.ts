@@ -1,0 +1,103 @@
+// Environment definitions: what the user configured (or adb discovered), as persisted.
+import type { AdbDevice } from '../env/adb/devices.ts'
+import type { EnvironmentKind } from '../env/types.ts'
+
+/** Kinds a definition may have (`host` is internal to transfers). */
+export type DefinitionKind = Exclude<EnvironmentKind, 'host'>
+
+export const KINDS: readonly DefinitionKind[] = ['local', 'server', 'ssh', 'adb', 'winuser']
+export const SECRET_FIELDS = ['token', 'password', 'passphrase'] as const
+export const SECRET_MARKER = '••••••'
+export const LOCAL_ID = 'local'
+
+/** Connection settings of a definition; which fields apply depends on the kind. */
+export interface EnvironmentConfig {
+  /** server, ssh */
+  host?: string
+  port?: number
+  /** server */
+  token?: string
+  /** ssh */
+  username?: string
+  password?: string
+  privateKeyPath?: string
+  passphrase?: string
+  serverPath?: string
+  install?: 'off' | 'auto'
+  readyTimeoutMs?: number
+  /** local, ssh, winuser */
+  cwd?: string
+  /** adb */
+  serial?: string
+  adb?: string
+  /** winuser */
+  account?: string
+}
+
+export interface EnvironmentDefinition {
+  id: string
+  name: string
+  kind: DefinitionKind
+  description?: string
+  tags?: string[]
+  borrowable?: boolean
+  exclusive?: boolean
+  /** The built-in local environment. */
+  builtin?: boolean
+  /** Found by adb discovery and not persisted yet. */
+  discovered?: boolean
+  config: EnvironmentConfig
+}
+
+/** Definition as shown to the UI: secrets masked, alias and exclusivity resolved. */
+export interface PublicDefinition extends EnvironmentDefinition {
+  alias: string
+  exclusive: boolean
+}
+
+/** Input accepted by `upsert` (from the UI; loosely typed on purpose). */
+export interface DefinitionInput {
+  id?: string
+  name?: string
+  kind: string
+  description?: string
+  tags?: unknown
+  borrowable?: boolean
+  exclusive?: boolean
+  config?: Record<string, unknown>
+}
+
+export interface DiscoveryState {
+  adb: AdbDevice[]
+  adbError: string | undefined
+  at: number
+}
+
+export function slug(s: unknown): string {
+  return (
+    String(s)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 24) || 'env'
+  )
+}
+
+/** Tool-name-safe alias for an environment. */
+export function aliasFor(id: string): string {
+  let a = slug(id)
+  if (!/^[a-z]/.test(a)) a = `env_${a}`
+  return a
+}
+
+export function defaultExclusive(kind: string): boolean {
+  return kind === 'adb' || kind === 'winuser'
+}
+
+export function isExclusive(def: EnvironmentDefinition): boolean {
+  return def.exclusive ?? defaultExclusive(def.kind)
+}
+
+export function isKind(kind: string): kind is DefinitionKind {
+  return (KINDS as readonly string[]).includes(kind)
+}
