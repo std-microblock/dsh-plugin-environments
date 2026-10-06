@@ -4,7 +4,7 @@
 export const PROTOCOL_VERSION = 2
 
 /** Client identification sent in the handshake. */
-export const CLIENT_ID = 'dsh-plugin-environments/0.1.0'
+export const CLIENT_ID = 'dsh-plugin-environments/0.2.0'
 
 /** Initial per-direction send window of every (channel, fd), in bytes. */
 export const WINDOW = 1024 * 1024

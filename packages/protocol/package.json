@@ -1,6 +1,6 @@
 {
   "name": "@dsh-environments/protocol",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Wire framing, message types and the Node client for the dsh-env-server protocol (docs/protocol.md).",
   "type": "module",

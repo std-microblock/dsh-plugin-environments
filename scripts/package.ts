@@ -184,7 +184,7 @@ async function main(): Promise<void> {
   if (typeof name !== 'string' || typeof version !== 'string') fail('package.json: name/version must be strings')
 
   if (!values['no-build']) {
-    await buildPlugin({ root: ROOT })
+    await buildPlugin({ root: ROOT, release: true })
     await buildClient({ root: ROOT, minify: true })
   }
   const bundle = path.join(PLUGIN_DIR, 'dist', 'index.js')

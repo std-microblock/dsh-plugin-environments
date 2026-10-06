@@ -1,6 +1,6 @@
 {
   "name": "@dsh-environments/client",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Web GUI of dsh-plugin-environments (Environments page and composer chip). Built into packages/plugin/client.js.",
   "type": "module",

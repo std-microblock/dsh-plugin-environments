@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-environments-monorepo",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Workspace for dsh-plugin-environments: the DSH environments plugin, its protocol client and its web GUI.",
   "type": "module",
