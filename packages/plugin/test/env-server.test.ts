@@ -136,7 +136,10 @@ test('env-server over stdio and tcp', needsServer, async t => {
       ['文件.txt'],
     )
     const here = await env.exec({ command: '(Get-Location).Path; Get-Content 文件.txt -Encoding UTF8', cwd: dir })
-    assert.deepEqual(here.stdout.toString('utf8').trim().split(/\r?\n/), [dir, '内容'])
+    // PowerShell prints the long path even when os.tmpdir() handed back an 8.3 short name
+    // (C:\Users\RUNNER~1\... on the Windows CI runners), so compare canonical paths.
+    const canonical = fs.realpathSync.native(dir)
+    assert.deepEqual(here.stdout.toString('utf8').trim().split(/\r?\n/), [canonical, '内容'])
   })
 
   await t.test('pty', async () => {
