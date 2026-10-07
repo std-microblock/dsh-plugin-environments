@@ -123,6 +123,10 @@ impl Lifetime {
     }
 
     /// Exit when stdin reaches EOF (the parent / SSH channel went away).
+    ///
+    /// The watcher consumes stdin, so it must only be started once any `--token-stdin` read has
+    /// finished (see [`read_secret`]): otherwise the two readers race and the watcher can swallow
+    /// the secret line, leaving the secret read blocked forever.
     pub fn lifeline(self: &Arc<Self>) {
         let me = self.clone();
         let rt = tokio::runtime::Handle::current();

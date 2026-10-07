@@ -88,57 +88,77 @@ fn main() {
             once,
             exit_idle,
             lifeline,
-        } => run(
-            lifeline,
-            Box::new(move |life| {
-                Box::pin(async move {
-                    let listen = transport::Endpoint::parse(&listen).map_err(invalid_input)?;
-                    let secret =
-                        match transport::read_secret(secret.token, secret.file, secret.stdin)? {
-                            Some(s) => s,
-                            None => {
-                                let mut bytes = [0u8; 32];
-                                util::random_bytes(&mut bytes);
-                                let t = util::hex(&bytes);
-                                println!("DSH_ENV_SERVER token={t}");
-                                t
-                            }
+        } => {
+            // Read the secret before `run` starts the lifeline watcher: both read stdin, and if the
+            // watcher wins the race it swallows the secret line, leaving this read blocked forever.
+            let secret = match transport::read_secret(secret.token, secret.file, secret.stdin) {
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    let mut bytes = [0u8; 32];
+                    util::random_bytes(&mut bytes);
+                    let t = util::hex(&bytes);
+                    println!("DSH_ENV_SERVER token={t}");
+                    t
+                }
+                Err(e) => {
+                    eprintln!("dsh-env-server: {e}");
+                    std::process::exit(1);
+                }
+            };
+            run(
+                lifeline,
+                Box::new(move |life| {
+                    Box::pin(async move {
+                        let listen = transport::Endpoint::parse(&listen).map_err(invalid_input)?;
+                        let opts = transport::ServeOptions {
+                            listen,
+                            secret,
+                            cwd: resolve_cwd(cwd),
+                            once,
+                            exit_idle,
                         };
-                    let opts = transport::ServeOptions {
-                        listen,
-                        secret,
-                        cwd: resolve_cwd(cwd),
-                        once,
-                        exit_idle,
-                    };
-                    transport::serve(opts, life).await
-                })
-            }),
-        ),
+                        transport::serve(opts, life).await
+                    })
+                }),
+            )
+        }
         Cmd::Connect {
             url,
             id,
             secret,
             cwd,
             lifeline,
-        } => run(
-            lifeline,
-            Box::new(move |life| {
-                Box::pin(async move {
-                    let url = transport::Endpoint::parse(&url).map_err(invalid_input)?;
-                    let secret = transport::read_secret(secret.token, secret.file, secret.stdin)?
-                        .ok_or_else(|| invalid_input("a secret is required".into()))?;
-                    let opts = transport::ConnectOptions {
-                        url,
-                        secret,
-                        id,
-                        cwd: resolve_cwd(cwd),
-                        max_sessions: 32,
-                    };
-                    transport::connect(opts, life).await
-                })
-            }),
-        ),
+        } => {
+            // Same ordering requirement as `serve` above: the secret must be consumed before the
+            // lifeline thread starts reading stdin.
+            let secret = match transport::read_secret(secret.token, secret.file, secret.stdin) {
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    eprintln!("dsh-env-server: a secret is required");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("dsh-env-server: {e}");
+                    std::process::exit(1);
+                }
+            };
+            run(
+                lifeline,
+                Box::new(move |life| {
+                    Box::pin(async move {
+                        let url = transport::Endpoint::parse(&url).map_err(invalid_input)?;
+                        let opts = transport::ConnectOptions {
+                            url,
+                            secret,
+                            id,
+                            cwd: resolve_cwd(cwd),
+                            max_sessions: 32,
+                        };
+                        transport::connect(opts, life).await
+                    })
+                }),
+            )
+        }
         Cmd::Stdio { cwd } => {
             let rt = runtime();
             let cwd = resolve_cwd(cwd);
