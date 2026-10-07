@@ -106,9 +106,21 @@ test('env-server over stdio and tcp', needsServer, async t => {
     assert.equal(exit.code, 5)
     const ps = await env.exec({ command: '"管道中文" | findstr .; Write-Output "输出"' })
     assert.deepEqual(ps.stdout.toString('utf8').trim().split(/\r?\n/), ['管道中文', '输出'])
-    // auto: the console keeps its code page; code-page text is transcoded.
-    const auto = await env.exec({ argv: ['cmd.exe', '/d', '/c', 'echo', '中文'], encoding: 'auto' })
-    assert.equal(auto.stdout.toString('utf8').trim(), '中文')
+    // auto: the console keeps its code page; code-page text is transcoded. A console
+    // only emits what its own code page holds — anything else becomes '?' inside
+    // cmd.exe, before the server sees a byte — so the sample has to be one the host
+    // code page can represent (936 on a Chinese box, 437 on the US CI runners).
+    let sample = ''
+    for (const candidate of ['中文', 'café', 'Привет', '日本語', '한국어']) {
+      const raw = await env.exec({ argv: ['cmd.exe', '/d', '/c', 'echo', candidate], encoding: 'raw' })
+      if (!raw.stdout.includes(0x3f)) {
+        sample = candidate
+        break
+      }
+    }
+    assert.notEqual(sample, '', 'the console code page cannot represent any sample text')
+    const auto = await env.exec({ argv: ['cmd.exe', '/d', '/c', 'echo', sample], encoding: 'auto' })
+    assert.equal(auto.stdout.toString('utf8').trim(), sample)
     // raw: bytes are forwarded untouched.
     const bin = Buffer.from([0x41, 0xd6, 0xd0, 0xff, 0x80, 0x0a, 0xe4, 0xb8])
     fs.writeFileSync(path.join(tmp, 'bin.dat'), bin)
