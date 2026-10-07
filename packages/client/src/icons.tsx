@@ -205,16 +205,6 @@ export function IconCopy({ size }: IconProps) {
   )
 }
 
-/** Chain link: marks a workspace bound to a remote environment. */
-export function IconLink({ size }: IconProps) {
-  return (
-    <Svg size={size}>
-      <path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1.2 1.2" />
-      <path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1.2-1.2" />
-    </Svg>
-  )
-}
-
 export const KIND_ICON: Record<EnvKind, (props: IconProps) => React.JSX.Element> = {
   local: IconLocal,
   server: IconServer,

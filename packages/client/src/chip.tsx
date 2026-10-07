@@ -71,6 +71,7 @@ interface PanelProps {
 function Panel({ sessionId, data, t, openManager, onClose }: PanelProps) {
   const [browser, setBrowser] = useState(false)
   const act = useAction()
+  const remount = useAction()
   const [savedNote, setSavedNote] = useState(false)
   const envs = data.environments
   const byId: Record<string, EnvView | undefined> = Object.fromEntries(envs.map(e => [e.id, e]))
@@ -101,7 +102,6 @@ function Panel({ sessionId, data, t, openManager, onClose }: PanelProps) {
         <div className="envx-pop-title">
           <span>{t('pop.mount')}</span>
           {mount?.source === 'workspace' && <small>{t('pop.mount.fromWorkspace')}</small>}
-          {mount?.source === 'default' && <small>{t('pop.mount.fromDefault')}</small>}
         </div>
         {mount ? (
           <div className="envx-mounted" data-kind={mountEnv?.kind ?? 'server'}>
@@ -125,14 +125,9 @@ function Panel({ sessionId, data, t, openManager, onClose }: PanelProps) {
                 className="envx-textbtn"
                 data-quiet=""
                 disabled={act.busy}
-                onClick={() =>
-                  // A workspace default is turned off for this session with an explicit `false`.
-                  void act.run(() =>
-                    call('session.set', { sessionId, mount: mount.source === 'default' ? false : null, cwd: s.cwd }),
-                  )
-                }
+                onClick={() => void act.run(() => call('session.set', { sessionId, mount: null, cwd: s.cwd }))}
               >
-                {mount.source === 'default' ? t('action.dontMount') : t('action.unmount')}
+                {t('action.unmount')}
               </button>
             )}
           </div>
@@ -156,10 +151,28 @@ function Panel({ sessionId, data, t, openManager, onClose }: PanelProps) {
             )}
           </>
         )}
-        {s?.mountError && (
-          <div className="envx-error-line" style={{ marginTop: 6 }}>
-            {t('pop.mount.error', { message: s.mountError })}
+        {(s?.mountBlocked ?? s?.mountError) && (
+          <div className="envx-error-line" style={{ marginTop: 6 }} role="alert">
+            {s.mountBlocked ?? t('pop.mount.error', { message: s.mountError ?? '' })}
           </div>
+        )}
+        {s?.mountBlocked && (
+          <>
+            <p className="envx-pop-hint">{t('pop.mount.blocked')}</p>
+            <div className="envx-pop-foot">
+              <button
+                type="button"
+                className="envx-textbtn"
+                disabled={remount.busy}
+                onClick={() =>
+                  // The outcome (mounted, or the new reason) shows up in the session state either way.
+                  void remount.run(() => call('session.remount', { sessionId }).finally(invalidate))
+                }
+              >
+                {remount.busy ? <IconSpinner size={13} /> : t('action.remount')}
+              </button>
+            </div>
+          </>
         )}
       </div>
 
@@ -231,6 +244,16 @@ function Panel({ sessionId, data, t, openManager, onClose }: PanelProps) {
               {t('pop.borrow.reset')}
             </button>
           )}
+          {s?.cwd && s.borrowableSource === 'workspace' && (
+            <button
+              type="button"
+              className="envx-textbtn"
+              data-quiet=""
+              onClick={() => void act.run(() => call('workspace.set', { workspacePath: s.cwd, borrowable: null }))}
+            >
+              {t('pop.borrow.clearWorkspace')}
+            </button>
+          )}
           {s?.cwd && s.borrowableSource === 'session' && (
             <button
               type="button"
@@ -298,12 +321,15 @@ export function EnvironmentChip({
   const mount = s?.mount
   const mountEnv = mount ? data?.environments.find(e => e.id === mount.envId) : undefined
   const heldCount = s?.held.length ?? 0
+  const blocked = s?.mountBlocked
   const label = mount ? (mountEnv?.name ?? mount.envId) : t('chip.label')
-  const title = mount
-    ? t('chip.mounted', { name: mountEnv?.name ?? mount.envId })
-    : heldCount
-      ? t('chip.borrowed', { count: heldCount })
-      : t('chip.label')
+  const title = blocked
+    ? blocked
+    : mount
+      ? t('chip.mounted', { name: mountEnv?.name ?? mount.envId })
+      : heldCount
+        ? t('chip.borrowed', { count: heldCount })
+        : t('chip.label')
 
   useEffect(() => {
     if (open) invalidate()
@@ -315,7 +341,8 @@ export function EnvironmentChip({
         ref={anchor}
         type="button"
         className="envx-chipbtn"
-        data-active={mount ? '' : undefined}
+        data-active={mount && !blocked ? '' : undefined}
+        data-error={blocked ? '' : undefined}
         aria-expanded={open}
         aria-haspopup="dialog"
         title={title}
@@ -323,6 +350,7 @@ export function EnvironmentChip({
       >
         {mount ? <KindIcon kind={mountEnv?.kind ?? 'server'} size={16} /> : <IconEnvironments size={16} />}
         <span>{label}</span>
+        {blocked && <i aria-hidden="true" />}
         {heldCount > 0 && <b>{heldCount}</b>}
       </button>
       {open && anchor.current && (

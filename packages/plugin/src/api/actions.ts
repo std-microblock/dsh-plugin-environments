@@ -9,7 +9,7 @@ import { sessionStarted, type PluginContext } from '../host-api.ts'
 import { AvailabilityChecker } from '../manager/availability.ts'
 import type { DefinitionInput, EnvironmentDefinition } from '../manager/definitions.ts'
 import type { EnvironmentManager } from '../manager/manager.ts'
-import type { SessionMount, SessionSettings, WorkspaceDefaultMount, WorkspaceSettings } from '../manager/state.ts'
+import type { SessionMount, SessionSettings, WorkspaceSettings } from '../manager/state.ts'
 import type { Mounting } from '../mount/index.ts'
 
 /** Public subset of an environment's Info. */
@@ -94,8 +94,7 @@ export function createActions(
       ? borrowing.heldOf(agent).map(e => ({ ...e.lease.describe(), name: e.lease.def.name, tools: e.tools.length }))
       : []
     const started = !!agent && sessionStarted(agent)
-    // A session that has not started yet previews its workspace's default environment.
-    const mount = manager.mountFor(sessionId, cwd, { fresh: !started })
+    const mount = manager.mountFor(sessionId, cwd)
     return {
       sessionId,
       live: !!agent,
@@ -106,6 +105,8 @@ export function createActions(
         ? { envId: record.envId, remoteRoot: record.map.remoteRoot, since: record.startedAt }
         : undefined,
       mountError: settings.mountError,
+      /** Set while the session cannot run because its mount is missing (the turn error it gets). */
+      mountBlocked: agent ? mounting.blockReason(agent) : undefined,
       borrowableSource: borrowable.source,
       borrowable: borrowable.defs.map(d => d.id),
       borrowableExplicit: Array.isArray(settings.borrowable) ? settings.borrowable : undefined,
@@ -249,7 +250,6 @@ export function createActions(
       if (mount !== undefined) {
         const m = mount as SessionMount | false | null
         patch.mount = m === null ? undefined : m === false ? false : { envId: m.envId, remoteRoot: m.remoteRoot }
-        patch.mountOrigin = undefined
         patch.mountError = undefined
       }
       if (borrowable !== undefined)
@@ -257,31 +257,27 @@ export function createActions(
       if (cwd) patch.cwd = text(cwd)
       manager.setSessionSettings(sid, patch)
       const agent = agentFor(sid)
-      if (agent && mount !== undefined) {
-        try {
-          await mounting.ensure(agent)
-        } catch (e) {
-          manager.setSessionSettings(sid, { mountError: errorMessage(e) })
-          throw e
-        }
-      }
+      // A failure is recorded as the session's mountError (and blocks its turns).
+      if (agent && mount !== undefined) await mounting.ensure(agent)
       return { session: sessionState(sid) }
     },
-    /**
-     * Change a workspace's defaults. Only the fields present in the body change:
-     * `borrowable` (string[] or null = every environment) and `defaultMount`
-     * ({ envId, remoteRoot? } or null = none).
-     */
-    async 'workspace.set'({ workspacePath, workspaceId, borrowable, defaultMount }) {
+    /** Re-attempt the mount of a live session (after it failed or was lost). */
+    async 'session.remount'({ sessionId }) {
+      const sid = str(sessionId)
+      if (!sid) throw new EnvError('EINVAL', 'sessionId is required')
+      const agent = agentFor(sid)
+      if (!agent) throw new EnvError('EINVAL', 'the session is not running')
+      await mounting.ensure(agent)
+      return { session: sessionState(sid) }
+    },
+    /** Change a workspace's default borrowable list: `borrowable` (string[], or null = every environment). */
+    async 'workspace.set'({ workspacePath, workspaceId, borrowable }) {
       const p = workspacePathOf(workspacePath, workspaceId)
       let settings: WorkspaceSettings = manager.workspaceSettings(p)
       if (borrowable !== undefined) {
         settings = manager.setWorkspaceSettings(p, {
           borrowable: Array.isArray(borrowable) ? borrowable.map(String) : null,
         })
-      }
-      if (defaultMount !== undefined) {
-        settings = manager.setWorkspaceDefaultMount(p, parseDefaultMount(defaultMount))
       }
       return { settings, binding: manager.workspaceBinding(p, str(workspaceId)) }
     },
@@ -351,15 +347,4 @@ export function createActions(
       return { home: os.homedir(), mountsDir, sep: path.sep }
     },
   }
-}
-
-/** Parse the `defaultMount` field of `workspace.set`: an object with `envId`, or null/false to clear. */
-export function parseDefaultMount(value: unknown): WorkspaceDefaultMount | null {
-  if (value === null || value === false || value === '') return null
-  if (typeof value !== 'object') throw new EnvError('EINVAL', 'defaultMount must be { envId, remoteRoot? } or null')
-  const v = value as Record<string, unknown>
-  const envId = str(v['envId'])
-  if (!envId) throw new EnvError('EINVAL', 'defaultMount.envId is required')
-  const remoteRoot = str(v['remoteRoot'])
-  return remoteRoot ? { envId, remoteRoot } : { envId }
 }

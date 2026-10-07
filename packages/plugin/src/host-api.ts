@@ -60,6 +60,30 @@ export interface ToolResultOutcome {
   isError: boolean
 }
 
+/** A tool call about to dispatch, as seen by `tools/pre-execute` listeners. */
+export interface ToolPreExecution {
+  agent?: Agent
+  name: string
+}
+
+/** Decision of a `tools/pre-execute` waterfall (`@deepseek-ai/dsh-tools` `PreToolDecision`). */
+export type PreToolDecision =
+  { kind: 'allow' } | { kind: 'deny'; reason: string } | { kind: 'cancel' } | { kind: 'ask'; reason?: string }
+
+/** A step the agent loop proposes, as seen by `agent/pre-step` listeners. */
+export interface PreStepEvent {
+  agent: Agent
+  turn: number
+  step: number
+  signal: AbortSignal
+}
+
+/**
+ * Decision of an `agent/pre-step` waterfall (`@deepseek-ai/dsh-agent` `PreStepDecision`). A
+ * listener that throws ends the turn with that error instead.
+ */
+export type PreStepDecision = { kind: 'reject' } | { kind: 'enter'; messages: unknown[]; startsRequestSeries?: true }
+
 export interface ToolRestriction {
   deny?: string[]
   allow?: string[]
@@ -142,6 +166,14 @@ export interface PluginContext {
   effect(fn: () => () => unknown, label?: string): unknown
   on(event: 'agent/created', listener: (event: AgentCreatedEvent) => unknown): Dispose
   on(event: 'tools/result', listener: (exec: ToolResultExecution, result: ToolResultOutcome) => unknown): Dispose
+  on(
+    event: 'tools/pre-execute',
+    listener: (exec: ToolPreExecution, next: () => Promise<PreToolDecision>) => Promise<PreToolDecision>,
+  ): Dispose
+  on(
+    event: 'agent/pre-step',
+    listener: (event: PreStepEvent, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision>,
+  ): Dispose
   get<K extends keyof OptionalServices>(name: K): OptionalServices[K] | undefined
   inject(deps: ['connection'], fn: (scope: PluginContext & { connection: HostConnection }) => unknown): unknown
   isolate(name: string): PluginContext
