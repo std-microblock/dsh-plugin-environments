@@ -10,6 +10,10 @@
   },
   "scripts": {
     "build": "node scripts/build.ts",
+    "dev": "node scripts/build.ts --plugin --client --watch",
+    "dev:plugin": "node scripts/build.ts --plugin --watch",
+    "dev:client": "node scripts/build.ts --client --watch",
+    "dev:hmr": "node scripts/dev-hmr.ts",
     "build:server": "node scripts/build.ts --server",
     "build:server:dist": "node scripts/build-server.ts --dist",
     "build:client": "node scripts/build.ts --client",

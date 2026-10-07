@@ -8,9 +8,10 @@ pnpm-workspace.yaml       packages/*
 tsconfig.base.json        shared strict compiler options (noEmit; type stripping friendly)
 eslint.config.js          typescript-eslint, type-aware
 scripts/                  build scripts in TypeScript, run directly by Node (type stripping)
-  build.ts                entry: --server / --plugin / --client (no flag = all)
+  build.ts                entry: --server / --plugin / --client (no flag = all), --watch
   build-plugin.ts         esbuild → packages/plugin/dist/index.js
   build-client.ts         esbuild → packages/plugin/client.js (DSH lazy-CJS module wrapper)
+  dev-hmr.ts              one-time profile patch that makes the running host reload the plugin bundle
   build-server.ts         cargo builds per target (stable or pinned-nightly dist), staged into bin/
   server-targets.ts       the five shipped targets (package dir ↔ Rust triple)
   dist-toolchain.txt      the pinned nightly for `cargo dist` (the only place it is set)
@@ -55,6 +56,10 @@ docs/                     protocol, server build and research notes
 | `pnpm test`                    | node:test suites of every package                                                                                    |
 | `pnpm format`                  | Prettier (`format:check` in CI)                                                                                      |
 | `pnpm build`                   | server + plugin + client                                                                                             |
+| `pnpm dev`                     | rebuild plugin + client on every change and keep watching (hot reload; see below)                                    |
+| `pnpm dev:plugin`              | the same watcher for the host plugin bundle only                                                                     |
+| `pnpm dev:client`              | the same watcher for the GUI client bundle only                                                                      |
+| `pnpm dev:hmr`                 | one-time: let the running host watch `packages/plugin` (`--check`, `--remove`, `--profile <name>`)                   |
 | `pnpm build:server`            | cargo build, binaries staged in `packages/plugin/bin/<platform>-<arch>/`                                             |
 | `pnpm build:plugin`            | `packages/plugin/dist/index.js`                                                                                      |
 | `pnpm build:client`            | `packages/plugin/client.js`                                                                                          |
@@ -69,6 +74,36 @@ instead of skipping.
 
 Install the plugin from the checkout with
 `dsh plugin --profile desktop add link:G:/dsh-plugin-remote-environments/packages/plugin`.
+
+## Hot reload (development)
+
+`packages/plugin/dist/index.js` (host) and `packages/plugin/client.js` (GUI) are the two artifacts DSH
+loads, and both can be replaced while the host runs — no restart and no page refresh:
+
+```sh
+dsh plugin --profile desktop add link:<checkout>/packages/plugin   # once: DSH loads the checkout in place
+pnpm dev:hmr                                                      # once: host half (profile patch, below)
+pnpm dev                                                          # then: watch packages/plugin + packages/client
+```
+
+- **Client half** — DSH's `client-hmr` transport stat-polls every client bundle (500 ms) and pushes a
+  `rebuilt` frame to the open page, which re-evaluates the bundle and remounts the plugin. React state
+  inside the reloaded plugin is lost; sessions, workspaces and connections keep running. Nothing to
+  configure here: `link:` install plus `pnpm dev` is the whole loop.
+- **Host half** — DSH's `hmr` entry can reload plugin code while the host runs, but its module watch
+  roots are opt-in (the base bundle ships `root: []` for profile hosts). `pnpm dev:hmr` appends a block
+  to `<DSH_HOME>/profiles/<profile>/cordis.patch.yml` (default profile `desktop`) that points that entry
+  at this checkout. The profile patch is watched, so a running host applies it on its own; a host started
+  later reads it at boot. The block is machine-local and never committed — `pnpm dev:hmr --check` reports
+  it, `--remove` takes it out, and the `pnpm dev` banner prints the same state.
+
+A host reload disposes the plugin fiber and runs `apply` again. A live session's mount is re-established
+from persisted state instead of being kept alive, so a session in the middle of using an environment
+should re-borrow it; reload failures show up in Settings → Plugins and can be retried there.
+
+The Rust `dsh-env-server` binary is not hot: `pnpm build:server` (or `cargo build`) rewrites it, and new
+connections use the new binary while an already-open connection keeps its old process until it closes.
+Replacing an installed _package version_ still needs a restart.
 
 ## Conventions
 
