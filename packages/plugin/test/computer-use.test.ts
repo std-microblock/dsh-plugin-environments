@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { actionScript, inputTextCommands, isAsciiTypable, keyCommand } from '../src/env/adb/input.ts'
+import {
+  actionScript,
+  clipboardHelperCommand,
+  inputTextCommands,
+  isAsciiTypable,
+  keyCommand,
+} from '../src/env/adb/input.ts'
 import { androidKey } from '../src/env/adb/keys.ts'
 import { Environment } from '../src/env/environment.ts'
 import type { Capture, CaptureOptions, ExecOptions, ExecResult, SpawnSpec, WindowInfo } from '../src/env/types.ts'
@@ -262,6 +268,14 @@ test('android input commands', () => {
   assert.equal(inputTextCommands('a'.repeat(450)).length, 3)
   assert.ok(isAsciiTypable('hello\n'))
   assert.ok(!isAsciiTypable('你好'))
+  assert.equal(
+    clipboardHelperCommand('get'),
+    'CLASSPATH=/data/local/tmp/dsh-clipboard.jar app_process / dsh.Clipboard get',
+  )
+  assert.equal(
+    clipboardHelperCommand('set', 'binder'),
+    'CLASSPATH=/data/local/tmp/dsh-clipboard.jar app_process / dsh.Clipboard set binder',
+  )
   assert.equal(androidKey('home'), 3)
   assert.equal(androidKey('A'), 29)
   assert.equal(androidKey('7'), 14)

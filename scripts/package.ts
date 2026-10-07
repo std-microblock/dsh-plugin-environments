@@ -97,7 +97,7 @@ function publishedManifest(source: Manifest): Manifest {
   }
   const files = out['files']
   const listed = Array.isArray(files) ? files.filter(f => typeof f === 'string') : []
-  for (const need of ['dist', 'bin', 'client.js', 'cordis.patch.yml', 'README.md', 'LICENSE']) {
+  for (const need of ['dist', 'bin', 'android', 'client.js', 'cordis.patch.yml', 'README.md', 'LICENSE']) {
     if (!listed.includes(need)) errors.push(`packages/plugin/package.json: "files" lacks ${need}`)
   }
   if (errors.length) fail(errors.join('\n'))
@@ -207,6 +207,8 @@ async function main(): Promise<void> {
   }
   fs.mkdirSync(STAGE, { recursive: true })
   fs.cpSync(path.join(PLUGIN_DIR, 'dist'), path.join(STAGE, 'dist'), { recursive: true })
+  // The device-side clipboard helper pushed to Android devices, with its source for auditing.
+  fs.cpSync(path.join(PLUGIN_DIR, 'android'), path.join(STAGE, 'android'), { recursive: true })
   for (const f of ['client.js', 'cordis.patch.yml', 'README.md']) {
     fs.copyFileSync(path.join(PLUGIN_DIR, f), path.join(STAGE, f))
   }
@@ -233,6 +235,9 @@ async function main(): Promise<void> {
     'package/cordis.patch.yml',
     'package/README.md',
     'package/LICENSE',
+    'package/android/dsh-clipboard.jar',
+    'package/android/README.md',
+    'package/android/src/dsh/Clipboard.java',
     ...binaries.map(b => `package/bin/${b.target}/${b.exe}.br`),
   ]
   const absent = expected.filter(e => !entries.has(e))

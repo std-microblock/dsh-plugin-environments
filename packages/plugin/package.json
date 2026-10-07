@@ -13,6 +13,7 @@
   "files": [
     "dist",
     "bin",
+    "android",
     "client.js",
     "cordis.patch.yml",
     "README.md",

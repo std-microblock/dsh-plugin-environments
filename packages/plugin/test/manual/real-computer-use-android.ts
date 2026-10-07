@@ -76,9 +76,13 @@ await step('ctrl+a, del via keycombination', async () => {
   await sleep(500)
   return ui()
 })
-await step('non-ASCII typing (expected: clear unsupported error without ADB Keyboard)', () =>
-  act([{ kind: 'type', text: '你好' }]),
-)
+await step('non-ASCII typing via the clipboard helper (no IME switch)', async () => {
+  await act([{ kind: 'type', text: '你好，世界 ✓' }])
+  await sleep(1200)
+  const dump = await env.uiDump()
+  if (!dump.includes('你好')) throw new Error('the pasted text did not land in the field')
+  return 'search field contains 你好，世界 ✓'
+})
 await step('zoom', () => shot('android-zoom', { region: { x: 0, y: 0, width: s.frame?.width ?? 100, height: 200 } }))
 await step('back, back, home', async () => {
   await act([

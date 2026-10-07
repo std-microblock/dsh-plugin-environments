@@ -6,6 +6,7 @@ import path from 'node:path'
 import zlib from 'node:zlib'
 import { EnvError, type DirEntry, type Stat } from '@dsh-environments/protocol'
 import { decodeScreencapRaw, encodePng, isPng, pngSize } from '../../image/codec.ts'
+import { ANDROID_HELPER_JAR } from '../../paths.ts'
 import { Environment } from '../environment.ts'
 import { decodeHostText, HostChildProcess, runHost, type RunHostOptions, type RunHostResult } from '../host-process.ts'
 import {
@@ -41,7 +42,15 @@ import type {
   WriteFileOptions,
 } from '../types.ts'
 import { adbCommand, type AdbCommand } from './devices.ts'
-import { actionScript, inputTextCommands, isAsciiTypable, type AndroidScreen } from './input.ts'
+import {
+  actionScript,
+  CLIPBOARD_HELPER_JAR,
+  clipboardHelperCommand,
+  inputTextCommands,
+  isAsciiTypable,
+  PASTE_KEYCODE,
+  type AndroidScreen,
+} from './input.ts'
 
 const ADB_IME = 'com.android.adbkeyboard/.AdbIME'
 
@@ -403,25 +412,102 @@ export class AdbEnvironment extends Environment {
     return this.adbKeyboard
   }
 
+  /** Result of probing the bundled clipboard helper; undefined until it has been probed. */
+  private unicodePaste: boolean | undefined = undefined
+
   /**
-   * Type text into the focused field. ASCII goes through `input text`. Other text (Chinese,
-   * emoji, ...) needs the ADB Keyboard IME: it is switched on for the broadcast and the
-   * previous keyboard is restored afterwards.
+   * Type text into the focused field.
+   *
+   * ASCII goes through `input text`. Anything else cannot be turned into key events — Android's
+   * `KeyCharacterMap` only knows ASCII plus a few accented Latin letters, which is also why
+   * scrcpy's text injection silently drops CJK — so the text is written to the device clipboard
+   * and delivered with KEYCODE_PASTE. That needs no IME switch and nothing installed on the
+   * device: the bundled `dsh-clipboard.jar` (a few KiB, run as the shell user through
+   * `app_process`) only writes the clipboard. Devices where it cannot run fall back to the ADB
+   * Keyboard IME.
    */
   async typeText(text: string, opts: SignalOptions = {}): Promise<void> {
     if (isAsciiTypable(text)) {
       for (const cmd of inputTextCommands(text)) await this.check(cmd, opts)
       return
     }
-    if (!(await this.hasAdbKeyboard(opts))) {
-      throw new EnvError(
-        'UNSUPPORTED',
-        "Android's `input text` cannot type non-ASCII characters and this device has no ADB Keyboard IME. " +
-          'Install ADB Keyboard (https://github.com/senzhk/ADBKeyBoard, package com.android.adbkeyboard) with install_apk ' +
-          'and retry: the tool then switches to it just for typing and restores the current keyboard. ' +
-          'Alternatively type ASCII only, or paste text the app already offers.',
-      )
+    if (await this.ensureClipboardHelper(opts)) {
+      try {
+        await this.pasteUnicode(text, opts)
+        return
+      } catch (err) {
+        // A helper that misbehaves (it worked when probed) should not hide a working fallback.
+        if (!(await this.hasAdbKeyboard(opts))) throw err
+        await this.typeWithAdbKeyboard(text, opts)
+        return
+      }
     }
+    if (await this.hasAdbKeyboard(opts)) {
+      await this.typeWithAdbKeyboard(text, opts)
+      return
+    }
+    throw new EnvError(
+      'UNSUPPORTED',
+      'Android cannot type non-ASCII characters: `input text` (like scrcpy) can only produce what ' +
+        'KeyCharacterMap knows, and neither the bundled clipboard helper nor the ADB Keyboard IME is ' +
+        `usable here. The helper is run as the shell user through \`app_process\` (pushed to ${CLIPBOARD_HELPER_JAR}), ` +
+        'which needs Android 7 or newer and a device that allows it. Alternatively install ADB Keyboard ' +
+        '(https://github.com/senzhk/ADBKeyBoard, package com.android.adbkeyboard) with install_apk, type ASCII ' +
+        'only, or paste text the app already offers.',
+    )
+  }
+
+  /**
+   * Push the bundled clipboard helper once per environment and check that it runs. Android 7 is
+   * required, because KEYCODE_PASTE only exists from API 24.
+   */
+  private async ensureClipboardHelper(opts: SignalOptions = {}): Promise<boolean> {
+    if (this.unicodePaste !== undefined) return this.unicodePaste
+    try {
+      if (this.android?.sdk !== undefined && this.android.sdk < 24) {
+        this.unicodePaste = false
+      } else {
+        await this.pushFile(ANDROID_HELPER_JAR, CLIPBOARD_HELPER_JAR)
+        this.unicodePaste = (await this.sh(clipboardHelperCommand('get'), opts)).code === 0
+      }
+    } catch {
+      this.unicodePaste = false
+    }
+    return this.unicodePaste
+  }
+
+  /** Put `text` on the clipboard, press PASTE, then hand the clipboard back as we found it. */
+  private async pasteUnicode(text: string, opts: SignalOptions = {}): Promise<void> {
+    const previous = await this.readClipboard(opts)
+    await this.writeClipboard(text, opts)
+    try {
+      await this.check(`input keyevent ${PASTE_KEYCODE}`, opts)
+    } finally {
+      // Give the focused view time to read the clip before it is restored.
+      await new Promise(res => setTimeout(res, 800))
+      if (previous) await this.writeClipboard(previous, opts).catch(() => {})
+      else await this.sh(clipboardHelperCommand('clear'), opts).catch(() => {})
+    }
+  }
+
+  private async readClipboard(opts: SignalOptions): Promise<string> {
+    const r = await this.sh(clipboardHelperCommand('get'), opts)
+    if (r.code !== 0) throw new EnvError('EIO', `clipboard helper failed: ${(r.stderr || r.out).trim()}`)
+    return r.out
+  }
+
+  private async writeClipboard(text: string, opts: SignalOptions): Promise<void> {
+    const r = await this.sh(clipboardHelperCommand('set'), { ...opts, input: text })
+    if (r.code !== 0 || !r.out.includes('ok')) {
+      throw new EnvError('EIO', `clipboard helper failed: ${(r.stderr || r.out).trim()}`)
+    }
+  }
+
+  /**
+   * The historical fallback: the ADB Keyboard IME is switched on for the broadcast and the
+   * previous keyboard is restored afterwards.
+   */
+  private async typeWithAdbKeyboard(text: string, opts: SignalOptions): Promise<void> {
     const b64 = Buffer.from(text, 'utf8').toString('base64')
     const script = [
       'prev=$(settings get secure default_input_method)',
@@ -497,7 +583,7 @@ export class AdbEnvironment extends Environment {
       this.deviceState(opts),
       this.foreground(opts),
       this.sh(
-        "wm density | tail -n1; settings get secure default_input_method; dumpsys battery | grep -m1 ' level'; dumpsys input | grep -m1 -E 'SurfaceOrientation|Orientation:'",
+        `wm density | tail -n1; settings get secure default_input_method; dumpsys battery | grep -m1 ' level'; dumpsys input | grep -m1 -E 'SurfaceOrientation|Orientation:'; [ -f ${CLIPBOARD_HELPER_JAR} ] && echo __helper=yes || echo __helper=no`,
         opts,
       ),
     ])
@@ -511,12 +597,21 @@ export class AdbEnvironment extends Environment {
       rotation: lines[3]?.replace(/^.*(Rotation|Orientation:?)\s*/, ''),
       foreground: fg.package ? `${fg.package}/${fg.activity ?? ''}` : fg.raw,
       keyboard: lines[1],
-      adbKeyboard: (await this.hasAdbKeyboard(opts))
-        ? 'installed (non-ASCII typing available)'
-        : 'not installed (only ASCII typing)',
+      adbKeyboard: (await this.hasAdbKeyboard(opts)) ? 'installed (fallback for non-ASCII typing)' : 'not installed',
+      nonAsciiTyping: this.describeUnicodeTyping(extra.out.includes('__helper=yes')),
       ...describeStateFields(state),
       battery: lines[2]?.replace(/^.*:\s*/, ''),
     }
+  }
+
+  /** How `type` delivers non-ASCII text on this device; see `typeText`. */
+  private describeUnicodeTyping(helperPushed: boolean): string {
+    if (this.android?.sdk !== undefined && this.android.sdk < 24) {
+      return 'not available (Android < 7 has no KEYCODE_PASTE); ASCII only, or install the ADB Keyboard IME'
+    }
+    return helperPushed
+      ? 'clipboard paste with the bundled helper (pushed, used automatically; no IME switch)'
+      : 'clipboard paste with the bundled helper (pushed on first use; no IME switch)'
   }
 
   /** Wake the screen and dismiss an insecure lock screen. */

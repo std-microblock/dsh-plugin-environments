@@ -114,7 +114,7 @@ dsh plugin --profile desktop add link:G:/dsh-plugin-remote-environments/packages
 | `install_apk` | Android          | 从工作区或其他已借环境安装 APK                                                                                                                                             |
 | `logcat`      | Android          | 读取最近的日志，可按文字和级别过滤                                                                                                                                         |
 
-Android 上非 ASCII 文本需要设备装有 [ADB Keyboard](https://github.com/senzhk/ADBKeyBoard)（输入时临时切换，之后恢复原输入法），否则会明确报告不支持。
+Android 上 ASCII 文本走 `input text`；非 ASCII（中文、emoji 等）走剪贴板粘贴：插件把几 KB 的 `dsh-clipboard.jar` 推到设备 `/data/local/tmp`，以 shell 身份用 `app_process` 运行它写入系统剪贴板，再发一次 `KEYCODE_PASTE`，**输入法全程不动**（`input text` 和 scrcpy 的文本注入都只能生成 `KeyCharacterMap` 认得的字符，中文会被直接丢掉）。粘贴后会把设备原来的剪贴板恢复回去。只有设备不允许 `app_process`（或 Android 7 以下）时才回退到 [ADB Keyboard](https://github.com/senzhk/ADBKeyBoard) IME；两者都不可用时才明确报不支持。个别禁止粘贴的输入框仍需 ADB Keyboard。
 
 每个会话能借哪些环境：默认是全部环境；工作区设置了默认列表时继承它；会话也可以随时单独修改。独占环境（Android 和 Windows 账户默认独占）同一时间只能由一个会话持有，其他会话会按先后顺序排队。会话恢复时，插件会尝试重新借回上次持有的环境。
 

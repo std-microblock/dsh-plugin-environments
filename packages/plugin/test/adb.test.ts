@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { AdbEnvironment } from '../src/env/adb/adb-env.ts'
 import { listAdbDevices } from '../src/env/adb/devices.ts'
+import { clipboardHelperCommand } from '../src/env/adb/input.ts'
 import { filterGlob, globToRegExp, parseGrep, parseReaddir, parseStat } from '../src/env/posix-shell.ts'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -76,4 +79,22 @@ test('adb environment over a fake device', { skip: hasSh ? false : 'no POSIX sh 
   await fwd.close()
   await env.remove(root, { recursive: true })
   assert.equal(await env.stat(root), null)
+})
+
+test('typing text over a fake device', { skip: hasSh ? false : 'no POSIX sh available' }, async () => {
+  const state = path.join(os.tmpdir(), 'fake-adb-device')
+  fs.rmSync(state, { recursive: true, force: true })
+  const env = new AdbEnvironment({ id: 'fake-type', name: 'Fake', serial: 'emulator-5554', adb: FAKE })
+  await env.open()
+  await env.typeText('hi there')
+  // Non-ASCII cannot become key events, so it goes to the device clipboard and is pasted; the
+  // helper jar is pushed first.
+  await env.typeText('你好 ✓')
+  const log = fs.readFileSync(path.join(state, 'log'), 'utf8')
+  assert.match(log, /input: input text 'hi%sthere'/)
+  assert.ok(fs.existsSync(path.join(state, 'dsh-clipboard.jar')))
+  assert.match(log, /clipboard=你好 ✓/)
+  assert.match(log, /input: input keyevent 279/)
+  // The device clipboard is handed back as it was found.
+  assert.equal((await env.sh(clipboardHelperCommand('get'))).out, '')
 })

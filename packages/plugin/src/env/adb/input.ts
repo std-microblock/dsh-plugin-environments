@@ -21,6 +21,24 @@ export function isAsciiTypable(text: string): boolean {
   return /^[\x20-\x7e\n\r\t]*$/.test(text)
 }
 
+/** Where the bundled device-side clipboard helper lives on the device. */
+export const CLIPBOARD_HELPER_JAR = '/data/local/tmp/dsh-clipboard.jar'
+
+/** Main class of the clipboard helper (`packages/plugin/android/dsh-clipboard.jar`). */
+export const CLIPBOARD_HELPER_CLASS = 'dsh.Clipboard'
+
+/** KEYCODE_PASTE; it exists from Android 7 (API 24). */
+export const PASTE_KEYCODE = 279
+
+/**
+ * Shell command for the bundled clipboard helper. `set` reads UTF-8 from stdin, `get` writes the
+ * clipboard to stdout, `clear` empties it. `route: 'binder'` forces the helper's IClipboard
+ * fallback, which only the helper's own tests need.
+ */
+export function clipboardHelperCommand(command: 'set' | 'get' | 'clear', route: 'auto' | 'binder' = 'auto'): string {
+  return `CLASSPATH=${CLIPBOARD_HELPER_JAR} app_process / ${CLIPBOARD_HELPER_CLASS} ${command}${route === 'binder' ? ' binder' : ''}`
+}
+
 /** Single-quote for the device shell. */
 export function shq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`

@@ -137,7 +137,7 @@ function inputDescription(env: Environment, a: string, name: string): string {
     return [
       `Touch and key input on ${name} (Android). Actions run in order. x/y are pixels of the latest screenshot image (${a}__screenshot, ${a}__ui or a screenshot returned by this tool); instead of x/y you can pass element: N to target [N] of the latest ${a}__ui listing.`,
       'Kinds: click {x,y,count?} taps (count 2 = double tap); long_press {x,y,duration_ms?}; swipe {x,y,x2,y2,duration_ms?} for scrolling/flinging/sliders; drag {x,y,x2,y2 or path:[[x,y],...]} press-and-hold then move (rearrange, drag-and-drop);',
-      'scroll {x?,y?,dy} (+1 ≈ 10% of the screen; positive scrolls down/reveals content below; dx for horizontal); type {text} into the focused field (element/x,y taps it first; newline = Enter; non-ASCII needs the ADB Keyboard IME);',
+      'scroll {x?,y?,dy} (+1 ≈ 10% of the screen; positive scrolls down/reveals content below; dx for horizontal); type {text} into the focused field (element/x,y taps it first; newline = Enter; non-ASCII is pasted from the device clipboard, so the field must allow pasting);',
       'key {key, repeat?} — names: back, home, recents, enter, del (backspace), tab, escape, up/down/left/right, power, wakeup, volume_up, menu, search, paste, a-z, 0-9, KEYCODE_* or a numeric code; combos like "ctrl+a" use keycombination;',
       'wait {ms}. Set screenshot: true to get a fresh screenshot after the actions instead of calling the screenshot tool.',
     ].join(' ')

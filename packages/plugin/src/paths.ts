@@ -32,5 +32,12 @@ export function binDir(target = `${process.platform}-${process.arch}`): string {
   return path.join(PACKAGE_ROOT, 'bin', target)
 }
 
+/**
+ * Device-side clipboard helper pushed to Android devices (`android/dsh-clipboard.jar`). It lets
+ * `type` deliver arbitrary Unicode through the clipboard, without the ADB Keyboard IME; rebuild it
+ * with `pnpm run build:android-helper`.
+ */
+export const ANDROID_HELPER_JAR = path.join(PACKAGE_ROOT, 'android', 'dsh-clipboard.jar')
+
 /** Cargo target directory of the server crate when running from a source checkout. */
 export const CRATE_TARGET_DIR = path.join(PACKAGE_ROOT, '..', '..', 'crates', 'dsh-env-server', 'target')

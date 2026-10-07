@@ -14,6 +14,7 @@
     "build:server:dist": "node scripts/build-server.ts --dist",
     "build:client": "node scripts/build.ts --client",
     "build:plugin": "node scripts/build.ts --plugin",
+    "build:android-helper": "node scripts/build-android-helper.ts",
     "package": "node scripts/package.ts",
     "release:version": "node scripts/release-version.ts",
     "typecheck": "tsc -p tsconfig.json && pnpm -r typecheck",
