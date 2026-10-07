@@ -7,8 +7,10 @@
 #   -> target/<triple>/dist/dsh-env-server[.exe]
 #
 # It rebuilds std with the size-optimised feature set and immediate-abort
-# panics (no unwinding/formatting machinery). Note: a RUSTFLAGS environment
-# variable overrides `build.rustflags`, so leave RUSTFLAGS unset when using it.
+# panics (no unwinding/formatting machinery). Its flags go into
+# `target.'cfg(all())'.rustflags` so that they are joined with the per-target
+# flags below (`build.rustflags` would be ignored once a target sets rustflags).
+# A RUSTFLAGS environment variable overrides all of these: leave it unset.
 
 [alias]
 dist = [
@@ -16,16 +18,25 @@ dist = [
   "--profile", "dist",
   "-Zbuild-std=std,panic_abort",
   "-Zbuild-std-features=optimize_for_size",
-  "--config", "build.rustflags=['-Zunstable-options','-Cpanic=immediate-abort']",
+  "--config", "target.'cfg(all())'.rustflags=['-Zunstable-options','-Cpanic=immediate-abort']",
 ]
 
 # Static musl binaries link with the bundled LLD and Rust's self-contained musl
 # CRT, so no cross toolchain is needed (works from Windows, Linux and macOS hosts).
+#
+# Size flags (stable, also used by `dist`):
+# - relocation-model=static: a plain static executable instead of static-pie,
+#   which drops the runtime relocation table (.rela.dyn) and shrinks .data.rel.ro.
+# - force-unwind-tables=no: with panic=abort nothing unwinds, so .eh_frame is
+#   dead weight (Windows x64 and macOS require unwind tables; not used there).
 [target.x86_64-unknown-linux-musl]
 linker = "rust-lld"
+rustflags = ["-Crelocation-model=static", "-Cforce-unwind-tables=no"]
 
 [target.i686-unknown-linux-musl]
 linker = "rust-lld"
+rustflags = ["-Crelocation-model=static", "-Cforce-unwind-tables=no"]
 
 [target.aarch64-unknown-linux-musl]
 linker = "rust-lld"
+rustflags = ["-Crelocation-model=static", "-Cforce-unwind-tables=no"]
