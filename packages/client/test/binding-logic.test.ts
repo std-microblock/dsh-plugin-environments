@@ -16,7 +16,7 @@ const env = (id: string, kind: EnvView['kind'], extra: Partial<EnvView> = {}): E
   name: id.toUpperCase(),
   kind,
   alias: id,
-  exclusive: false,
+  headlessParallel: true,
   config: {},
   ...extra,
 })

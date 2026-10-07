@@ -18,6 +18,7 @@ import {
   IconTrash,
   KindIcon,
 } from './icons.tsx'
+import { envName } from './names.ts'
 import type { CreatedWorkspaceView, EnvView, TestResultView } from './types.ts'
 
 export function relativeTime(t: Translate, ms: number): string {
@@ -53,10 +54,14 @@ interface Status {
 
 function statusOf(env: EnvView, t: Translate): Status {
   const st = env.status
+  const queue = st?.queue?.length ? ` · ${t('status.queue', { count: st.queue.length })}` : ''
   if (st?.busy) {
     const who = st.holders?.[0]?.title
-    const queue = st.queue?.length ? ` · ${t('status.queue', { count: st.queue.length })}` : ''
     return { state: 'busy', text: (who ? t('status.busyBy', { who }) : t('status.busy')) + queue }
+  }
+  if (st?.gui) {
+    const who = st.gui.title ?? st.gui.sessionId?.slice(0, 8) ?? ''
+    return { state: 'busy', text: t('status.guiBy', { who }) + queue }
   }
   if (env.kind === 'reverse') {
     const c = env.connection
@@ -91,7 +96,7 @@ function EnvCard({ env, t, onEdit, onDelete, onWorkspace, onDesktop }: EnvCardPr
           <KindIcon kind={env.kind} />
         </span>
         <div className="envx-card-title">
-          <strong title={env.name}>{env.name}</strong>
+          <strong title={envName(env, t)}>{envName(env, t)}</strong>
           <span className="envx-sub" title={sub}>
             {sub}
           </span>
@@ -107,7 +112,12 @@ function EnvCard({ env, t, onEdit, onDelete, onWorkspace, onDesktop }: EnvCardPr
         </span>
         {info && <span className="envx-chip">{t('info.os', { os: info.os, arch: info.arch || '—' })}</span>}
         {info?.user && <span className="envx-chip">{info.user}</span>}
-        <span className="envx-chip">{env.exclusive ? t('status.exclusive') : t('status.shared')}</span>
+        <span className="envx-chip">{env.headlessParallel ? t('status.shared') : t('status.exclusive')}</span>
+        {env.effectiveMountMode === 'gui' && (
+          <span className="envx-chip">
+            {t('field.mountMode')} · {t('mode.gui')}
+          </span>
+        )}
         {env.kind === 'winuser' && (
           <span className="envx-chip" data-tone={env.config.desktop === 'shared' ? undefined : 'accent'}>
             {env.config.desktop === 'private'
@@ -375,7 +385,7 @@ export function EnvironmentsPage({ t, startSession }: { t: Translate; startSessi
                         <KindIcon kind={env?.kind} size={18} />
                       </span>
                       <div className="envx-row-main">
-                        <strong>{l.name}</strong>
+                        <strong>{env ? envName(env, t) : l.name}</strong>
                         <span>
                           {t('lease.session', {
                             id: String(l.owner?.sessionId ?? '')
@@ -386,8 +396,16 @@ export function EnvironmentsPage({ t, startSession }: { t: Translate; startSessi
                           {relativeTime(t, l.createdAt)}
                           {l.owner?.reason ? ` · ${l.owner.reason}` : ''}
                           {l.tunnels?.length ? ` · ${t('lease.tunnels', { count: l.tunnels.length })}` : ''}
+                          {l.mode === 'gui' && l.guiUsers?.some(u => u !== l.owner?.sessionId)
+                            ? ` · ${t('lease.guiUsers', {
+                                ids: l.guiUsers.map(u => u.replace(/^session-/, '').slice(0, 8)).join(', '),
+                              })}`
+                            : ''}
                         </span>
                       </div>
+                      <span className="envx-chip" data-tone={l.mode === 'gui' ? 'accent' : undefined}>
+                        {l.mode === 'gui' ? t('mode.gui') : t('mode.headless')}
+                      </span>
                       <span className="envx-chip" data-tone={l.purpose === 'mount' ? 'accent' : undefined}>
                         {l.purpose === 'mount' ? t('badge.mount') : t('badge.borrow')}
                       </span>
@@ -411,6 +429,7 @@ export function EnvironmentsPage({ t, startSession }: { t: Translate; startSessi
         open={dialog?.type === 'env'}
         environment={dialog?.type === 'env' ? dialog.environment : undefined}
         platform={data?.platform}
+        defaultMountMode={data?.defaults?.mountMode}
         onClose={() => setDialog(undefined)}
         t={t}
       />

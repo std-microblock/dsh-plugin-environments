@@ -4,7 +4,8 @@ import { createPortal } from 'react-dom'
 import { call, invalidate, useAction, useEnvState } from './api.ts'
 import { RemoteBrowser } from './browser.tsx'
 import type { Translate } from './host-api.ts'
-import { IconCheck, IconEnvironments, IconMount, IconSpinner, KindIcon } from './icons.tsx'
+import { IconCheck, IconSpinner, KindIcon } from './icons.tsx'
+import { envName } from './names.ts'
 import type { EnvView, StateView } from './types.ts'
 
 function Popover({ anchor, onClose, children }: { anchor: HTMLElement; onClose: () => void; children: ReactNode }) {
@@ -69,7 +70,7 @@ interface PanelProps {
 }
 
 function Panel({ sessionId, data, t, openManager, onClose }: PanelProps) {
-  const [browser, setBrowser] = useState(false)
+  const [browser, setBrowser] = useState<{ envId?: string } | undefined>(undefined)
   const act = useAction()
   const remount = useAction()
   const [savedNote, setSavedNote] = useState(false)
@@ -79,8 +80,12 @@ function Panel({ sessionId, data, t, openManager, onClose }: PanelProps) {
   const mount = s?.mount
   const mountEnv = mount ? byId[mount.envId] : undefined
   const locked = !!s?.started
+  // Where the session runs can be chosen before it starts, unless a remote workspace or the
+  // parent session (subagents) decides it.
+  const choosable = !locked && !mount?.inherited && mount?.source !== 'workspace'
   const borrowable = new Set(s?.borrowable ?? [])
   const candidates = envs.filter(e => e.borrowable !== false)
+  const modeLabel = (gui: boolean | undefined) => (gui ? t('mode.gui') : t('mode.headless'))
 
   const toggle = (id: string) => {
     const next = new Set(borrowable)
@@ -101,56 +106,94 @@ function Panel({ sessionId, data, t, openManager, onClose }: PanelProps) {
       <div className="envx-pop-section">
         <div className="envx-pop-title">
           <span>{t('pop.mount')}</span>
-          {mount?.source === 'workspace' && <small>{t('pop.mount.fromWorkspace')}</small>}
+          {mount?.source === 'workspace' && !mount.inherited && <small>{t('pop.mount.fromWorkspace')}</small>}
+          {mount?.inherited && <small>{t('pop.mount.inherited')}</small>}
         </div>
-        {mount ? (
-          <div className="envx-mounted" data-kind={mountEnv?.kind ?? 'server'}>
-            <span
-              className="envx-tile"
-              data-kind={mountEnv?.kind ?? 'server'}
-              style={{ width: 30, height: 30, borderRadius: 8 }}
-            >
-              <KindIcon kind={mountEnv?.kind} size={17} />
+        <p className="envx-pop-hint">{locked ? t('pop.mount.locked') : t('pop.mount.hint')}</p>
+        {(!mount || choosable) && (
+          <div
+            className="envx-pop-item"
+            data-kind="local"
+            data-click={choosable && mount ? '' : undefined}
+            role={choosable ? 'radio' : undefined}
+            aria-checked={choosable ? !mount : undefined}
+            tabIndex={choosable && mount ? 0 : undefined}
+            onClick={() => {
+              if (choosable && mount) void act.run(() => call('session.set', { sessionId, mount: null, cwd: s?.cwd }))
+            }}
+          >
+            <span className="envx-check" data-on={!mount ? '' : undefined}>
+              <IconCheck size={12} />
+            </span>
+            <span className="envx-tile" data-kind="local">
+              <KindIcon kind="local" size={15} />
             </span>
             <div className="envx-pop-item-main">
-              <strong>{mountEnv?.name ?? mount.envId}</strong>
+              <strong>{t('pop.host')}</strong>
+              <span>{t('pop.host.desc')}</span>
+            </div>
+          </div>
+        )}
+        {mount && (
+          <div className="envx-pop-item" data-kind={mountEnv?.kind ?? 'server'}>
+            <span className="envx-check" data-on="">
+              <IconCheck size={12} />
+            </span>
+            <span className="envx-tile" data-kind={mountEnv?.kind ?? 'server'}>
+              <KindIcon kind={mountEnv?.kind} size={15} />
+            </span>
+            <div className="envx-pop-item-main">
+              <strong>{mountEnv ? envName(mountEnv, t) : mount.envId}</strong>
               <span title={s.mountActive?.remoteRoot ?? mount.remoteRoot}>
                 {s.mountActive?.remoteRoot ?? mount.remoteRoot ?? ''}
+                {s.mountActive ? ` · ${modeLabel(s.mountActive.gui)}` : ''}
                 {!s.mountActive && !s.mountError ? ` · ${t('pop.mount.pending')}` : ''}
               </span>
             </div>
-            {!locked && mount.source !== 'workspace' && (
+            {choosable && (
               <button
                 type="button"
                 className="envx-textbtn"
                 data-quiet=""
-                disabled={act.busy}
-                onClick={() => void act.run(() => call('session.set', { sessionId, mount: null, cwd: s.cwd }))}
+                onClick={() => setBrowser({ envId: mount.envId })}
               >
-                {t('action.unmount')}
+                {t('pop.mount.pick')}
               </button>
             )}
           </div>
-        ) : (
-          <>
-            <p className="envx-pop-hint">{locked ? t('pop.mount.locked') : t('pop.mount.hint')}</p>
-            <div className="envx-pop-item">
-              <span className="envx-tile" data-kind="local">
-                <KindIcon kind="local" size={15} />
-              </span>
-              <div className="envx-pop-item-main">
-                <strong>{t('pop.mount.none')}</strong>
-              </div>
-            </div>
-            {!locked && (
-              <div className="envx-pop-foot">
-                <button type="button" className="envx-textbtn" onClick={() => setBrowser(true)}>
-                  <IconMount size={13} /> {t('pop.mount.pick')}
-                </button>
-              </div>
-            )}
-          </>
         )}
+        {choosable &&
+          envs
+            .filter(e => e.id !== mount?.envId)
+            .map(env => (
+              <div
+                key={env.id}
+                className="envx-pop-item"
+                data-click=""
+                data-kind={env.kind}
+                role="radio"
+                aria-checked={false}
+                tabIndex={0}
+                onClick={() => setBrowser({ envId: env.id })}
+                onKeyDown={e => {
+                  if (e.key === ' ' || e.key === 'Enter') {
+                    e.preventDefault()
+                    setBrowser({ envId: env.id })
+                  }
+                }}
+              >
+                <span className="envx-check" />
+                <span className="envx-tile" data-kind={env.kind}>
+                  <KindIcon kind={env.kind} size={15} />
+                </span>
+                <div className="envx-pop-item-main">
+                  <strong>{envName(env, t)}</strong>
+                  <span>
+                    {t(`kind.${env.kind}`)} · {modeLabel(env.effectiveMountMode === 'gui')}
+                  </span>
+                </div>
+              </div>
+            ))}
         {(s?.mountBlocked ?? s?.mountError) && (
           <div className="envx-error-line" style={{ marginTop: 6 }} role="alert">
             {s.mountBlocked ?? t('pop.mount.error', { message: s.mountError ?? '' })}
@@ -183,8 +226,10 @@ function Panel({ sessionId, data, t, openManager, onClose }: PanelProps) {
         </div>
         <p className="envx-pop-hint">{t('pop.borrow.hint')}</p>
         {candidates.map(env => {
-          const held = (s?.held ?? []).find(h => h.envId === env.id)
+          const held = (s?.held ?? []).find(h => h.envId === env.id && !h.attached)
           const busyElsewhere = env.status?.busy && !held
+          const guiElsewhere = env.status?.gui && !held?.gui && !(s?.mountActive?.gui && mount?.envId === env.id)
+          const guiWho = env.status?.gui?.title ?? env.status?.gui?.sessionId?.slice(0, 8) ?? ''
           return (
             <div
               key={env.id}
@@ -209,13 +254,15 @@ function Panel({ sessionId, data, t, openManager, onClose }: PanelProps) {
                 <KindIcon kind={env.kind} size={15} />
               </span>
               <div className="envx-pop-item-main">
-                <strong>{env.name}</strong>
+                <strong>{envName(env, t)}</strong>
                 <span>
                   {held
-                    ? `${t('badge.borrow')} · ${held.alias}`
+                    ? `${t('badge.borrow')} · ${held.alias} · ${modeLabel(held.gui)}`
                     : busyElsewhere
                       ? t('status.busy')
-                      : `${t(`kind.${env.kind}`)}${env.description && env.description !== env.name ? ` · ${env.description}` : ''}`}
+                      : guiElsewhere
+                        ? t('status.guiBy', { who: guiWho })
+                        : `${t(`kind.${env.kind}`)}${env.description && env.description !== env.name ? ` · ${env.description}` : ''}`}
                 </span>
               </div>
               {held && (
@@ -290,12 +337,13 @@ function Panel({ sessionId, data, t, openManager, onClose }: PanelProps) {
       </div>
 
       <RemoteBrowser
-        open={browser}
+        open={!!browser}
         mode="pick"
         environments={envs}
-        onClose={() => setBrowser(false)}
+        initialEnvId={browser?.envId}
+        onClose={() => setBrowser(undefined)}
         onPicked={({ envId, path }) => {
-          setBrowser(false)
+          setBrowser(undefined)
           void act.run(() => call('session.set', { sessionId, mount: { envId, remoteRoot: path }, cwd: s?.cwd }))
         }}
         t={t}
@@ -304,7 +352,7 @@ function Panel({ sessionId, data, t, openManager, onClose }: PanelProps) {
   )
 }
 
-/** Compact composer control showing the session's environment state. */
+/** Compact composer control showing where the session runs (本机, or its environment). */
 export function EnvironmentChip({
   sessionId,
   t,
@@ -320,16 +368,18 @@ export function EnvironmentChip({
   const s = data?.session
   const mount = s?.mount
   const mountEnv = mount ? data?.environments.find(e => e.id === mount.envId) : undefined
-  const heldCount = s?.held.length ?? 0
+  const mountName = mountEnv ? envName(mountEnv, t) : (mount?.envId ?? '')
+  const heldCount = s?.held.filter(h => !h.attached).length ?? 0
   const blocked = s?.mountBlocked
-  const label = mount ? (mountEnv?.name ?? mount.envId) : t('chip.label')
-  const title = blocked
-    ? blocked
-    : mount
-      ? t('chip.mounted', { name: mountEnv?.name ?? mount.envId })
-      : heldCount
-        ? t('chip.borrowed', { count: heldCount })
-        : t('chip.label')
+  const gui = !!s?.mountActive?.gui
+  const label = mount ? mountName : t('chip.host')
+  const title = [
+    blocked ?? (mount ? t('chip.mounted', { name: mountName }) : t('chip.host.title')),
+    mount && s?.mountActive ? (gui ? t('mode.gui') : t('mode.headless')) : undefined,
+    heldCount ? t('chip.borrowed', { count: heldCount }) : undefined,
+  ]
+    .filter(Boolean)
+    .join(' · ')
 
   useEffect(() => {
     if (open) invalidate()
@@ -348,8 +398,9 @@ export function EnvironmentChip({
         title={title}
         onClick={() => setOpen(v => !v)}
       >
-        {mount ? <KindIcon kind={mountEnv?.kind ?? 'server'} size={16} /> : <IconEnvironments size={16} />}
+        <KindIcon kind={mount ? (mountEnv?.kind ?? 'server') : 'local'} size={16} />
         <span>{label}</span>
+        {gui && <em>{t('mode.gui')}</em>}
         {blocked && <i aria-hidden="true" />}
         {heldCount > 0 && <b>{heldCount}</b>}
       </button>

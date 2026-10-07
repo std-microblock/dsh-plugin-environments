@@ -346,7 +346,8 @@ export function installBorrowing(
 
   const allowedFor = (sessionId: string, cwd: string) => manager.borrowableFor(sessionId, cwd)
 
-  const matches = (d: EnvironmentDefinition, name: string) => d.id === name || d.name === name || aliasFor(d.id) === name
+  const matches = (d: EnvironmentDefinition, name: string) =>
+    d.id === name || d.name === name || aliasFor(d.id) === name
 
   const modeText = (e: HeldEntry) => (e.gui ? 'GUI' : 'headless')
 
@@ -372,9 +373,12 @@ export function installBorrowing(
           if (holding) parts.push(`held by you as "${holding.alias}" (${modeText(holding)})`)
           else if (mount?.envId === d.id) parts.push('your mount')
           else if (st.busy)
-            parts.push(`busy (exclusive; ${st.holders.map(who).join(', ')}${st.queue.length ? `; ${st.queue.length} waiting` : ''})`)
+            parts.push(
+              `busy (exclusive; ${st.holders.map(who).join(', ')}${st.queue.length ? `; ${st.queue.length} waiting` : ''})`,
+            )
           else parts.push(st.holders.length ? `available headless (${st.holders.length} in use)` : 'available')
-          if (st.gui && !holding?.gui) parts.push(`GUI held by ${st.gui.title ?? st.gui.sessionId ?? 'another session'}`)
+          if (st.gui && !holding?.gui)
+            parts.push(`GUI held by ${st.gui.title ?? st.gui.sessionId ?? 'another session'}`)
           const guiQueue = st.queue.filter(q => q.mode === 'gui').length
           if (guiQueue && !st.busy) parts.push(`${guiQueue} waiting for the GUI`)
           if (!st.headlessParallel && !st.busy && !holding) parts.push('exclusive')
@@ -466,7 +470,8 @@ export function installBorrowing(
         if (mount && mount.envId === def.id) {
           const attached = [...m.values()].find(e => e.attached && e.lease === mount.lease)
           if (gui === true) {
-            if (attached) return `You already hold the GUI of your mount ${def.name}. Tools: ${attached.tools.join(', ')}.`
+            if (attached)
+              return `You already hold the GUI of your mount ${def.name}. Tools: ${attached.tools.join(', ')}.`
             const entry = await attachMount(agent, mount.lease, waitArgs)
             return `Took the GUI of your mounted environment ${def.name}. New tools: ${entry.tools.join(', ') || '(none: the environment has no screen tools)'}. env_return "${entry.alias}" gives the GUI back; the mount stays.`
           }

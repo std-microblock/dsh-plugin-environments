@@ -766,6 +766,16 @@ select.envx-input {
   color: var(--dsw-alias-label-primary-foreground, #fff);
   background: var(--dsw-alias-state-business-primary);
 }
+/* GUI lease badge next to the environment name */
+.envx-chipbtn em {
+  font-style: normal;
+  font-size: 10.5px;
+  line-height: 14px;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid currentColor;
+  opacity: 0.8;
+}
 .envx-pop {
   position: fixed;
   z-index: 1000;

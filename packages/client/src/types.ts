@@ -34,10 +34,25 @@ export interface InfoView {
   pathSep: string
 }
 
+export type LeaseMode = 'headless' | 'gui'
+
 export interface EnvStatusView {
+  /** A new headless lease would wait (exclusive environment in use). */
   busy: boolean
-  holders?: { leaseId: string; sessionId?: string; title?: string; purpose: string; since: number }[]
-  queue?: { sessionId?: string; since: number }[]
+  /** The GUI is taken (or the environment is exclusive and in use). */
+  guiBusy?: boolean
+  headlessParallel?: boolean
+  holders?: {
+    leaseId: string
+    sessionId?: string
+    title?: string
+    purpose: string
+    mode?: LeaseMode
+    guiUsers?: string[]
+    since: number
+  }[]
+  gui?: { leaseId: string; sessionId?: string; title?: string; users: string[] }
+  queue?: { sessionId?: string; since: number; mode?: LeaseMode; upgrade?: boolean }[]
 }
 
 export interface EnvView {
@@ -46,7 +61,11 @@ export interface EnvView {
   kind: EnvKind
   alias: string
   description?: string
-  exclusive: boolean
+  /** Headless leases of different sessions may run at the same time. */
+  headlessParallel: boolean
+  /** The environment's own mount mode (absent: the plugin default). */
+  mountMode?: LeaseMode
+  effectiveMountMode?: LeaseMode
   borrowable?: boolean
   builtin?: boolean
   discovered?: boolean
@@ -112,27 +131,39 @@ export interface LeaseView {
   owner?: { sessionId?: string; title?: string; reason?: string }
   createdAt: number
   tunnels?: unknown[]
+  mode?: LeaseMode
+  guiUsers?: string[]
 }
 
 export interface SessionView {
   sessionId: string
   live: boolean
   cwd?: string
-  mount?: { envId: string; remoteRoot?: string; source: 'session' | 'workspace' }
+  mount?: { envId: string; remoteRoot?: string; source: 'session' | 'workspace'; inherited?: boolean }
   mountExplicitlyOff: boolean
-  mountActive?: { envId: string; remoteRoot: string; since: number }
+  mountActive?: {
+    envId: string
+    remoteRoot: string
+    since: number
+    mode?: LeaseMode
+    /** This session holds the GUI of its mount. */
+    gui?: boolean
+    /** Shared with the parent session (subagent). */
+    shared?: boolean
+  }
   mountError?: string
   /** Set while the session cannot run because its mount is missing ("环境 X 挂载失败：…"). */
   mountBlocked?: string
   borrowableSource: 'all' | 'session' | 'workspace'
   borrowable: string[]
   borrowableExplicit?: string[]
-  held: (LeaseView & { tools: number })[]
+  held: (LeaseView & { tools: number; gui?: boolean; attached?: boolean })[]
   started: boolean
 }
 
 export interface StateView {
   platform: string
+  defaults?: { mountMode: LeaseMode }
   environments: EnvView[]
   discovered: { adb: unknown[]; adbError?: string }
   remoteWorkspaces: RemoteWorkspaceView[]

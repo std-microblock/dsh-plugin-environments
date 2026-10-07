@@ -8,6 +8,7 @@ import type {
   EnvConfigView,
   EnvKind,
   EnvView,
+  LeaseMode,
   ReverseRevealView,
   ReverseSettingsView,
   ReverseStatusView,
@@ -72,12 +73,14 @@ interface EnvDialogProps {
   open: boolean
   environment: EnvView | undefined
   platform: string | undefined
+  /** The plugin's default mount mode (shown for "default"). */
+  defaultMountMode?: LeaseMode | undefined
   onClose: () => void
   t: Translate
 }
 
 /** Add or edit an environment definition. */
-export function EnvDialog({ open, environment, platform, onClose, t }: EnvDialogProps) {
+export function EnvDialog({ open, environment, platform, defaultMountMode, onClose, t }: EnvDialogProps) {
   const editing = !!environment
   const [kind, setKind] = useState<EnvKind | undefined>(environment?.kind)
   const [name, setName] = useState('')
@@ -85,7 +88,8 @@ export function EnvDialog({ open, environment, platform, onClose, t }: EnvDialog
   const [idTouched, setIdTouched] = useState(false)
   const [description, setDescription] = useState('')
   const [config, setConfig] = useState<EnvConfigView>({})
-  const [exclusive, setExclusive] = useState(false)
+  const [headlessParallel, setHeadlessParallel] = useState(true)
+  const [mountMode, setMountMode] = useState<LeaseMode | ''>('')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<{ ok: boolean; text: string } | undefined>(undefined)
   const [reveal, setReveal] = useState<ReverseRevealView | undefined>(undefined)
@@ -98,7 +102,8 @@ export function EnvDialog({ open, environment, platform, onClose, t }: EnvDialog
     setIdTouched(!!environment)
     setDescription(environment?.description ?? '')
     setConfig(environment?.config ?? {})
-    setExclusive(environment?.exclusive ?? false)
+    setHeadlessParallel(environment?.headlessParallel ?? true)
+    setMountMode(environment?.mountMode ?? '')
     setResult(undefined)
     setReveal(undefined)
     setBusy(false)
@@ -107,8 +112,11 @@ export function EnvDialog({ open, environment, platform, onClose, t }: EnvDialog
   const choose = (k: AddableKind) => {
     setKind(k)
     setConfig({ ...DEFAULTS[k] })
-    setExclusive(k === 'adb' || k === 'winuser')
+    setHeadlessParallel(true)
+    setMountMode('')
   }
+
+  const lease = { headlessParallel, mountMode: mountMode || null }
 
   const set = (key: keyof EnvConfigView, value: string) => setConfig(c => ({ ...c, [key]: value }))
   const effectiveId = idTouched ? id : aliasOf(name || kind || 'env')
@@ -130,7 +138,7 @@ export function EnvDialog({ open, environment, platform, onClose, t }: EnvDialog
       let saved: EnvView
       if (kind === 'reverse') {
         const r = await call<{ environment: EnvView; reverse?: ReverseRevealView }>('save', {
-          environment: { id: effectiveId, name: name.trim(), kind, description, exclusive, config },
+          environment: { id: effectiveId, name: name.trim(), kind, description, ...lease, config },
         })
         invalidate()
         setIdTouched(true)
@@ -147,10 +155,18 @@ export function EnvDialog({ open, environment, platform, onClose, t }: EnvDialog
             desktop: config.desktop,
           })
         ).environment
+        // The account's environment is created with the defaults; apply the lease settings.
+        if (!headlessParallel || mountMode) {
+          saved = (
+            await call<{ environment: EnvView }>('save', {
+              environment: { ...saved, ...lease, config: { account: config.account } },
+            })
+          ).environment
+        }
       } else {
         saved = (
           await call<{ environment: EnvView }>('save', {
-            environment: { id: effectiveId, name: name.trim(), kind, description, exclusive, config },
+            environment: { id: effectiveId, name: name.trim(), kind, description, ...lease, config },
           })
         ).environment
       }
@@ -406,11 +422,31 @@ export function EnvDialog({ open, environment, platform, onClose, t }: EnvDialog
 
           <div className="envx-switch-row">
             <div>
-              <span>{t('field.exclusive')}</span>
-              <small>{t('field.exclusive.hint')}</small>
+              <span>{t('field.headlessParallel')}</span>
+              <small>{t('field.headlessParallel.hint')}</small>
             </div>
-            <Switch checked={exclusive} onChange={setExclusive} label={t('field.exclusive')} />
+            <Switch checked={headlessParallel} onChange={setHeadlessParallel} label={t('field.headlessParallel')} />
           </div>
+
+          <Field label={t('field.mountMode')} hint={t('field.mountMode.hint')}>
+            <select
+              className="envx-input"
+              value={mountMode}
+              onChange={e =>
+                setMountMode(e.target.value === 'gui' || e.target.value === 'headless' ? e.target.value : '')
+              }
+            >
+              <option value="">
+                {t('field.mountMode.default', { mode: t(`mode.${defaultMountMode ?? 'headless'}`) })}
+              </option>
+              <option value="headless">
+                {t('mode.headless')} · {t('mode.headless.desc')}
+              </option>
+              <option value="gui">
+                {t('mode.gui')} · {t('mode.gui.desc')}
+              </option>
+            </select>
+          </Field>
 
           {result && (
             <div className="envx-result" data-ok={String(result.ok)}>

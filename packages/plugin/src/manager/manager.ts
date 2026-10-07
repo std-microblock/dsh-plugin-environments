@@ -360,7 +360,11 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
     }
     if (config['port'] !== undefined) config['port'] = Number(config['port'])
     const headlessParallel =
-      input.headlessParallel === undefined ? existing?.headlessParallel : input.headlessParallel === false ? false : undefined
+      input.headlessParallel === undefined
+        ? existing?.headlessParallel
+        : input.headlessParallel === false
+          ? false
+          : undefined
     const mountMode =
       input.mountMode === undefined ? existing?.mountMode : isLeaseMode(input.mountMode) ? input.mountMode : undefined
     const def: EnvironmentDefinition = {

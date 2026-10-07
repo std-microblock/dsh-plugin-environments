@@ -4,6 +4,7 @@ import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { call, invalidate, messageOf } from './api.ts'
 import type { Translate } from './host-api.ts'
 import { IconFile, IconFolder, IconHome, IconPlus, IconRefresh, IconSpinner, IconUp } from './icons.tsx'
+import { envName } from './names.ts'
 import type { CreatedWorkspaceView, EnvView, ListingView } from './types.ts'
 
 function formatSize(n: number | undefined | null): string {
@@ -196,7 +197,7 @@ export function RemoteBrowser({
           >
             {environments.map(e => (
               <option key={e.id} value={e.id}>
-                {e.name}
+                {envName(e, t)}
               </option>
             ))}
           </select>

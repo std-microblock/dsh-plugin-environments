@@ -22,7 +22,7 @@ class StubEnvironment extends Environment {
   override stat(p: string): Promise<Stat | null> {
     return Promise.resolve(p === '/srv/app' ? ({ type: 'dir', size: 0, mtimeMs: 0 } as unknown as Stat) : null)
   }
-  realpath(p: string): Promise<string> {
+  override realpath(p: string): Promise<string> {
     return Promise.resolve(p)
   }
 }
@@ -31,7 +31,13 @@ function manager(dir = tmp()) {
   const m = new EnvironmentManager({ dataDir: dir, autoDiscoverAdb: false })
   m.load()
   m.upsert({ id: 'phone', name: 'Phone', kind: 'server', config: { host: '127.0.0.1', port: 1 } })
-  m.upsert({ id: 'solo', name: 'Solo', kind: 'server', headlessParallel: false, config: { host: '127.0.0.1', port: 2 } })
+  m.upsert({
+    id: 'solo',
+    name: 'Solo',
+    kind: 'server',
+    headlessParallel: false,
+    config: { host: '127.0.0.1', port: 2 },
+  })
   const opened: string[] = []
   m.open = def => {
     opened.push(def.id)
@@ -205,7 +211,14 @@ test('the exclusive flag migrates to headlessParallel; upsert keeps and clears l
   m.upsert({ id: 's', name: 'S', kind: 'server', mountMode: 'headless', config: { host: 'h', port: 1 } })
   assert.equal(m.require('s').headlessParallel, false, 'absent in the input: kept')
   assert.equal(m.publicDef(m.require('s')).effectiveMountMode, 'headless')
-  m.upsert({ id: 's', name: 'S', kind: 'server', headlessParallel: true, mountMode: null, config: { host: 'h', port: 1 } })
+  m.upsert({
+    id: 's',
+    name: 'S',
+    kind: 'server',
+    headlessParallel: true,
+    mountMode: null,
+    config: { host: 'h', port: 1 },
+  })
   assert.equal(m.require('s').headlessParallel, undefined)
   assert.equal(m.require('s').mountMode, undefined)
   await m.dispose()
