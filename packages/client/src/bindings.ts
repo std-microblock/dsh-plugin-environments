@@ -14,9 +14,9 @@ export interface BindingsSnapshot {
 const INTERVAL_MS = 10000
 
 /**
- * One store per client module: the sidebar decorations, the workspace-settings dialog and the
- * menu item all read it. It polls while someone is subscribed and the tab is visible, and
- * refreshes at once after any mutation in this GUI (`invalidate()`).
+ * One store per client module, read by the sidebar decorations. It polls while someone is
+ * subscribed and the tab is visible, and refreshes at once after any mutation in this GUI
+ * (`invalidate()`).
  */
 export class BindingsStore {
   private snapshot: BindingsSnapshot = { supported: undefined, view: undefined, byId: new Map(), error: undefined }

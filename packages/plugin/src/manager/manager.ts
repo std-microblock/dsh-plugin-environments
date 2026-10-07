@@ -37,7 +37,6 @@ import {
   type RemoteWorkspace,
   type SessionSettings,
   type WorkspaceBinding,
-  type WorkspaceDefaultMount,
   type WorkspaceSettings,
 } from './state.ts'
 
@@ -107,8 +106,7 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
   private readonly browseConnections = new Map<string, BrowseEntry>()
   private saveTimer: NodeJS.Timeout | undefined
   disposed = false
-  /** Listeners and connection pool for 
-everse environments. */
+  /** Listeners and connection pool for reverse environments. */
   readonly reverse: ReverseHub
   private readonly reverseDefaults: ReverseListenerSettings
 
@@ -171,6 +169,7 @@ everse environments. */
     this.state.workspaces ??= {}
     this.state.sessions ??= {}
     this.state.remoteWorkspaces ??= []
+    dropRetiredSettings(this.state)
   }
 
   save(): void {
@@ -558,24 +557,9 @@ everse environments. */
     return settings
   }
 
-  /** Set or clear the default environment of a host workspace (see `WorkspaceSettings.defaultMount`). */
-  setWorkspaceDefaultMount(hostPath: string, mount: WorkspaceDefaultMount | null): WorkspaceSettings {
-    if (mount) {
-      this.require(mount.envId)
-      if (this.remoteWorkspaceFor(hostPath)) {
-        throw new EnvError('EINVAL', 'a remote workspace is always bound to its own environment')
-      }
-    }
-    return this.setWorkspaceSettings(hostPath, {
-      defaultMount: mount
-        ? { envId: mount.envId, ...(mount.remoteRoot ? { remoteRoot: mount.remoteRoot } : {}) }
-        : null,
-    })
-  }
-
   /**
-   * What a workspace is bound to. A remote workspace is bound to its environment; a host
-   * workspace may have a default environment for new sessions; otherwise it runs on the host.
+   * What a workspace is bound to: a remote workspace is bound to its environment, any other
+   * workspace runs on the host.
    */
   workspaceBinding(hostPath: string, workspaceId?: string): WorkspaceBinding {
     const remote =
@@ -589,14 +573,6 @@ everse environments. */
         envId: remote.envId,
         remoteRoot: remote.root,
         remoteWorkspace: { id: remote.id, title: remote.title },
-        borrowable,
-      }
-    }
-    if (settings.defaultMount?.envId) {
-      return {
-        kind: 'default',
-        envId: settings.defaultMount.envId,
-        remoteRoot: settings.defaultMount.remoteRoot,
         borrowable,
       }
     }
@@ -631,44 +607,17 @@ everse environments. */
   }
 
   /**
-   * Mount effective for a session, in precedence order:
-   * 1. the session's own choice (`false` turns every mount off),
-   * 2. its remote workspace,
-   * 3. only for a session that has not started yet (`fresh`): the workspace's default environment.
-   * A default that was applied is persisted into the session (`seedDefaultMount`), so it shows up
-   * in step 1 afterwards and later changes of the workspace default do not move the session.
+   * Mount effective for a session: its own choice (`false` turns the remote workspace mount
+   * off), else its remote workspace.
    */
-  mountFor(
-    sessionId: string,
-    cwd: string | undefined,
-    { fresh = false }: { fresh?: boolean } = {},
-  ): EffectiveMount | undefined {
+  mountFor(sessionId: string, cwd: string | undefined): EffectiveMount | undefined {
     const s = this.sessionSettings(sessionId)
     if (s.mount === false) return undefined
-    if (s.mount?.envId) {
-      return {
-        ...s.mount,
-        hostRoot: s.mount.hostRoot ?? cwd,
-        source: s.mountOrigin === 'default' ? 'default' : 'session',
-      }
-    }
+    if (s.mount?.envId) return { ...s.mount, hostRoot: s.mount.hostRoot ?? cwd, source: 'session' }
     const ws = this.remoteWorkspaceFor(cwd)
     if (ws)
       return { envId: ws.envId, remoteRoot: ws.root, hostRoot: ws.hostPath, source: 'workspace', workspace: ws.id }
-    const def = fresh ? this.workspaceSettings(cwd).defaultMount : undefined
-    if (def?.envId) return { envId: def.envId, remoteRoot: def.remoteRoot, hostRoot: cwd, source: 'default' }
     return undefined
-  }
-
-  /** Pin a workspace-default mount onto the session that is being mounted with it. */
-  seedDefaultMount(sessionId: string, mount: EffectiveMount): void {
-    if (mount.source !== 'default') return
-    const s = this.sessionSettings(sessionId)
-    if (s.mount !== undefined) return
-    this.setSessionSettings(sessionId, {
-      mount: { envId: mount.envId, remoteRoot: mount.remoteRoot, hostRoot: mount.hostRoot },
-      mountOrigin: 'default',
-    })
   }
 
   /** Environments a session may borrow: session list, else workspace list, else every borrowable env. */
@@ -754,5 +703,23 @@ everse environments. */
     }
     this.browseConnections.clear()
     await this.reverse.dispose()
+  }
+}
+
+/**
+ * Drop settings of retired features from loaded state: the workspace default environment
+ * (`defaultMount`) and the marker of session mounts seeded from it (`mountOrigin`). Such a
+ * session keeps its mount, now as an ordinary session mount.
+ */
+export function dropRetiredSettings(state: PluginState): void {
+  for (const [key, settings] of Object.entries(state.workspaces)) {
+    if (!settings || typeof settings !== 'object') continue
+    const record = settings as Record<string, unknown>
+    if (!('defaultMount' in record)) continue
+    delete record['defaultMount']
+    if (Object.keys(record).length === 0) delete state.workspaces[key]
+  }
+  for (const settings of Object.values(state.sessions)) {
+    if (settings && typeof settings === 'object') delete (settings as Record<string, unknown>)['mountOrigin']
   }
 }

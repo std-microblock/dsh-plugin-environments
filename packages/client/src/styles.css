@@ -724,6 +724,16 @@ select.envx-input {
 .envx-chipbtn[data-active] {
   color: var(--dsw-alias-state-business-primary);
 }
+.envx-chipbtn[data-error] {
+  color: var(--dsw-alias-state-error-primary);
+}
+.envx-chipbtn i {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dsw-alias-state-error-primary);
+}
 .envx-chipbtn span {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -911,17 +921,7 @@ select.envx-input {
   font-size: 13px;
 }
 
-/* ---- workspace bindings (sidebar rows, workspace environment dialog) ---- */
-.envx-ws-lead {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 20px;
-  margin-inline-start: -2px;
-  color: var(--dsw-alias-label-tertiary);
-}
+/* ---- workspace bindings (sidebar rows of remote workspaces) ---- */
 .envx-ws-tag {
   display: inline-flex;
   flex: 0 1 auto;
@@ -938,11 +938,6 @@ select.envx-input {
   font: inherit;
   font-size: 11px;
   line-height: 16px;
-  cursor: pointer;
-}
-.envx-ws-tag:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-primary);
 }
 .envx-ws-tag svg {
   flex: none;
@@ -966,22 +961,4 @@ select.envx-input {
 }
 .envx-ws-dot[data-state='busy'] {
   background: var(--dsw-alias-state-warn-primary);
-}
-.envx-wsd {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-.envx-wsd-section h3 {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin: 0 0 4px;
-  font-size: 14px;
-  font-weight: 600;
-}
-.envx-wsd-section h3 small {
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 12px;
-  font-weight: 400;
 }

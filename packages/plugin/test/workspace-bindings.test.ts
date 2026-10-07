@@ -1,10 +1,10 @@
-// Workspace ↔ environment binding: defaults, mount precedence, availability and the HTTP actions.
+// Workspace ↔ environment binding: settings, mount precedence, availability and the HTTP actions.
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { createActions, parseDefaultMount } from '../src/api/actions.ts'
+import { createActions } from '../src/api/actions.ts'
 import type { Borrowing } from '../src/borrowing/index.ts'
 import type { AdbDevice } from '../src/env/adb/devices.ts'
 import type { PluginContext } from '../src/host-api.ts'
@@ -36,72 +36,75 @@ const device = (serial: string, state = 'device'): AdbDevice => ({
 test('workspace settings patch only the given keys', () => {
   const { m, cleanup } = setup()
   m.setWorkspaceSettings('/ws', { borrowable: ['local'] })
-  m.setWorkspaceDefaultMount('/ws', { envId: 'box', remoteRoot: '/srv' })
-  assert.deepEqual(m.workspaceSettings('/ws'), {
-    borrowable: ['local'],
-    defaultMount: { envId: 'box', remoteRoot: '/srv' },
-  })
+  assert.deepEqual(m.workspaceSettings('/ws'), { borrowable: ['local'] })
   m.setWorkspaceSettings('/ws', { borrowable: null })
-  assert.deepEqual(m.workspaceSettings('/ws'), { defaultMount: { envId: 'box', remoteRoot: '/srv' } })
-  m.setWorkspaceDefaultMount('/ws', null)
   assert.deepEqual(m.workspaceSettings('/ws'), {})
   assert.equal(Object.keys(m.state.workspaces).length, 0, 'empty settings are dropped')
-  assert.throws(() => m.setWorkspaceDefaultMount('/ws', { envId: 'nope' }), /unknown environment/)
   cleanup()
 })
 
-test('bindings: remote workspace, default environment, host', () => {
+test('bindings: remote workspace, host', () => {
   const { dir, m, cleanup } = setup()
   const ws = m.addRemoteWorkspace({ envId: 'box', root: '/srv/app', mountsDir: path.join(dir, 'mounts') })
   ws.workspaceId = 'w-remote'
-  m.setWorkspaceDefaultMount('/ws', { envId: 'pixel' })
+  m.setWorkspaceSettings(ws.hostPath, { borrowable: ['pixel'] })
 
   const remote = m.workspaceBinding(ws.hostPath)
   assert.equal(remote.kind, 'remote')
   assert.equal(remote.envId, 'box')
   assert.equal(remote.remoteRoot, '/srv/app')
   assert.equal(remote.remoteWorkspace?.id, ws.id)
+  assert.deepEqual(remote.borrowable, ['pixel'])
   // Found by workspace id even when the path spelling differs.
   assert.equal(m.workspaceBinding('/elsewhere', 'w-remote').kind, 'remote')
-
-  assert.deepEqual(m.workspaceBinding('/ws'), {
-    kind: 'default',
-    envId: 'pixel',
-    remoteRoot: undefined,
-    borrowable: undefined,
-  })
   assert.deepEqual(m.workspaceBinding('/other'), { kind: 'host', borrowable: undefined })
-  assert.throws(() => m.setWorkspaceDefaultMount(ws.hostPath, { envId: 'local' }), /remote workspace/)
   cleanup()
 })
 
-test('the workspace default mounts only fresh sessions and is pinned once applied', () => {
-  const { m, cleanup } = setup()
-  m.setWorkspaceDefaultMount('/ws', { envId: 'box', remoteRoot: '/srv' })
-
-  // An already-started (resumed) session is not moved onto the default.
-  assert.equal(m.mountFor('old', '/ws'), undefined)
-  // A fresh session previews it.
-  const want = m.mountFor('new', '/ws', { fresh: true })
-  assert.deepEqual(want, { envId: 'box', remoteRoot: '/srv', hostRoot: '/ws', source: 'default' })
-
-  // Once mounted, the choice is persisted in the session …
-  assert.ok(want)
-  m.seedDefaultMount('new', want)
-  assert.equal(m.sessionSettings('new').mountOrigin, 'default')
-  // … so changing the workspace default later does not move it.
-  m.setWorkspaceDefaultMount('/ws', { envId: 'pixel' })
-  assert.equal(m.mountFor('new', '/ws')?.envId, 'box')
-  assert.equal(m.mountFor('new', '/ws')?.source, 'default')
-
-  // "Don't mount" on a fresh session overrides the default.
-  m.setSessionSettings('skip', { mount: false })
-  assert.equal(m.mountFor('skip', '/ws', { fresh: true }), undefined)
-
-  // An explicit session mount wins and is reported as such.
-  m.setSessionSettings('own', { mount: { envId: 'local' } })
-  assert.equal(m.mountFor('own', '/ws', { fresh: true })?.source, 'session')
+test('mount precedence: the session choice, else its remote workspace', () => {
+  const { dir, m, cleanup } = setup()
+  const ws = m.addRemoteWorkspace({ envId: 'box', root: '/srv/app', mountsDir: path.join(dir, 'mounts') })
+  assert.deepEqual(m.mountFor('plain', '/ws'), undefined)
+  assert.equal(m.mountFor('remote', ws.hostPath)?.source, 'workspace')
+  m.setSessionSettings('own', { mount: { envId: 'pixel', remoteRoot: '/sdcard' } })
+  assert.deepEqual(m.mountFor('own', ws.hostPath), {
+    envId: 'pixel',
+    remoteRoot: '/sdcard',
+    hostRoot: ws.hostPath,
+    source: 'session',
+  })
+  m.setSessionSettings('off', { mount: false })
+  assert.equal(m.mountFor('off', ws.hostPath), undefined)
   cleanup()
+})
+
+test('state of the retired workspace default environment is dropped on load', () => {
+  const dir = tmp()
+  const key = (p: string) => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p))
+  fs.writeFileSync(
+    path.join(dir, 'environments.json'),
+    JSON.stringify({
+      version: 1,
+      environments: [{ id: 'box', name: 'Box', kind: 'server', config: { host: 'box.lan' } }],
+      workspaces: {
+        [key('/only-default')]: { defaultMount: { envId: 'box' } },
+        [key('/both')]: { borrowable: ['local'], defaultMount: { envId: 'box', remoteRoot: '/srv' } },
+      },
+      sessions: {
+        seeded: { mount: { envId: 'box', remoteRoot: '/srv', hostRoot: '/both' }, mountOrigin: 'default' },
+      },
+      remoteWorkspaces: [],
+    }),
+  )
+  const m = new EnvironmentManager({ dataDir: dir, autoDiscoverAdb: false })
+  m.load()
+  assert.deepEqual(Object.values(m.state.workspaces), [{ borrowable: ['local'] }])
+  assert.deepEqual(m.workspaceSettings('/both'), { borrowable: ['local'] })
+  // A session that was mounted from a default keeps its mount, now as its own choice.
+  assert.deepEqual(m.sessionSettings('seeded'), { mount: { envId: 'box', remoteRoot: '/srv', hostRoot: '/both' } })
+  assert.equal(m.mountFor('seeded', '/both')?.source, 'session')
+  assert.equal(m.mountFor('fresh', '/only-default'), undefined)
+  fs.rmSync(dir, { recursive: true, force: true })
 })
 
 test('availability: local, tcp probes, adb devices and unknown definitions', async () => {
@@ -192,21 +195,18 @@ test('HTTP actions: workspace.set patches, workspace.bindings reports bindings w
     return action(body)
   }
 
-  await call('workspace.set', { workspaceId: 'w-host', borrowable: ['local'] })
-  const set = (await call('workspace.set', {
-    workspaceId: 'w-host',
-    defaultMount: { envId: 'box', remoteRoot: '/srv' },
-  })) as {
+  const set = (await call('workspace.set', { workspaceId: 'w-host', borrowable: ['local'] })) as {
     settings: unknown
     binding: { kind: string }
   }
-  assert.deepEqual(set.settings, { borrowable: ['local'], defaultMount: { envId: 'box', remoteRoot: '/srv' } })
-  assert.equal(set.binding.kind, 'default')
-  await assert.rejects(call('workspace.set', { workspaceId: 'missing', defaultMount: null }), /workspace not found/)
-  await assert.rejects(
-    call('workspace.set', { workspaceId: 'w-remote', defaultMount: { envId: 'box' } }),
-    /remote workspace/,
-  )
+  assert.deepEqual(set.settings, { borrowable: ['local'] })
+  assert.equal(set.binding.kind, 'host')
+  // The retired default environment field is ignored.
+  await call('workspace.set', { workspaceId: 'w-host', defaultMount: { envId: 'box' } })
+  assert.deepEqual(m.workspaceSettings('/projects/site'), { borrowable: ['local'] })
+  await assert.rejects(call('workspace.set', { workspaceId: 'missing', borrowable: null }), /workspace not found/)
+  await call('workspace.set', { workspaceId: 'w-remote', borrowable: ['box'] })
+  assert.deepEqual(m.workspaceSettings(ws.hostPath), { borrowable: ['box'] })
 
   const result = (await call('workspace.bindings', {
     workspaces: [
@@ -223,14 +223,16 @@ test('HTTP actions: workspace.set patches, workspace.bindings reports bindings w
   assert.deepEqual(
     result.bindings.map(b => [b.workspaceId, b.kind, b.envId]),
     [
-      ['w-host', 'default', 'box'],
+      ['w-host', 'host', undefined],
       ['w-remote', 'remote', 'pixel'],
       ['w-plain', 'host', undefined],
     ],
   )
-  assert.equal(result.availability['box']?.state, 'offline')
   assert.equal(result.availability['pixel']?.state, 'offline')
-  assert.deepEqual(result.environments.map(e => e.id).sort(), ['box', 'pixel'])
+  assert.deepEqual(
+    result.environments.map(e => e.id),
+    ['pixel'],
+  )
 
   // A workspace given by id only is resolved through the DSH workspace registry.
   const byId = (await call('workspace.bindings', {
@@ -240,20 +242,7 @@ test('HTTP actions: workspace.set patches, workspace.bindings reports bindings w
   }
   assert.deepEqual(
     byId.bindings.map(b => [b.path, b.kind]),
-    [['/projects/site', 'default']],
+    [['/projects/site', 'host']],
   )
-
-  // Clearing the default leaves the borrowable list alone.
-  await call('workspace.set', { workspacePath: '/projects/site', defaultMount: null })
-  assert.deepEqual(m.workspaceSettings('/projects/site'), { borrowable: ['local'] })
   cleanup()
-})
-
-test('parseDefaultMount validates its input', () => {
-  assert.equal(parseDefaultMount(null), null)
-  assert.equal(parseDefaultMount(false), null)
-  assert.deepEqual(parseDefaultMount({ envId: 'box' }), { envId: 'box' })
-  assert.deepEqual(parseDefaultMount({ envId: 'box', remoteRoot: '/srv' }), { envId: 'box', remoteRoot: '/srv' })
-  assert.throws(() => parseDefaultMount({}), /envId/)
-  assert.throws(() => parseDefaultMount('box'), /defaultMount/)
 })

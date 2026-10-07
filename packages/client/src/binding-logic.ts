@@ -32,7 +32,7 @@ export function isUnavailable(state: AvailabilityState | undefined): boolean {
 
 /**
  * Bindings derived from the `state` action, for a host plugin that predates `workspace.bindings`:
- * remote workspaces only (no defaults exist there), adb availability from discovery, others unknown.
+ * remote workspaces, adb availability from discovery, others unknown.
  */
 export function bindingsFromState(state: StateView, workspaces: readonly WorkspaceRef[]): BindingsView {
   const bindings: BindingView[] = []

@@ -16,10 +16,9 @@ export interface HeldLease {
 }
 
 export interface SessionSettings {
-  /** Explicit mount, or `false` to suppress the workspace mount (remote workspace or workspace default). */
+  /** Explicit mount, or `false` to suppress the remote workspace mount. */
   mount?: SessionMount | false
-  /** `default` when `mount` was seeded from the workspace's default environment rather than chosen. */
-  mountOrigin?: 'default'
+  /** Why the last mount attempt failed; the session cannot run turns until a retry succeeds. */
   mountError?: string
   borrowable?: string[]
   held?: HeldLease[]
@@ -30,18 +29,6 @@ export interface SessionSettings {
 export interface WorkspaceSettings {
   /** Default borrowable list of sessions in this workspace (absent: every borrowable environment). */
   borrowable?: string[] | undefined
-  /**
-   * Default environment of this (host) workspace: new sessions started here are mounted onto it,
-   * at `remoteRoot` (absent: the environment's own working directory). Ignored for remote
-   * workspaces, which are always bound to their own environment.
-   */
-  defaultMount?: WorkspaceDefaultMount | undefined
-}
-
-/** A workspace's default environment. */
-export interface WorkspaceDefaultMount {
-  envId: string
-  remoteRoot?: string | undefined
 }
 
 /** A remote directory registered as a DSH workspace through a host placeholder directory. */
@@ -70,8 +57,8 @@ export interface EffectiveMount {
   envId: string
   remoteRoot?: string | undefined
   hostRoot?: string | undefined
-  /** `session`: chosen for the session; `workspace`: its remote workspace; `default`: the workspace's default environment. */
-  source: 'session' | 'workspace' | 'default'
+  /** `session`: chosen for the session; `workspace`: its remote workspace. */
+  source: 'session' | 'workspace'
   workspace?: string
 }
 
@@ -81,8 +68,8 @@ export function emptyState(): PluginState {
 
 /** What a workspace is bound to (see `EnvironmentManager.workspaceBinding`). */
 export interface WorkspaceBinding {
-  /** `remote`: a remote workspace; `default`: a host workspace with a default environment; `host`: neither. */
-  kind: 'remote' | 'default' | 'host'
+  /** `remote`: a remote workspace (bound to its environment); `host`: a host workspace. */
+  kind: 'remote' | 'host'
   envId?: string | undefined
   remoteRoot?: string | undefined
   remoteWorkspace?: { id: string; title: string } | undefined

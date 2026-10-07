@@ -354,31 +354,17 @@ const en = {
   'adb.error': 'adb is unavailable: {message}',
 }
 
-/** Workspace ↔ environment binding copy (sidebar rows, workspace menu, workspace dialog, chip). */
+/** Workspace ↔ environment binding copy (sidebar rows of remote workspaces, chip). */
 const zhWorkspace = {
   'ws.state.available': '可用',
   'ws.state.busy': '使用中',
   'ws.state.offline': '不可用',
   'ws.state.error': '出错',
   'ws.state.unknown': '未检测',
-  'ws.remote.title': '远程工作区 · {env} · {root}',
-  'ws.remote.aria': '远程工作区，位于 {env}',
-  'ws.tag.remote': '绑定的环境：{name}（远程工作区）',
-  'ws.tag.default': '默认环境：{name}（新会话会挂载到它）',
-  'ws.menu': '环境设置…',
-  'ws.dialog.title': '工作区环境 · {name}',
-  'ws.dialog.default': '默认环境',
-  'ws.dialog.defaultHint':
-    '在此工作区新建的会话会在开始时自动挂载到这个环境。已开始的会话不受影响；单个会话可以在输入框的“环境”按钮里选择不挂载。',
-  'ws.dialog.remoteHint': '这是远程工作区，始终绑定在下面的环境上，无需设置默认环境。',
-  'ws.dialog.none': '无',
-  'ws.dialog.noneHint': '会话在本机工作区中运行',
-  'ws.dialog.envCwd': '环境的默认目录',
-  'ws.dialog.pickRoot': '选择目录…',
-  'ws.dialog.borrow.custom': '自定义',
-  'ws.dialog.borrowHint': '此工作区的会话默认可以借用的环境；每个会话仍可单独修改。',
-  'pop.mount.fromDefault': '来自工作区默认环境',
-  'action.dontMount': '不挂载',
+  'ws.tag.remote': '远程工作区 · {name} · {root}',
+  'pop.mount.blocked': '挂载成功之前，这个会话不能继续对话。',
+  'action.remount': '重新挂载',
+  'pop.borrow.clearWorkspace': '清除工作区默认',
 }
 
 const enWorkspace: Record<keyof typeof zhWorkspace, string> = {
@@ -387,25 +373,10 @@ const enWorkspace: Record<keyof typeof zhWorkspace, string> = {
   'ws.state.offline': 'Unavailable',
   'ws.state.error': 'Error',
   'ws.state.unknown': 'Not checked',
-  'ws.remote.title': 'Remote workspace · {env} · {root}',
-  'ws.remote.aria': 'Remote workspace on {env}',
-  'ws.tag.remote': 'Bound environment: {name} (remote workspace)',
-  'ws.tag.default': 'Default environment: {name} (new sessions are mounted on it)',
-  'ws.menu': 'Environment…',
-  'ws.dialog.title': 'Workspace environment · {name}',
-  'ws.dialog.default': 'Default environment',
-  'ws.dialog.defaultHint':
-    'New sessions in this workspace are mounted on this environment when they start. Sessions that already started are not affected; a single session can opt out with the Environment button in the composer.',
-  'ws.dialog.remoteHint': 'This is a remote workspace; it is always bound to the environment below.',
-  'ws.dialog.none': 'None',
-  'ws.dialog.noneHint': 'Sessions run in the local workspace',
-  'ws.dialog.envCwd': 'The environment’s default folder',
-  'ws.dialog.pickRoot': 'Choose folder…',
-  'ws.dialog.borrow.custom': 'Custom',
-  'ws.dialog.borrowHint':
-    'Environments sessions in this workspace may borrow by default; each session can still change it.',
-  'pop.mount.fromDefault': 'From the workspace default',
-  'action.dontMount': 'Don’t mount',
+  'ws.tag.remote': 'Remote workspace · {name} · {root}',
+  'pop.mount.blocked': 'This session cannot continue until its environment is mounted.',
+  'action.remount': 'Mount again',
+  'pop.borrow.clearWorkspace': 'Clear workspace default',
 }
 
 /** Message key → template; `{name}` placeholders are interpolated by the locale service. */

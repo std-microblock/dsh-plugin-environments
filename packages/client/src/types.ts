@@ -116,10 +116,12 @@ export interface SessionView {
   sessionId: string
   live: boolean
   cwd?: string
-  mount?: { envId: string; remoteRoot?: string; source: 'session' | 'workspace' | 'default' }
+  mount?: { envId: string; remoteRoot?: string; source: 'session' | 'workspace' }
   mountExplicitlyOff: boolean
   mountActive?: { envId: string; remoteRoot: string; since: number }
   mountError?: string
+  /** Set while the session cannot run because its mount is missing ("环境 X 挂载失败：…"). */
+  mountBlocked?: string
   borrowableSource: 'all' | 'session' | 'workspace'
   borrowable: string[]
   borrowableExplicit?: string[]
@@ -176,8 +178,8 @@ export interface AvailabilityView {
 export interface BindingView {
   workspaceId?: string
   path: string
-  /** `remote`: a remote workspace; `default`: a host workspace with a default environment; `host`: neither. */
-  kind: 'remote' | 'default' | 'host'
+  /** `remote`: a remote workspace (bound to its environment); `host`: a host workspace. */
+  kind: 'remote' | 'host'
   envId?: string
   remoteRoot?: string
   remoteWorkspace?: { id: string; title: string }
@@ -188,9 +190,4 @@ export interface BindingsView {
   bindings: BindingView[]
   availability: Record<string, AvailabilityView>
   environments: { id: string; name: string; kind: EnvKind }[]
-}
-
-export interface WorkspaceSettingsView {
-  borrowable?: string[]
-  defaultMount?: { envId: string; remoteRoot?: string }
 }

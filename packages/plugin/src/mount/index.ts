@@ -2,11 +2,12 @@
 import { errorMessage } from '@dsh-environments/protocol'
 import type { HarnessDeps, HarnessScope } from '../deps.ts'
 import type { Environment } from '../env/environment.ts'
-import { sessionIdOf, sessionStarted, type Agent, type PluginContext } from '../host-api.ts'
+import { sessionIdOf, type Agent, type PluginContext } from '../host-api.ts'
 import type { Lease } from '../manager/lease.ts'
 import type { EnvironmentManager } from '../manager/manager.ts'
 import type { EffectiveMount } from '../manager/state.ts'
 import { createEnvFileSystem } from './fs-provider.ts'
+import { installMountGate } from './gate.ts'
 import { INSTRUCTION_FILES, loadInstructions } from './instructions.ts'
 import { MountMap } from './map.ts'
 import { registerSearchTools } from './search-tools.ts'
@@ -65,9 +66,23 @@ export interface MountRecord {
 
 export interface Mounting {
   mountOf(agent: Agent): MountRecord | undefined
+  /**
+   * Bring the agent's mount in line with its settings (install, replace or remove it). A failure
+   * is recorded as the session's `mountError` and rethrown; success clears it.
+   */
   ensure(agent: Agent): Promise<MountRecord | undefined>
   uninstall(agent: Agent): Promise<void>
+  /** Why the agent must not run: it should be mounted but is not (see `gate.ts`). */
+  blockReason(agent: Agent): string | undefined
   liveMounts(): { agent: Agent; record: MountRecord }[]
+}
+
+/** Whether an installed mount satisfies the wanted one. */
+function satisfies(have: MountRecord, want: EffectiveMount): boolean {
+  return (
+    have.envId === want.envId &&
+    (!want.remoteRoot || have.map.remoteRoot === want.remoteRoot || have.requestedRoot === want.remoteRoot)
+  )
 }
 
 export function installMounting(ctx: PluginContext, manager: EnvironmentManager, deps: HarnessDeps): Mounting {
@@ -123,6 +138,7 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
       envId: mount.envId,
       source: mount.source,
       startedAt: Date.now(),
+      requestedRoot: mount.remoteRoot,
     }
     mounts.set(agent, record)
     live.add(agent)
@@ -190,6 +206,8 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
       lease.once('release', reason => {
         if (mounts.get(agent) === record && !record.uninstalling) {
           log('mount of %s lost: %s', sessionId, reason)
+          // Recorded so the gate reports why the session is blocked until it is remounted.
+          manager.setSessionSettings(sessionId, { mountError: `挂载已断开（${reason}）` })
           uninstall(agent).catch(() => {})
         }
       })
@@ -216,41 +234,68 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
     await record.lease.release('unmounted').catch(() => {})
   }
 
-  async function ensure(agent: Agent): Promise<MountRecord | undefined> {
+  async function reconcile(agent: Agent): Promise<MountRecord | undefined> {
     const sessionId = sessionIdOf(agent)
-    // The workspace default environment only applies to sessions that have not started yet.
-    const want = manager.mountFor(sessionId, agent.session.header.cwd, { fresh: !sessionStarted(agent) })
+    const want = manager.mountFor(sessionId, agent.session.header.cwd)
     const have = mounts.get(agent)
-    if (
-      have &&
-      want &&
-      have.envId === want.envId &&
-      (!want.remoteRoot || have.map.remoteRoot === want.remoteRoot || have.requestedRoot === want.remoteRoot)
-    ) {
-      return have
+    let record: MountRecord | undefined
+    try {
+      if (have && want && satisfies(have, want)) record = have
+      else {
+        if (have) await uninstall(agent)
+        record = want ? await install(agent, want) : undefined
+      }
+    } catch (e) {
+      manager.setSessionSettings(sessionId, { mountError: errorMessage(e) })
+      throw e
     }
-    if (have) await uninstall(agent)
-    if (!want) return undefined
-    const record = await install(agent, want)
-    record.requestedRoot = want.remoteRoot
-    manager.seedDefaultMount(sessionId, want)
+    if (manager.sessionSettings(sessionId).mountError !== undefined) {
+      manager.setSessionSettings(sessionId, { mountError: undefined })
+    }
     return record
+  }
+
+  // One reconciliation at a time per agent: creation, the turn gate and the GUI may race.
+  const pending = new WeakMap<Agent, Promise<unknown>>()
+  function ensure(agent: Agent): Promise<MountRecord | undefined> {
+    const previous = pending.get(agent) ?? Promise.resolve()
+    const run = previous.then(() => reconcile(agent))
+    const tracked = run
+      .catch(() => undefined)
+      .finally(() => {
+        if (pending.get(agent) === tracked) pending.delete(agent)
+      })
+    pending.set(agent, tracked)
+    return run
+  }
+
+  function blockReason(agent: Agent): string | undefined {
+    const sessionId = sessionIdOf(agent)
+    const want = manager.mountFor(sessionId, agent.session.header.cwd)
+    if (!want) return undefined
+    const have = mounts.get(agent)
+    if (have && satisfies(have, want)) return undefined
+    const name = manager.get(want.envId)?.name ?? want.envId
+    const error = manager.sessionSettings(sessionId).mountError
+    if (error !== undefined) return `环境 ${name} 挂载失败：${error}`
+    return pending.has(agent) ? `环境 ${name} 正在挂载，请稍后再试` : `环境 ${name} 挂载失败：未挂载`
   }
 
   ctx.on('agent/created', async ({ agent }) => {
     try {
       await ensure(agent)
     } catch (e) {
-      const sessionId = sessionIdOf(agent)
-      manager.setSessionSettings(sessionId, { mountError: errorMessage(e) })
-      log('mount failed for %s: %s', sessionId, errorMessage(e))
+      // Recorded as the session's mountError; the gate keeps the session from running unmounted.
+      log('mount failed for %s: %s', sessionIdOf(agent), errorMessage(e))
     }
   })
+  installMountGate(ctx, { ensure, blockReason })
 
   return {
     mountOf: agent => mounts.get(agent),
     ensure,
     uninstall,
+    blockReason,
     liveMounts: () =>
       [...live].flatMap(agent => {
         const record = mounts.get(agent)
@@ -261,5 +306,6 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
 
 export { loadInstructions } from './instructions.ts'
 export { MountMap } from './map.ts'
+export { installMountGate, MountBlockedError } from './gate.ts'
 export { createEnvFileSystem } from './fs-provider.ts'
 export { createEnvSubprocessRuntime } from './subprocess-provider.ts'
