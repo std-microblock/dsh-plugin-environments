@@ -16,22 +16,25 @@ import { openWindowsAccount } from '../env/winuser/winuser-env.ts'
 import type { Logger } from '../host-api.ts'
 import {
   aliasFor,
-  isExclusive,
+  isHeadlessParallel,
   isKind,
+  isLeaseMode,
   LOCAL_ID,
+  migrateDefinition,
   SECRET_FIELDS,
   SECRET_MARKER,
   slug,
-  defaultExclusive,
   type DefinitionInput,
   type DiscoveryState,
   type EnvironmentConfig,
   type EnvironmentDefinition,
+  type LeaseMode,
   type PublicDefinition,
 } from './definitions.ts'
 import { Lease, type LeaseOwner, type LeasePurpose, type LeaseRegistry } from './lease.ts'
 import {
   emptyState,
+  STATE_VERSION,
   type EffectiveMount,
   type PluginState,
   type RemoteWorkspace,
@@ -47,33 +50,62 @@ export interface EnvironmentManagerOptions {
   logger?: Logger | undefined
   /** Reverse-connection listener defaults (until changed in the GUI). */
   reverse?: ReverseListenerSettings | undefined
+  /** Mode of mounts of environments without their own `mountMode` (default headless). */
+  mountMode?: LeaseMode | undefined
 }
 
 export interface EnvironmentStatus {
+  /** A new headless lease would have to wait (exclusive environment in use). */
   busy: boolean
+  /** A new GUI lease (or an upgrade) would have to wait. */
+  guiBusy: boolean
+  headlessParallel: boolean
   holders: {
     leaseId: string
     sessionId: string | undefined
     title: string | undefined
     purpose: LeasePurpose
+    mode: LeaseMode
+    guiUsers: string[]
     since: number
   }[]
-  queue: { sessionId: string | undefined; since: number }[]
+  /** The lease holding the GUI, if any. */
+  gui: { leaseId: string; sessionId: string | undefined; title: string | undefined; users: string[] } | undefined
+  queue: { sessionId: string | undefined; since: number; mode: LeaseMode; upgrade: boolean }[]
 }
 
 export interface AcquireOptions {
   owner?: LeaseOwner | undefined
   purpose?: LeasePurpose
+  /** Lease mode (default headless). A GUI lease's GUI user is the owner's session. */
+  mode?: LeaseMode | undefined
   wait?: boolean | undefined
   timeoutMs?: number | undefined
   signal?: AbortSignal | undefined
   alias?: string | undefined
 }
 
+export interface WaitOptions {
+  wait?: boolean | undefined
+  timeoutMs?: number | undefined
+  signal?: AbortSignal | undefined
+}
+
+/** A request admitted but not yet turned into a lease (its connection is opening). */
+interface Claim {
+  mode: LeaseMode
+  owner: LeaseOwner | undefined
+}
+
 interface Waiter {
   owner: LeaseOwner | undefined
   since: number
+  mode: LeaseMode
+  /** Set for an upgrade of an existing lease to GUI. */
+  lease?: Lease | undefined
+  /** Admit the waiter: called synchronously when it reaches the front and fits. */
   wake?: () => void
+  cancel?: (error: Error) => void
 }
 
 interface BrowseEntry {
@@ -102,6 +134,7 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
   state: PluginState = emptyState()
   readonly leases = new Map<string, Lease>()
   private readonly waiters = new Map<string, Waiter[]>()
+  private readonly claims = new Map<string, Set<Claim>>()
   discovered: DiscoveryState = { adb: [], adbError: undefined, at: 0 }
   private readonly browseConnections = new Map<string, BrowseEntry>()
   private saveTimer: NodeJS.Timeout | undefined
@@ -109,8 +142,17 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
   /** Listeners and connection pool for reverse environments. */
   readonly reverse: ReverseHub
   private readonly reverseDefaults: ReverseListenerSettings
+  /** Mount mode of environments without their own. */
+  readonly defaultMountMode: LeaseMode
 
-  constructor({ dataDir, autoDiscoverAdb = true, adb = 'adb', logger, reverse = {} }: EnvironmentManagerOptions) {
+  constructor({
+    dataDir,
+    autoDiscoverAdb = true,
+    adb = 'adb',
+    logger,
+    reverse = {},
+    mountMode,
+  }: EnvironmentManagerOptions) {
     super()
     this.dataDir = dataDir
     this.file = path.join(dataDir, 'environments.json')
@@ -118,6 +160,7 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
     this.adb = adb
     this.logger = logger
     this.reverseDefaults = reverse
+    this.defaultMountMode = isLeaseMode(mountMode) ? mountMode : 'headless'
     this.reverse = new ReverseHub(
       id => {
         const def = this.state.environments.find(e => e.id === id && e.kind === 'reverse')
@@ -170,6 +213,7 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
     this.state.sessions ??= {}
     this.state.remoteWorkspaces ??= []
     dropRetiredSettings(this.state)
+    if (migrateState(this.state)) this.save()
   }
 
   save(): void {
@@ -193,16 +237,20 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
 
   // ---------------------------------------------------------------- definitions
 
+  /**
+   * The built-in `local` environment: a dsh-env-server child process on the harness host. It is
+   * an environment like any other (borrowable, mountable); a session that is not mounted runs on
+   * the host itself without it.
+   */
   builtinLocal(): EnvironmentDefinition {
     return {
       id: LOCAL_ID,
-      name: '本机',
+      name: '本机（独立进程）',
       kind: 'local',
       builtin: true,
       description: os.hostname(),
       config: {},
       borrowable: true,
-      exclusive: false,
     }
   }
 
@@ -224,7 +272,6 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
           description: d.serial,
           config: { serial: d.serial },
           borrowable: true,
-          exclusive: true,
         }
       })
   }
@@ -264,11 +311,22 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
     return rest
   }
 
+  /** Mode in which mounting occupies an environment. */
+  mountModeOf(def: EnvironmentDefinition): LeaseMode {
+    return def.mountMode ?? this.defaultMountMode
+  }
+
   /** Public view: secrets are replaced by a marker. */
   publicDef(def: EnvironmentDefinition): PublicDefinition {
     const config: EnvironmentConfig = { ...def.config }
     for (const k of SECRET_FIELDS) if (config[k]) config[k] = SECRET_MARKER
-    return { ...def, config, alias: aliasFor(def.id), exclusive: isExclusive(def) }
+    return {
+      ...def,
+      config,
+      alias: aliasFor(def.id),
+      headlessParallel: isHeadlessParallel(def),
+      effectiveMountMode: this.mountModeOf(def),
+    }
   }
 
   upsert(input: DefinitionInput): EnvironmentDefinition {
@@ -301,6 +359,10 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
       delete config['desktop']
     }
     if (config['port'] !== undefined) config['port'] = Number(config['port'])
+    const headlessParallel =
+      input.headlessParallel === undefined ? existing?.headlessParallel : input.headlessParallel === false ? false : undefined
+    const mountMode =
+      input.mountMode === undefined ? existing?.mountMode : isLeaseMode(input.mountMode) ? input.mountMode : undefined
     const def: EnvironmentDefinition = {
       id,
       name,
@@ -308,12 +370,16 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
       description: input.description ?? '',
       tags: Array.isArray(input.tags) ? input.tags.map(String) : [],
       borrowable: input.borrowable ?? true,
-      exclusive: input.exclusive ?? defaultExclusive(input.kind),
+      ...(headlessParallel === false ? { headlessParallel } : {}),
+      ...(mountMode ? { mountMode } : {}),
       // Field values come from the UI form; they are interpreted per kind when opening.
       config,
     }
-    if (existing) Object.assign(existing, def)
-    else this.state.environments.push(def)
+    if (existing) {
+      delete existing.headlessParallel
+      delete existing.mountMode
+      Object.assign(existing, def)
+    } else this.state.environments.push(def)
     this.save()
     return def
   }
@@ -416,58 +482,134 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
   }
 
   // ---------------------------------------------------------------- leases
+  //
+  // Admission rules (see README "借用"):
+  //
+  // | environment             | new headless lease        | new GUI lease / upgrade to GUI           |
+  // | ----------------------- | ------------------------- | ---------------------------------------- |
+  // | headlessParallel (dflt) | always admitted           | waits while another lease holds the GUI  |
+  // | exclusive (false)       | waits while any lease is held (either mode); upgrades of the only lease are immediate |
+  //
+  // Waiters are served strictly in FIFO order per environment. A request admitted while its
+  // connection is still opening counts as a holder (a claim), so nobody slips in meanwhile.
 
   leasesOf(envId: string): Lease[] {
     return [...this.leases.values()].filter(l => l.envId === envId)
   }
 
+  /** Leases and admitted claims of an environment, except `except`. */
+  private holdersOf(envId: string, except?: Lease): { mode: LeaseMode; owner: LeaseOwner | undefined }[] {
+    return [...this.leasesOf(envId).filter(l => l !== except), ...(this.claims.get(envId) ?? [])]
+  }
+
+  /** Whether a request fits next to the current holders (ignoring the queue). */
+  private fits(def: EnvironmentDefinition, mode: LeaseMode, except?: Lease): boolean {
+    const others = this.holdersOf(def.id, except)
+    if (!isHeadlessParallel(def)) return others.length === 0
+    return mode === 'headless' || !others.some(h => h.mode === 'gui')
+  }
+
+  /** Whether a waiter queued earlier competes for the same slot (FIFO fairness). */
+  private queuedAhead(def: EnvironmentDefinition, mode: LeaseMode, upgrade: boolean): boolean {
+    const list = this.waiters.get(def.id) ?? []
+    if (!isHeadlessParallel(def)) return !upgrade && list.length > 0
+    return mode === 'gui' && list.some(w => w.mode === 'gui')
+  }
+
+  private addClaim(envId: string, claim: Claim): void {
+    const set = this.claims.get(envId) ?? new Set<Claim>()
+    set.add(claim)
+    this.claims.set(envId, set)
+  }
+
+  private dropClaim(envId: string, claim: Claim): void {
+    const set = this.claims.get(envId)
+    set?.delete(claim)
+    if (set?.size === 0) this.claims.delete(envId)
+  }
+
+  /** Who stands in the way of a request, for error messages. */
+  private blocker(def: EnvironmentDefinition, mode: LeaseMode, except?: Lease): string {
+    const leases = this.leasesOf(def.id).filter(l => l !== except)
+    const h = (isHeadlessParallel(def) && mode === 'gui' ? leases.find(l => l.mode === 'gui') : undefined) ?? leases[0]
+    const who = h ? (h.owner?.title ?? h.owner?.sessionId ?? 'another session') : 'another session'
+    return h ? `${who} (${h.purpose}, ${h.mode})` : `${who} (queued)`
+  }
+
   status(def: EnvironmentDefinition): EnvironmentStatus {
     const leases = this.leasesOf(def.id)
+    const guiLease = leases.find(l => l.mode === 'gui')
     return {
-      busy: isExclusive(def) && leases.length > 0,
+      busy: !this.fits(def, 'headless') || this.queuedAhead(def, 'headless', false),
+      guiBusy: !this.fits(def, 'gui') || this.queuedAhead(def, 'gui', false),
+      headlessParallel: isHeadlessParallel(def),
       holders: leases.map(l => ({
         leaseId: l.id,
         sessionId: l.owner?.sessionId,
         title: l.owner?.title,
         purpose: l.purpose,
+        mode: l.mode,
+        guiUsers: [...l.guiUsers],
         since: l.createdAt,
       })),
-      queue: (this.waiters.get(def.id) ?? []).map(w => ({ sessionId: w.owner?.sessionId, since: w.since })),
+      gui: guiLease
+        ? {
+            leaseId: guiLease.id,
+            sessionId: guiLease.owner?.sessionId,
+            title: guiLease.owner?.title,
+            users: [...guiLease.guiUsers],
+          }
+        : undefined,
+      queue: (this.waiters.get(def.id) ?? []).map(w => ({
+        sessionId: w.owner?.sessionId,
+        since: w.since,
+        mode: w.mode,
+        upgrade: !!w.lease,
+      })),
     }
   }
 
   /**
-   * Acquire an environment. Exclusive environments admit one lease at a time and queue
-   * waiters in FIFO order; `wait: false` fails immediately when busy.
+   * Acquire an environment in a mode (default headless), following the admission rules above.
+   * `wait: false` fails with EBUSY instead of queueing.
    */
   async acquire(
     envId: string,
-    { owner, purpose = 'borrow', wait = false, timeoutMs = 10 * 60 * 1000, signal, alias }: AcquireOptions = {},
+    {
+      owner,
+      purpose = 'borrow',
+      mode = 'headless',
+      wait = false,
+      timeoutMs = 10 * 60 * 1000,
+      signal,
+      alias,
+    }: AcquireOptions = {},
   ): Promise<Lease> {
     const def = this.require(envId)
-    const sameOwner = (l: Lease) => !!l.owner?.sessionId && l.owner.sessionId === owner?.sessionId
-    if (isExclusive(def)) {
-      const held = this.leasesOf(def.id)
-      const h = held[0]
-      if (h) {
-        if (held.some(sameOwner) && purpose === 'borrow')
-          throw new EnvError('EEXIST', `this session already holds ${def.name}`)
-        if (!wait) {
-          throw new EnvError(
-            'EBUSY',
-            `${def.name} is in use by ${h.owner?.title ?? h.owner?.sessionId ?? 'another session'} (${h.purpose})`,
-          )
-        }
-        await this.enqueue(def, { owner, timeoutMs, signal })
+    const claim: Claim = { mode, owner }
+    if (!this.fits(def, mode) || this.queuedAhead(def, mode, false)) {
+      const sid = owner?.sessionId
+      if (!isHeadlessParallel(def) && sid && this.leasesOf(def.id).some(l => l.owner?.sessionId === sid))
+        throw new EnvError('EEXIST', `this session already holds ${def.name}`)
+      if (!wait) {
+        throw new EnvError(
+          'EBUSY',
+          mode === 'gui' && isHeadlessParallel(def)
+            ? `the GUI of ${def.name} is in use by ${this.blocker(def, mode)}`
+            : `${def.name} is in use by ${this.blocker(def, mode)}`,
+        )
       }
-    }
+      await this.enqueue(def, { owner, mode, timeoutMs, signal, admit: () => this.addClaim(def.id, claim) })
+    } else this.addClaim(def.id, claim)
     let env: Environment
     try {
       env = await this.open(def, { signal })
     } catch (e) {
+      this.dropClaim(def.id, claim)
       this.wakeNext(def.id)
       throw e
     }
+    this.dropClaim(def.id, claim)
     const lease = new Lease(this, {
       id: crypto.randomUUID(),
       def,
@@ -476,36 +618,88 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
       purpose,
       alias: alias ?? aliasFor(def.id),
     })
+    if (mode === 'gui') lease.guiUsers.add(guiUserOf(owner, lease))
     this.leases.set(lease.id, lease)
     this.emit('change')
     return lease
   }
 
+  /**
+   * Take (`on`) or give up the GUI of a lease for one user (a session id). Taking it is immediate
+   * when the lease already is a GUI lease or the GUI is free; otherwise it fails with EBUSY, or
+   * queues with `wait: true` like `acquire`. Giving it up never waits; the lease stays headless.
+   */
+  async setGui(lease: Lease, user: string, on: boolean, { wait = false, timeoutMs, signal }: WaitOptions = {}) {
+    if (!on) {
+      lease.setGuiUser(user, false)
+      return
+    }
+    if (lease.released) throw new EnvError('ECLOSED', `the lease of ${lease.def.name} was released`)
+    if (lease.guiUsers.has(user)) return
+    const def = lease.def
+    if (lease.mode === 'gui' || (this.fits(def, 'gui', lease) && !this.queuedAhead(def, 'gui', true))) {
+      lease.setGuiUser(user, true)
+      return
+    }
+    if (!wait) throw new EnvError('EBUSY', `the GUI of ${def.name} is in use by ${this.blocker(def, 'gui', lease)}`)
+    await this.enqueue(def, {
+      owner: { ...lease.owner, sessionId: user },
+      mode: 'gui',
+      lease,
+      timeoutMs: timeoutMs ?? 10 * 60 * 1000,
+      signal,
+      admit: () => lease.setGuiUser(user, true),
+    })
+  }
+
   private enqueue(
     def: EnvironmentDefinition,
-    { owner, timeoutMs, signal }: { owner: LeaseOwner | undefined; timeoutMs: number; signal: AbortSignal | undefined },
+    {
+      owner,
+      mode,
+      lease,
+      timeoutMs,
+      signal,
+      admit,
+    }: {
+      owner: LeaseOwner | undefined
+      mode: LeaseMode
+      lease?: Lease
+      timeoutMs: number
+      signal: AbortSignal | undefined
+      admit: () => void
+    },
   ): Promise<void> {
     return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(new EnvError('CANCELLED', 'stopped waiting'))
+        return
+      }
       const list = this.waiters.get(def.id) ?? []
       this.waiters.set(def.id, list)
-      const waiter: Waiter = { owner, since: Date.now() }
+      const waiter: Waiter = { owner, since: Date.now(), mode, lease }
       const cleanup = () => {
         clearTimeout(timer)
         signal?.removeEventListener('abort', onAbort)
         const i = list.indexOf(waiter)
         if (i >= 0) list.splice(i, 1)
+        if (list.length === 0 && this.waiters.get(def.id) === list) this.waiters.delete(def.id)
         this.emit('change')
       }
-      const onAbort = () => {
+      waiter.cancel = (error: Error) => {
         cleanup()
-        reject(new EnvError('CANCELLED', 'stopped waiting'))
+        reject(error)
+        // A waiter that left the front may unblock the ones behind it.
+        this.wakeNext(def.id)
       }
-      const timer = setTimeout(() => {
-        cleanup()
-        reject(new EnvError('ETIMEDOUT', `timed out waiting for ${def.name}`))
-      }, timeoutMs)
+      const onAbort = () => waiter.cancel?.(new EnvError('CANCELLED', 'stopped waiting'))
+      const timer = setTimeout(
+        () => waiter.cancel?.(new EnvError('ETIMEDOUT', `timed out waiting for ${def.name}`)),
+        timeoutMs,
+      )
       waiter.wake = () => {
         cleanup()
+        admit()
         resolve()
       }
       signal?.addEventListener('abort', onAbort, { once: true })
@@ -514,12 +708,19 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
     })
   }
 
+  /** Admit waiters from the front of the queue while they fit. */
   private wakeNext(envId: string): void {
-    const first = this.waiters.get(envId)?.[0]
     const def = this.get(envId)
-    if (!first || !def) return
-    if (this.status(def).busy) return
-    first.wake?.()
+    const list = this.waiters.get(envId)
+    if (!def || !list) return
+    for (let first = list[0]; first; first = list[0]) {
+      if (first.lease?.released) {
+        first.cancel?.(new EnvError('ECLOSED', `the lease of ${def.name} was released`))
+        continue
+      }
+      if (!this.fits(def, first.mode, first.lease)) return
+      first.wake?.()
+    }
   }
 
   forgetLease(lease: Lease): void {
@@ -529,6 +730,11 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
   onLeaseReleased(lease: Lease): void {
     this.emit('change')
     this.wakeNext(lease.envId)
+  }
+
+  onLeaseModeChanged(lease: Lease): void {
+    this.emit('change')
+    if (lease.mode === 'headless') this.wakeNext(lease.envId)
   }
 
   async releaseAll(predicate: (lease: Lease) => boolean = () => true): Promise<void> {
@@ -705,7 +911,8 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
   async dispose(): Promise<void> {
     this.disposed = true
     this.flush()
-    for (const list of this.waiters.values()) for (const w of [...list]) w.wake?.()
+    for (const list of [...this.waiters.values()])
+      for (const w of [...list]) w.cancel?.(new EnvError('CANCELLED', 'the environments plugin is stopping'))
     await this.releaseAll()
     for (const entry of this.browseConnections.values()) {
       clearTimeout(entry.timer)
@@ -717,6 +924,27 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
     this.browseConnections.clear()
     await this.reverse.dispose()
   }
+}
+
+/** The GUI user a lease is created with: its owner's session. */
+function guiUserOf(owner: LeaseOwner | undefined, lease: Lease): string {
+  return owner?.sessionId ?? `lease:${lease.id}`
+}
+
+/**
+ * Bring loaded state to the current version. Version 2 replaced the `exclusive` flag of
+ * definitions by lease modes (`migrateDefinition`). Returns whether anything changed.
+ */
+export function migrateState(state: PluginState): boolean {
+  let changed = false
+  for (const def of state.environments) {
+    if (def && typeof def === 'object' && migrateDefinition(def as unknown as Record<string, unknown>)) changed = true
+  }
+  if (state.version !== STATE_VERSION) {
+    state.version = STATE_VERSION
+    changed = true
+  }
+  return changed
 }
 
 /**

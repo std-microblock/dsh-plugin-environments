@@ -13,12 +13,12 @@ import type { Environment } from '../env/environment.ts'
 import { probeSession, termwrapPayload } from '../env/winuser/session-mode.ts'
 import type { Borrowing } from '../borrowing/index.ts'
 import { reverseCommands, sanitizeReverseSettings } from '../env/server/reverse.ts'
-import { sessionStarted, type PluginContext } from '../host-api.ts'
+import { sessionIdOf, sessionStarted, type PluginContext } from '../host-api.ts'
 import { AvailabilityChecker } from '../manager/availability.ts'
 import type { DefinitionInput, EnvironmentDefinition } from '../manager/definitions.ts'
 import type { EnvironmentManager } from '../manager/manager.ts'
 import type { SessionMount, SessionSettings, WorkspaceSettings } from '../manager/state.ts'
-import type { Mounting } from '../mount/index.ts'
+import type { Mounting, WantedMount } from '../mount/index.ts'
 
 /** Public subset of an environment's Info. */
 export function describeInfo(info: Info | undefined) {
@@ -99,18 +99,35 @@ export function createActions(
     const record = agent ? mounting.mountOf(agent) : undefined
     const borrowable = manager.borrowableFor(sessionId, cwd)
     const held = agent
-      ? borrowing.heldOf(agent).map(e => ({ ...e.lease.describe(), name: e.lease.def.name, tools: e.tools.length }))
+      ? borrowing.heldOf(agent).map(e => ({
+          ...e.lease.describe(),
+          alias: e.alias,
+          name: e.lease.def.name,
+          tools: e.tools.length,
+          gui: e.gui,
+          attached: e.attached,
+        }))
       : []
     const started = !!agent && sessionStarted(agent)
-    const mount = manager.mountFor(sessionId, cwd)
+    const mount: WantedMount | undefined = agent ? mounting.wantedOf(agent) : manager.mountFor(sessionId, cwd)
     return {
       sessionId,
       live: !!agent,
       cwd,
-      mount: mount ? { envId: mount.envId, remoteRoot: mount.remoteRoot, source: mount.source } : undefined,
+      mount: mount
+        ? { envId: mount.envId, remoteRoot: mount.remoteRoot, source: mount.source, inherited: !!mount.parent }
+        : undefined,
       mountExplicitlyOff: settings.mount === false,
       mountActive: record
-        ? { envId: record.envId, remoteRoot: record.map.remoteRoot, since: record.startedAt }
+        ? {
+            envId: record.envId,
+            remoteRoot: record.map.remoteRoot,
+            since: record.startedAt,
+            /** Mode of the mount's lease; `gui` says whether this session holds that GUI. */
+            mode: record.lease.mode,
+            gui: agent ? record.lease.guiUsers.has(sessionIdOf(agent)) : false,
+            shared: !!record.parent,
+          }
         : undefined,
       mountError: settings.mountError,
       /** Set while the session cannot run because its mount is missing (the turn error it gets). */
@@ -134,6 +151,7 @@ export function createActions(
     }))
     return {
       platform: process.platform,
+      defaults: { mountMode: manager.defaultMountMode },
       environments: defs,
       discovered: { adb: manager.discovered.adb, adbError: manager.discovered.adbError },
       remoteWorkspaces: manager.state.remoteWorkspaces,

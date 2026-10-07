@@ -40,6 +40,22 @@ export interface EnvironmentConfig {
   desktop?: 'shared' | 'private' | 'session'
 }
 
+/**
+ * How a lease occupies an environment.
+ *
+ * - `headless`: files, commands, processes, tunnels and the tools that do not drive the screen
+ *   (e.g. `install_apk`, `app`, `logcat`).
+ * - `gui`: additionally the screen: `screenshot`, `input`, `ui`, `windows`, `device`. At most one
+ *   lease of an environment is a GUI lease at a time.
+ */
+export type LeaseMode = 'headless' | 'gui'
+
+export const LEASE_MODES: readonly LeaseMode[] = ['headless', 'gui']
+
+export function isLeaseMode(v: unknown): v is LeaseMode {
+  return v === 'headless' || v === 'gui'
+}
+
 export interface EnvironmentDefinition {
   id: string
   name: string
@@ -47,7 +63,13 @@ export interface EnvironmentDefinition {
   description?: string
   tags?: string[]
   borrowable?: boolean
-  exclusive?: boolean
+  /**
+   * Headless leases of different sessions may run at the same time (absent: true). `false` makes
+   * the environment exclusive: one lease of either mode at a time, the others queue.
+   */
+  headlessParallel?: boolean
+  /** Mode in which mounting occupies the environment (absent: the plugin's `mountMode`, default headless). */
+  mountMode?: LeaseMode
   /** The built-in local environment. */
   builtin?: boolean
   /** Found by adb discovery and not persisted yet. */
@@ -55,10 +77,12 @@ export interface EnvironmentDefinition {
   config: EnvironmentConfig
 }
 
-/** Definition as shown to the UI: secrets masked, alias and exclusivity resolved. */
+/** Definition as shown to the UI: secrets masked, alias and lease settings resolved. */
 export interface PublicDefinition extends EnvironmentDefinition {
   alias: string
-  exclusive: boolean
+  headlessParallel: boolean
+  /** The mount mode in effect (the definition's own, else the plugin default). */
+  effectiveMountMode: LeaseMode
 }
 
 /** Input accepted by `upsert` (from the UI; loosely typed on purpose). */
@@ -69,7 +93,10 @@ export interface DefinitionInput {
   description?: string
   tags?: unknown
   borrowable?: boolean
-  exclusive?: boolean
+  /** `undefined`: keep the saved value; `null`: back to the default (parallel). */
+  headlessParallel?: boolean | null
+  /** `undefined`: keep the saved value; `null`/`''`: back to the plugin default. */
+  mountMode?: string | null
   config?: Record<string, unknown>
 }
 
@@ -96,12 +123,32 @@ export function aliasFor(id: string): string {
   return a
 }
 
-export function defaultExclusive(kind: string): boolean {
-  return kind === 'adb' || kind === 'winuser'
+/** Whether headless leases of different sessions may coexist (see `LeaseMode`). */
+export function isHeadlessParallel(def: EnvironmentDefinition): boolean {
+  return def.headlessParallel !== false
 }
 
-export function isExclusive(def: EnvironmentDefinition): boolean {
-  return def.exclusive ?? defaultExclusive(def.kind)
+/**
+ * Kinds that were exclusive by default before lease modes existed (`exclusive` defaulted to true).
+ * Their exclusivity protected the screen, which GUI leases now protect on their own.
+ */
+const LEGACY_EXCLUSIVE_KINDS = ['adb', 'winuser']
+
+/**
+ * Migrate a persisted definition from the `exclusive` flag to `headlessParallel`. An `exclusive`
+ * equal to the old default of its kind carried no choice (the old GUI saved it on every save) and
+ * is dropped: adb and Windows-account environments become headless-parallel with an exclusive GUI.
+ * An `exclusive: true` the user set on a kind that was shared by default stays exclusive.
+ * Returns whether the record changed.
+ */
+export function migrateDefinition(record: Record<string, unknown>): boolean {
+  if (!('exclusive' in record)) return false
+  const exclusive = record['exclusive']
+  delete record['exclusive']
+  if (exclusive === true && !LEGACY_EXCLUSIVE_KINDS.includes(String(record['kind']))) {
+    record['headlessParallel'] = false
+  }
+  return true
 }
 
 export function isKind(kind: string): kind is DefinitionKind {

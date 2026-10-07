@@ -47,9 +47,10 @@ export function createLeaseToolContext(
   lease: Lease,
   workspaceOf: WorkspaceResolver,
   tools: ToolDefinition[],
+  aliasOverride?: string,
 ): LeaseToolContext {
   const env = lease.env
-  const alias = lease.alias
+  const alias = aliasOverride ?? lease.alias
   const cwd = env.info?.cwd
   return {
     ctx,

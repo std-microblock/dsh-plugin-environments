@@ -6,6 +6,7 @@ import { installBorrowing } from './borrowing/index.ts'
 import { loadDeps } from './deps.ts'
 import type { Logger, PluginContext } from './host-api.ts'
 import type { ReverseListenerSettings } from './env/server/reverse.ts'
+import type { LeaseMode } from './manager/definitions.ts'
 import { EnvironmentManager } from './manager/manager.ts'
 import { installMounting } from './mount/index.ts'
 
@@ -27,6 +28,12 @@ export interface Config {
    * changed in the GUI take precedence.
    */
   reverse?: ReverseListenerSettings
+  /**
+   * How mounts occupy their environment unless the environment sets its own `mountMode`:
+   * `headless` (default; files and shell only, others may hold the GUI) or `gui` (the mounted
+   * session also takes the GUI when it is free, with the screen tools).
+   */
+  mountMode?: LeaseMode
 }
 
 function dshHome(): string {
@@ -49,6 +56,7 @@ export async function apply(ctx: PluginContext, config: Config = {}): Promise<vo
     adb: config.adb || 'adb',
     logger,
     reverse: config.reverse,
+    mountMode: config.mountMode,
   })
   manager.load()
   void manager.startReverse().catch((e: unknown) => logger?.warn('environments: reverse listeners: %s', String(e)))
@@ -56,6 +64,10 @@ export async function apply(ctx: PluginContext, config: Config = {}): Promise<vo
 
   const titleOf = (sessionId: string) => sessionId.slice(0, 8)
   const mounting = installMounting(ctx, manager, deps)
-  const borrowing = installBorrowing(ctx, manager, deps, { mountOf: agent => mounting.mountOf(agent), titleOf })
+  const borrowing = installBorrowing(ctx, manager, deps, {
+    mountOf: agent => mounting.mountOf(agent),
+    mountEvents: mounting.events,
+    titleOf,
+  })
   installApi(ctx, manager, { mounting, borrowing, mountsDir })
 }

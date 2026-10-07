@@ -24,6 +24,10 @@ export interface Logger {
 export interface SessionHeader {
   id?: string
   cwd: string
+  /** The direct parent of a subagent child (or the source of a fork). */
+  parentSession?: string
+  /** `subagent` for a session created as a subagent child. */
+  origin?: string
 }
 
 /** The routed request header (model selection) of an agent session. */
@@ -188,6 +192,12 @@ export function agentOf(exec: { agent?: unknown }): Agent | undefined {
 /** Session id of an agent (header id, else the session object id). */
 export function sessionIdOf(agent: Agent): string {
   return agent.session.header.id ?? agent.session.id
+}
+
+/** Parent session id of a subagent child; undefined for top-level sessions and plain forks. */
+export function parentSessionOf(agent: Agent): string | undefined {
+  const h = agent.session.header
+  return h.origin === 'subagent' && h.parentSession ? h.parentSession : undefined
 }
 
 /** Whether the agent's session has issued its first request (its mount can no longer change). */

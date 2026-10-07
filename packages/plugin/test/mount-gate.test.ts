@@ -90,8 +90,10 @@ const fakeDeps = {
 function fakeEnv(): Environment & EventEmitter {
   return Object.assign(new EventEmitter(), {
     name: 'Box',
+    kind: 'server',
     family: 'posix',
     info: { os: 'linux', cwd: '/srv/app', user: 'u', shell: '/bin/sh' },
+    hasCap: () => false,
     path: path.posix,
     resolvePath: (p: string, base?: string) => path.posix.resolve(base ?? '/', p),
     realpath: async (p: string) => p,

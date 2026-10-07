@@ -1,8 +1,13 @@
 // Mounting: route a session's own file/shell tools into an environment.
+//
+// Subagent children inherit their parent's mount: same environment and root, sharing the
+// parent's lease (no second lease, so exclusive environments cannot deadlock between parent and
+// child). The mount gate applies to them like to any mounted session.
+import { EventEmitter } from 'node:events'
 import { errorMessage } from '@dsh-environments/protocol'
 import type { HarnessDeps, HarnessScope } from '../deps.ts'
 import type { Environment } from '../env/environment.ts'
-import { sessionIdOf, type Agent, type PluginContext } from '../host-api.ts'
+import { parentSessionOf, sessionIdOf, type Agent, type PluginContext } from '../host-api.ts'
 import type { Lease } from '../manager/lease.ts'
 import type { EnvironmentManager } from '../manager/manager.ts'
 import type { EffectiveMount } from '../manager/state.ts'
@@ -55,13 +60,27 @@ function shellArgv(env: Environment, argv: readonly string[]): string[] {
 export interface MountRecord {
   env: Environment
   map: MountMap
+  /** The mount's lease; for a subagent, its parent's (shared, not released by this mount). */
   lease: Lease
   scope: HarnessScope
   envId: string
   source: EffectiveMount['source']
   startedAt: number
   requestedRoot?: string | undefined
+  /** The parent agent whose mount (and lease) this subagent shares. */
+  parent?: Agent | undefined
   uninstalling?: boolean
+}
+
+/** The mount an agent should have: its effective mount, inherited from its parent for subagents. */
+export interface WantedMount extends EffectiveMount {
+  /** Live parent agent whose mount is shared. */
+  parent?: Agent | undefined
+}
+
+export interface MountingEvents {
+  mounted: [Agent, MountRecord]
+  unmounted: [Agent, MountRecord]
 }
 
 export interface Mounting {
@@ -74,12 +93,17 @@ export interface Mounting {
   uninstall(agent: Agent): Promise<void>
   /** Why the agent must not run: it should be mounted but is not (see `gate.ts`). */
   blockReason(agent: Agent): string | undefined
+  /** The mount the agent should have (subagents: their parent's). */
+  wantedOf(agent: Agent): WantedMount | undefined
   liveMounts(): { agent: Agent; record: MountRecord }[]
+  readonly events: EventEmitter<MountingEvents>
 }
 
 /** Whether an installed mount satisfies the wanted one. */
-function satisfies(have: MountRecord, want: EffectiveMount): boolean {
+function satisfies(have: MountRecord, want: WantedMount, parentRecord: MountRecord | undefined): boolean {
+  if (want.parent) return have.parent === want.parent && !!parentRecord && have.lease === parentRecord.lease
   return (
+    !have.parent &&
     have.envId === want.envId &&
     (!want.remoteRoot || have.map.remoteRoot === want.remoteRoot || have.requestedRoot === want.remoteRoot)
   )
@@ -100,6 +124,7 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
 
   const mounts = new WeakMap<Agent, MountRecord>()
   const live = new Set<Agent>()
+  const events = new EventEmitter<MountingEvents>()
   const log = (format: string, ...args: unknown[]) => {
     try {
       ctx.logger('environments').info(format, ...args)
@@ -107,27 +132,64 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
       // no logger
     }
   }
-
-  async function install(agent: Agent, mount: EffectiveMount): Promise<MountRecord> {
-    const sessionId = sessionIdOf(agent)
-    const lease = await manager.acquire(mount.envId, {
-      owner: { sessionId, title: `mounted session ${sessionId.slice(0, 8)}` },
-      purpose: 'mount',
-      wait: false,
-    })
-    const env = lease.env
-    let remoteRoot = mount.remoteRoot || env.info?.cwd || ''
+  const agentById = (id: string): Agent | undefined => {
     try {
-      remoteRoot = await env.realpath(remoteRoot)
+      return ctx.get('agents')?.get(id)
     } catch {
-      // keep the requested spelling
+      return undefined
     }
-    const st = await env.stat(remoteRoot).catch(() => null)
-    if (!st || st.type !== 'dir') {
-      await lease.release('root missing')
-      throw new Error(`mount root ${remoteRoot} does not exist in ${env.name}`)
+  }
+
+  /**
+   * The mount an agent should have. A subagent child inherits its parent's (recursively): it
+   * shares the parent's live mount, or — when the parent is not running — follows the parent's
+   * settings with a lease of its own. Anything else follows its own settings.
+   */
+  function wantedOf(agent: Agent, depth = 0): WantedMount | undefined {
+    const parentId = parentSessionOf(agent)
+    if (parentId && depth < 16) {
+      const parent = agentById(parentId)
+      if (parent) {
+        const want = wantedOf(parent, depth + 1)
+        return want ? { ...want, parent } : undefined
+      }
+      return manager.mountFor(parentId, agent.session.header.cwd)
     }
-    const map = new MountMap({ env, hostRoot: mount.hostRoot ?? agent.session.header.cwd, remoteRoot })
+    return manager.mountFor(sessionIdOf(agent), agent.session.header.cwd)
+  }
+
+  async function install(agent: Agent, mount: WantedMount): Promise<MountRecord> {
+    const sessionId = sessionIdOf(agent)
+    const parentRecord = mount.parent ? mounts.get(mount.parent) : undefined
+    if (mount.parent && !parentRecord) {
+      throw new Error(`父会话的挂载不可用（${manager.get(mount.envId)?.name ?? mount.envId}）`)
+    }
+    const lease =
+      parentRecord?.lease ??
+      (await manager.acquire(mount.envId, {
+        owner: { sessionId, title: `mounted session ${sessionId.slice(0, 8)}` },
+        purpose: 'mount',
+        wait: false,
+      }))
+    const env = lease.env
+    let remoteRoot = parentRecord?.map.remoteRoot ?? (mount.remoteRoot || env.info?.cwd || '')
+    if (!parentRecord) {
+      try {
+        remoteRoot = await env.realpath(remoteRoot)
+      } catch {
+        // keep the requested spelling
+      }
+      const st = await env.stat(remoteRoot).catch(() => null)
+      if (!st || st.type !== 'dir') {
+        await lease.release('root missing')
+        throw new Error(`mount root ${remoteRoot} does not exist in ${env.name}`)
+      }
+    }
+    const map = new MountMap({
+      env,
+      hostRoot: parentRecord?.map.hostRoot ?? mount.hostRoot ?? agent.session.header.cwd,
+      remoteRoot,
+    })
     const scope = deps.createScope(ctx, agent)
     const realm = scope.ctx.isolate('fs').isolate('subprocess').isolate('shell').isolate('sandbox')
     const record: MountRecord = {
@@ -139,6 +201,7 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
       source: mount.source,
       startedAt: Date.now(),
       requestedRoot: mount.remoteRoot,
+      parent: parentRecord ? mount.parent : undefined,
     }
     mounts.set(agent, record)
     live.add(agent)
@@ -191,6 +254,12 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
           `This session is mounted on the environment "${env.name}" (${env.info?.os}${env.info?.arch ? `/${env.info.arch}` : ''}, user ${env.info?.user ?? '?'}).`,
           `Your file tools (read, write, edit, read_image, glob, grep) and your ${env.family === 'windows' ? 'pwsh' : 'bash'} tool operate inside that environment; the working directory is ${remoteRoot}.`,
           `Use paths in the environment's own form (${env.family === 'windows' ? 'e.g. C:\\path\\file' : 'e.g. /path/file'}).`,
+          ...(record.parent ? ['This mount is shared with the parent session that delegated to you.'] : []),
+          ...(env.hasCap('screenshot') || env.kind === 'adb'
+            ? [
+                `The mount is headless unless this session holds the environment's GUI: screen tools (${lease.alias}__screenshot, ${lease.alias}__input, ...) exist only then. Take the GUI with env_borrow { environment: "${mount.envId}", gui: true } and give it back with env_return; the mount itself stays.`,
+              ]
+            : []),
           'Use env_list / env_borrow to access additional devices.',
         ].join('\n'),
       })
@@ -221,6 +290,7 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
       await uninstall(agent)
       throw e
     }
+    events.emit('mounted', agent, record)
     return record
   }
 
@@ -230,17 +300,25 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
     record.uninstalling = true
     mounts.delete(agent)
     live.delete(agent)
+    events.emit('unmounted', agent, record)
     await record.scope.dispose().catch(() => {})
-    await record.lease.release('unmounted').catch(() => {})
+    // A subagent's mount shares its parent's lease, which stays with the parent.
+    if (!record.parent) await record.lease.release('unmounted').catch(() => {})
   }
 
   async function reconcile(agent: Agent): Promise<MountRecord | undefined> {
     const sessionId = sessionIdOf(agent)
-    const want = manager.mountFor(sessionId, agent.session.header.cwd)
-    const have = mounts.get(agent)
+    let want = wantedOf(agent)
     let record: MountRecord | undefined
     try {
-      if (have && want && satisfies(have, want)) record = have
+      // A shared mount needs the parent's mount in place first (it may be installing right now).
+      if (want?.parent) {
+        await ensure(want.parent).catch(() => undefined)
+        want = wantedOf(agent)
+      }
+      const have = mounts.get(agent)
+      const parentRecord = want?.parent ? mounts.get(want.parent) : undefined
+      if (have && want && satisfies(have, want, parentRecord)) record = have
       else {
         if (have) await uninstall(agent)
         record = want ? await install(agent, want) : undefined
@@ -271,10 +349,10 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
 
   function blockReason(agent: Agent): string | undefined {
     const sessionId = sessionIdOf(agent)
-    const want = manager.mountFor(sessionId, agent.session.header.cwd)
+    const want = wantedOf(agent)
     if (!want) return undefined
     const have = mounts.get(agent)
-    if (have && satisfies(have, want)) return undefined
+    if (have && satisfies(have, want, want.parent ? mounts.get(want.parent) : undefined)) return undefined
     const name = manager.get(want.envId)?.name ?? want.envId
     const error = manager.sessionSettings(sessionId).mountError
     if (error !== undefined) return `环境 ${name} 挂载失败：${error}`
@@ -296,6 +374,8 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
     ensure,
     uninstall,
     blockReason,
+    wantedOf,
+    events,
     liveMounts: () =>
       [...live].flatMap(agent => {
         const record = mounts.get(agent)

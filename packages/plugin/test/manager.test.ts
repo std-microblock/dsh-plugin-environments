@@ -72,7 +72,7 @@ test('exclusive leases queue in order', async () => {
   const dir = tmp()
   const m = new EnvironmentManager({ dataDir: dir, autoDiscoverAdb: false })
   m.load()
-  m.upsert({ id: 'phone', name: 'Phone', kind: 'server', exclusive: true, config: { host: '127.0.0.1', port: 1 } })
+  m.upsert({ id: 'phone', name: 'Phone', kind: 'server', headlessParallel: false, config: { host: '127.0.0.1', port: 1 } })
   m.open = def => {
     const e = new StubEnvironment({ id: def.id, name: def.name, kind: def.kind })
     e.info = {

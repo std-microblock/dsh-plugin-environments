@@ -142,6 +142,35 @@ export function addAndroidTools(t: LeaseToolContext, env: AdbEnvironment): void 
   })
 
   add({
+    name: 'logcat',
+    description: `Read recent Android log lines from ${name}.`,
+    parameters: {
+      lines: { type: 'integer', description: 'Number of recent lines (default 200).' },
+      filter: { type: 'string', description: 'Only keep lines containing this text (case-insensitive).' },
+      level: { type: 'string', enum: ['V', 'D', 'I', 'W', 'E', 'F'], description: 'Minimum priority (default V).' },
+      clear: { type: 'boolean', description: 'Clear the log buffer after reading.' },
+    },
+    output: TEXT_OUTPUT,
+    async execute(args, exec) {
+      const n = Math.min(5000, args.lines ?? 200)
+      const r = await env.exec(
+        { command: `logcat -d -v time -t ${args.filter ? 20000 : n} *:${args.level ?? 'V'}` },
+        { signal: exec.signal, timeoutMs: 60000 },
+      )
+      let lines = r.stdout.toString().split(/\r?\n/)
+      const filter = args.filter
+      if (filter) lines = lines.filter(l => l.toLowerCase().includes(filter.toLowerCase())).slice(-n)
+      if (args.clear) await env.exec({ command: 'logcat -c' }, { signal: exec.signal })
+      return clip(lines.join('\n')) || '(empty)'
+    },
+  })
+}
+
+/** Android tools that drive the device screen (GUI leases only). */
+export function addAndroidGuiTools(t: LeaseToolContext, env: AdbEnvironment): void {
+  const { label: name, add } = t
+
+  add({
     name: 'device',
     description: `Device state and controls of ${name}: info (model, Android version, screen size/density/rotation, foreground app, keyboard, screen on/locked, battery), wake, sleep, unlock (wake and dismiss a lock screen that has no PIN/pattern/password; reports when a secure lock needs the user), notifications / quick_settings (open the shade), collapse (close it). Navigation keys (back, home, recents) are ${t.alias}__input key actions.`,
     parameters: {
@@ -180,29 +209,6 @@ export function addAndroidTools(t: LeaseToolContext, env: AdbEnvironment): void 
             .join('\n')
         }
       }
-    },
-  })
-  add({
-    name: 'logcat',
-    description: `Read recent Android log lines from ${name}.`,
-    parameters: {
-      lines: { type: 'integer', description: 'Number of recent lines (default 200).' },
-      filter: { type: 'string', description: 'Only keep lines containing this text (case-insensitive).' },
-      level: { type: 'string', enum: ['V', 'D', 'I', 'W', 'E', 'F'], description: 'Minimum priority (default V).' },
-      clear: { type: 'boolean', description: 'Clear the log buffer after reading.' },
-    },
-    output: TEXT_OUTPUT,
-    async execute(args, exec) {
-      const n = Math.min(5000, args.lines ?? 200)
-      const r = await env.exec(
-        { command: `logcat -d -v time -t ${args.filter ? 20000 : n} *:${args.level ?? 'V'}` },
-        { signal: exec.signal, timeoutMs: 60000 },
-      )
-      let lines = r.stdout.toString().split(/\r?\n/)
-      const filter = args.filter
-      if (filter) lines = lines.filter(l => l.toLowerCase().includes(filter.toLowerCase())).slice(-n)
-      if (args.clear) await env.exec({ command: 'logcat -c' }, { signal: exec.signal })
-      return clip(lines.join('\n')) || '(empty)'
     },
   })
 }

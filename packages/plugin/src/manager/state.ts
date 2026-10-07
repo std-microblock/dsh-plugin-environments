@@ -13,6 +13,8 @@ export interface SessionMount {
 export interface HeldLease {
   envId: string
   alias: string
+  /** It was a GUI lease (re-acquired headless when the GUI is taken by then). */
+  gui?: boolean
 }
 
 export interface SessionSettings {
@@ -20,6 +22,11 @@ export interface SessionSettings {
   mount?: SessionMount | false
   /** Why the last mount attempt failed; the session cannot run turns until a retry succeeds. */
   mountError?: string
+  /**
+   * Whether the session holds the GUI of its mount (set when the model takes or returns it;
+   * absent: the environment's mount mode decides).
+   */
+  mountGui?: boolean
   borrowable?: string[]
   held?: HeldLease[]
   cwd?: string
@@ -62,8 +69,10 @@ export interface EffectiveMount {
   workspace?: string
 }
 
+export const STATE_VERSION = 2
+
 export function emptyState(): PluginState {
-  return { version: 1, environments: [], workspaces: {}, sessions: {}, remoteWorkspaces: [] }
+  return { version: STATE_VERSION, environments: [], workspaces: {}, sessions: {}, remoteWorkspaces: [] }
 }
 
 /** What a workspace is bound to (see `EnvironmentManager.workspaceBinding`). */
