@@ -3,10 +3,9 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import net from 'node:net'
-import os from 'node:os'
 import path from 'node:path'
 import { EnvError, errorCode, errorMessage } from '@dsh-environments/protocol'
-import { decodeHostText, runHost } from '../host-process.ts'
+import { decodeHostText } from '../host-process.ts'
 import { openServer, serverBinary } from '../server/connect.ts'
 import type { ServerEnvironment } from '../server/server-env.ts'
 import { runServerElevated, secretPath, type WinuserResult } from './accounts.ts'
@@ -24,8 +23,9 @@ export interface WinuserConfig {
 export type DesktopMode = 'shared' | 'private' | 'session'
 
 /**
- * Command the RDP session runs as its shell (`alternate shell`), so the environment server starts
- * inside the account's own session without registering anything in its profile.
+ * Command the session's shell runs: the environment server, started inside the account's own
+ * session. It is written to the account's `Winlogon\Shell` for the logon, so nothing has to be
+ * registered in the account's profile.
  */
 export function sessionShellCommand(binary: string, port: number, token: string, cwd?: string): string {
   const quote = (s: string) => (/\s/.test(s) ? `"${s}"` : s)
@@ -37,6 +37,13 @@ export function sessionShellCommand(binary: string, port: number, token: string,
     '--token',
     token,
     '--once',
+    // Windows gives a console application started as the session's shell a console window: without
+    // this it would sit on the account's desktop, in the way of everything the agent does.
+    '--no-console',
+    // Windows does not reliably end the session when its shell exits (it can sit at the logon
+    // screen instead). A session left behind is worse than useless: the next logon reconnects to it
+    // and the shell never runs again.
+    '--end-session',
     '--cwd',
     quote(cwd ?? '~'),
   ].join(' ')
@@ -229,10 +236,11 @@ const allowedAccounts = new Set<string>()
  * access to it and holds it open: a desktop object dies with its last handle, and every process
  * the account starts inherits it, so its windows never mix with the human's.
  *
- * With `desktop: 'session'` the account gets a session of its own instead: a generated `.rdp`
- * logs it in over loopback and starts the server as that session's shell. This is the only mode
- * where the account has a real pointer and real input, and it needs the TermWrap install first
- * (`session.status` reports whether it is available).
+ * With `desktop: 'session'` the account gets a session of its own instead: a headless RDP client
+ * logs it in over loopback, the account's own logon shell starts the server inside that session,
+ * and the client stays connected to keep it rendering. This is the only mode where the account has
+ * a real pointer and real input, and it needs the TermWrap install first (`session.status` reports
+ * whether it is available).
  */
 async function openAccountSession(
   base: { id: string; name?: string | undefined; signal?: AbortSignal | undefined },
@@ -247,7 +255,6 @@ async function openAccountSession(
   if (!status.ready) {
     throw new EnvError('UNSUPPORTED', `this machine cannot host a separate session yet: ${status.reasons.join('; ')}`)
   }
-  const rdp = path.join(os.tmpdir(), `dsh-session-${account}-${process.pid}-${Date.now()}.rdp`)
   const shell = sessionShellCommand(bin, port, token, cwd)
   // The logon right is per account and needs administrator approval. Ask once per account per
   // run: membership does not change, and a UAC prompt on every connect would be obnoxious.
@@ -255,64 +262,100 @@ async function openAccountSession(
     await runServerElevated(['session', 'allow', '--account', account])
     allowedAccounts.add(account)
   }
-  const written = await runHost(
-    serverBinary(),
-    [
-      'winuser',
-      'rdp-file',
-      '--name',
-      account,
-      '--secret-file',
-      secret,
-      '--out',
-      rdp,
-      '--shell',
-      shell,
-      '--width',
-      '1280',
-      '--height',
-      '800',
-    ],
-    { timeoutMs: 30000, signal: base.signal },
-  )
-  if (written.code !== 0) {
-    throw new EnvError('EIO', `could not write the session file: ${written.stderr.trim()}`)
-  }
-  // Keep the client running: a disconnected session stops rendering, so screenshots would go
-  // black. Killing it is what ends the session.
-  const client = spawn('mstsc.exe', [rdp], { stdio: 'ignore', windowsHide: true })
-  client.on('error', () => {})
-  let lastError: unknown
-  const deadline = Date.now() + 90000
-  while (Date.now() < deadline) {
-    if (base.signal?.aborted) break
-    try {
-      const env = await openServer({
-        id: base.id,
-        name: base.name,
-        kind: 'winuser',
-        host: '127.0.0.1',
-        port,
-        token,
-        signal: base.signal,
-        timeoutMs: 3000,
-        onClose: () => {
-          client.kill()
-        },
-      })
-      env.account = account
-      env.desktopName = `session:${account}`
-      return env
-    } catch (e) {
-      lastError = e
-      await new Promise(res => setTimeout(res, 500))
+  // The logon itself is a headless RDP client (see crates/dsh-env-server/src/rdp.rs): it points the
+  // account's own logon shell at `shell`, so our server starts inside the new session, and then
+  // holds the connection open. A disconnected session stops rendering, which would make every
+  // screenshot black, so killing this process is what ends the session.
+  const startClient = () => {
+    const state = {
+      child: spawn(
+        serverBinary(),
+        [
+          'winuser',
+          'session',
+          '--name',
+          account,
+          '--secret-file',
+          secret,
+          '--shell',
+          shell,
+          '--width',
+          '1280',
+          '--height',
+          '800',
+        ],
+        { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true },
+      ),
+      connected: false,
+      // The account is still logged on somewhere, so this logon would only rejoin that session.
+      busy: false,
+      log: '',
     }
+    state.child.stdout.setEncoding('utf8')
+    state.child.stdout.on('data', (chunk: string) => {
+      state.log += chunk
+      if (chunk.includes('"connected":true')) state.connected = true
+      if (chunk.includes('"code":"session-busy"')) state.busy = true
+    })
+    state.child.stderr.setEncoding('utf8')
+    state.child.stderr.on('data', (chunk: string) => {
+      state.log += chunk
+    })
+    state.child.on('error', e => {
+      state.log += errorMessage(e)
+    })
+    return state
   }
-  client.kill()
-  fs.rmSync(rdp, { force: true })
+
+  let session = startClient()
+  let lastError: unknown
+  // Two attempts: the second one runs after a stale session of the account has been ended.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const deadline = Date.now() + 90000
+    while (Date.now() < deadline) {
+      if (base.signal?.aborted) break
+      try {
+        const env = await openServer({
+          id: base.id,
+          name: base.name,
+          kind: 'winuser',
+          host: '127.0.0.1',
+          port,
+          token,
+          signal: base.signal,
+          timeoutMs: 3000,
+          onClose: () => {
+            session.child.kill()
+          },
+        })
+        env.account = account
+        env.desktopName = `session:${account}`
+        return env
+      } catch (e) {
+        lastError = e
+        // Waiting out the deadline only delays the report when the logon is already over: the client
+        // exits on a refusal (wrong password, no logon right) or on a busy account.
+        if ((session.child.exitCode !== null || session.busy) && !session.connected) break
+        await new Promise(res => setTimeout(res, 500))
+      }
+    }
+    if (session.busy && attempt === 0) {
+      session.child.kill()
+      // Ending another account's session needs administrator rights; this is rare (only after a
+      // connection that died without ending its session), so the prompt is acceptable here.
+      await runServerElevated(['session', 'logoff', '--account', account])
+      session = startClient()
+      continue
+    }
+    break
+  }
+  session.child.kill()
+  const detail = session.log.trim().split('\n').filter(Boolean).at(-1)
   throw new EnvError(
     'ETIMEDOUT',
-    `the session for ${account} did not come up${lastError === undefined ? '' : `: ${errorMessage(lastError)}`}`,
+    `the session for ${account} did not come up${lastError === undefined ? '' : `: ${errorMessage(lastError)}`}${
+      detail ? ` (${detail})` : ''
+    }`,
   )
 }
 export async function openWindowsAccount({

@@ -163,6 +163,13 @@ flags above.
 | linux arm64 | stable release |   1028 KiB |      2346 KiB |       437 KiB |          927 KiB |
 | linux arm64 | nightly dist   |    616 KiB |  **1513 KiB** |       276 KiB |      **669 KiB** |
 
+The **Windows** binary additionally carries the headless RDP client used by separate-session mode
+(`src/rdp.rs`: `ironrdp` + `ironrdp-blocking` + `rustls` + `sspi`, all Windows-only target
+dependencies, so no other target pays for them). With it, the stable release win x64 build measures
+**5235 KiB raw** instead of 2470 KiB — about +2.8 MB, roughly +2.0 MB once brotli is applied. The
+nightly-dist row above still needs re-measuring with that client in place, and the size budget has
+to account for it.
+
 For reference, master with the musl size flags would be 554 KiB (brotli 254 KiB)
 on linux x64 dist; without them the libraries build is 2210 KiB (brotli 765 KiB).
 

@@ -1,3 +1,7 @@
+.envx-page,
+.envx-dialog {
+  --envx-warn: var(--dsw-alias-state-warn-primary, #d98a0b);
+}
 .envx-page {
   display: flex;
   width: 100%;
@@ -230,9 +234,327 @@
   color: var(--dsw-alias-state-business-primary);
   background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent);
 }
+.envx-chip[data-tone='warn'] {
+  color: var(--envx-warn);
+  background: color-mix(in srgb, var(--envx-warn) 12%, transparent);
+}
+
+/* ---- separate-session mode: readiness panel (page) and inline setup (account dialog) ---- */
+.envx-sess {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 12px 14px 12px 16px;
+  border-radius: 14px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-1);
+}
+.envx-sess[data-variant='inline'] {
+  margin: 4px 0 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border-color: transparent;
+  background: color-mix(in srgb, var(--envx-warn) 8%, transparent);
+}
+.envx-sess[data-variant='inline'][data-phase='reboot'],
+.envx-sess[data-variant='inline'][data-phase='probing'] {
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 4%, transparent);
+}
+.envx-sess[data-variant='panel'][data-phase='install'],
+.envx-sess[data-variant='panel'][data-phase='enable'],
+.envx-sess[data-variant='panel'][data-phase='manual'] {
+  border-color: color-mix(in srgb, var(--envx-warn) 35%, var(--dsw-alias-border-l2));
+}
+.envx-sess-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.envx-sess-head .envx-tile {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+}
+.envx-sess-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.envx-sess-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.envx-sess-title strong {
+  font-size: 13.5px;
+  line-height: 20px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.envx-sess-line {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12.5px;
+  line-height: 19px;
+}
+.envx-sess-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.envx-sess-toggle {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 28px;
+  padding: 0 6px 0 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.envx-sess-toggle:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.envx-sess-toggle svg {
+  transition: transform 0.15s;
+}
+.envx-sess-toggle[aria-expanded='true'] svg {
+  transform: rotate(90deg);
+}
+.envx-sess-note {
+  margin: -4px 0 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 17px;
+}
+.envx-sess[data-variant='panel'] .envx-sess-note,
+.envx-sess[data-variant='panel'] > .envx-card-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px 6px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--envx-warn);
+  background: color-mix(in srgb, var(--envx-warn) 9%, transparent);
+}
+.envx-card-notice span {
+  flex: 1;
+  min-width: 0;
+}
+.envx-card-notice .envx-textbtn {
+  flex: none;
+}
+.envx-error-line {
+  padding-left: 46px;
+}
+.envx-sess-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 0.5px solid var(--dsw-alias-border-l1);
+}
+.envx-sess[data-variant='panel'] .envx-sess-body {
+  margin-left: 46px;
+}
+.envx-sess-purpose {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12.5px;
+  line-height: 19px;
+}
+.envx-sess-checks {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 6px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.envx-sess-checks li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+}
+.envx-sess-checks li span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.envx-sess-checks i {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  box-sizing: border-box;
+  border: 1.5px solid color-mix(in srgb, var(--envx-warn) 70%, transparent);
+}
+.envx-sess-checks li[data-ok] {
+  color: var(--dsw-alias-label-tertiary);
+}
+.envx-sess-checks li[data-ok] i {
+  border: none;
+  color: #fff;
+  background: var(--dsw-alias-state-success-primary);
+}
+.envx-sess-checks li[data-ok] svg {
+  stroke-width: 2.6;
+}
+.envx-sess-foot {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 17px;
+}
+.envx-sess-foot > span {
+  flex: 1;
+  min-width: 0;
+}
+.envx-sess-foot .envx-textbtn {
+  flex: none;
+}
+.envx-sess-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 18px;
+  padding: 0 7px 0 6px;
+  border-radius: 9px;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-layer-2);
+}
+.envx-sess-badge i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.envx-sess-badge[data-tone='ok'] {
+  color: var(--dsw-alias-state-success-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 11%, transparent);
+}
+.envx-sess-badge[data-tone='warn'] {
+  color: var(--envx-warn);
+  background: color-mix(in srgb, var(--envx-warn) 13%, transparent);
+}
+.envx-sess-badge[data-tone='info'] {
+  color: var(--dsw-alias-state-business-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 11%, transparent);
+}
+.envx-sess-badge[data-tone='error'] {
+  color: var(--dsw-alias-state-error-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent);
+}
+
+/* desktop mode picker in the Windows-account dialog */
+.envx-modes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.envx-mode {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px 12px 11px;
+  border-radius: 10px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  background: var(--dsw-alias-bg-base);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.12s,
+    background 0.12s,
+    box-shadow 0.12s;
+}
+.envx-mode:hover {
+  border-color: var(--dsw-alias-border-l4, var(--dsw-alias-border-l3));
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.envx-mode:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dsw-alias-state-business-primary) 22%, transparent);
+}
+.envx-mode[data-on] {
+  border-color: var(--dsw-alias-state-business-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 6%, var(--dsw-alias-bg-base));
+  box-shadow: inset 0 0 0 0.5px var(--dsw-alias-state-business-primary);
+}
+.envx-mode-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  height: 22px;
+  margin-bottom: 4px;
+  color: var(--dsw-alias-label-tertiary);
+}
+.envx-mode[data-on] .envx-mode-top {
+  color: var(--dsw-alias-state-business-primary);
+}
+.envx-mode strong {
+  font-size: 13px;
+  line-height: 19px;
+  font-weight: 600;
+}
+.envx-mode > span:last-child {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11.5px;
+  line-height: 16px;
+}
 .envx-chip code {
   font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: 11.5px;
+}
+.envx-card-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px 6px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--envx-warn);
+  background: color-mix(in srgb, var(--envx-warn) 9%, transparent);
+}
+.envx-card-notice span {
+  flex: 1;
+  min-width: 0;
+}
+.envx-card-notice .envx-textbtn {
+  flex: none;
 }
 .envx-error-line {
   color: var(--dsw-alias-state-error-primary);
@@ -242,13 +564,20 @@
 }
 .envx-card-foot {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   margin-top: auto;
   padding-top: 4px;
 }
-.envx-card-foot .envx-spacer {
-  flex: 1;
+/* The trailing icon actions wrap as one unit and stick to the right edge, so a narrow card
+   never strands a single icon (the delete button) on a line of its own. */
+.envx-card-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  margin-left: auto;
 }
 .envx-iconbtn {
   appearance: none;

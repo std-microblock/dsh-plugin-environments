@@ -44,6 +44,27 @@ pub fn run(cmd: SessionCmd) -> std::result::Result<Value, String> {
                 Err("Remote Desktop logon is only available on Windows hosts".into())
             }
         }
+        SessionCmd::Logoff { account } => {
+            #[cfg(windows)]
+            {
+                imp::logoff(&account)
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = account;
+                Err("Remote Desktop logon is only available on Windows hosts".into())
+            }
+        }
+        SessionCmd::Enable => {
+            #[cfg(windows)]
+            {
+                crate::termwrap::enable_host()
+            }
+            #[cfg(not(windows))]
+            {
+                Err("Remote Desktop hosting is only available on Windows hosts".into())
+            }
+        }
     }
 }
 
@@ -62,6 +83,9 @@ fn status() -> std::result::Result<Value, String> {
         "reasons": ["real sessions are only meaningful on Windows hosts"],
     }))
 }
+
+#[cfg(windows)]
+pub use imp::{end_current_session, sessions_of};
 
 #[cfg(windows)]
 mod imp {
@@ -249,7 +273,11 @@ mod imp {
         TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
     }
 
-    /// Local group `S-1-5-32-555`; Windows Home does not create it.
+    /// Whether a local group named "Remote Desktop Users" exists (the well-known S-1-5-32-555
+    /// alias on Pro/Server; on Home only once the install has created a same-named group).
+    ///
+    /// The lookup is a size query: it always "fails" with ERROR_INSUFFICIENT_BUFFER, and the
+    /// account exists exactly when the required SID length comes back non-zero.
     fn has_remote_desktop_users() -> bool {
         let w = wide("Remote Desktop Users");
         let mut sid_len = 0u32;
@@ -264,13 +292,42 @@ mod imp {
                 null_mut(),
                 &mut dom_len,
                 &mut kind,
-            ) != 0
-                && sid_len > 0
+            );
+        }
+        sid_len > 0
+    }
+
+    /// The account a session belongs to, or an empty string.
+    ///
+    /// `WTSQuerySessionInformationW` allocates the string and hands back the pointer: reading the
+    /// buffer that was passed in instead yields an empty name for every session.
+    fn session_user(id: u32) -> String {
+        let mut buffer: *mut u16 = null_mut();
+        let mut length = 0u32;
+        unsafe {
+            if WTSQuerySessionInformationW(
+                WTS_CURRENT_SERVER_HANDLE,
+                id,
+                WTSUserName,
+                &mut buffer,
+                &mut length,
+            ) == 0
+                || buffer.is_null()
+            {
+                return String::new();
+            }
+            let mut end = 0usize;
+            while *buffer.add(end) != 0 {
+                end += 1;
+            }
+            let name = String::from_utf16_lossy(std::slice::from_raw_parts(buffer, end));
+            WTSFreeMemory(buffer as *mut _);
+            name
         }
     }
 
-    #[allow(non_upper_case_globals)]
-    fn sessions() -> Vec<Value> {
+    /// Every session on this machine as `(id, station name, user name, raw state)`.
+    fn session_list() -> Vec<(u32, String, String, i32)> {
         let mut table: *mut WTS_SESSION_INFOW = null_mut();
         let mut count = 0u32;
         let mut out = Vec::new();
@@ -288,49 +345,85 @@ mod imp {
                     }
                     String::from_utf16_lossy(std::slice::from_raw_parts(s.pWinStationName, len))
                 };
-                let user = {
-                    let mut buf = [0u16; 256];
-                    let mut len = buf.len() as u32;
-                    if WTSQuerySessionInformationW(
-                        WTS_CURRENT_SERVER_HANDLE,
-                        s.SessionId,
-                        WTSUserName,
-                        &mut buf.as_mut_ptr() as *mut *mut u16,
-                        &mut len,
-                    ) != 0
-                    {
-                        let p = buf.as_ptr();
-                        let mut n = 0;
-                        while *p.add(n) != 0 {
-                            n += 1;
-                        }
-                        String::from_utf16_lossy(std::slice::from_raw_parts(p, n))
-                    } else {
-                        String::new()
-                    }
-                };
-                out.push(json!({
-                    "id": s.SessionId,
-                    "name": name,
-                    "user": user,
-                    "state": match s.State {
-                        WTSActive => "active",
-                        WTSConnected => "connected",
-                        WTSConnectQuery => "connect-query",
-                        WTSShadow => "shadow",
-                        WTSDisconnected => "disconnected",
-                        WTSIdle => "idle",
-                        WTSListen => "listen",
-                        WTSReset => "reset",
-                        WTSDown => "down",
-                        WTSInit => "init",
-                        _ => "unknown",
-                    },
-                }));
+                out.push((s.SessionId, name, session_user(s.SessionId), s.State));
             }
             WTSFreeMemory(table as *mut _);
         }
         out
+    }
+
+    /// Sessions that would swallow a logon for this account, ignoring the listener itself.
+    ///
+    /// A logged-on session of the account is what makes a later Remote Desktop logon useless: the
+    /// connection reconnects to that session instead of creating one, so the account's logon shell
+    /// never runs and the environment server inside it never starts.
+    pub fn sessions_of(account: &str) -> Vec<u32> {
+        session_list()
+            .into_iter()
+            .filter(|(_, station, user, _)| {
+                !station.eq_ignore_ascii_case("RDP-Tcp") && user.eq_ignore_ascii_case(account)
+            })
+            .map(|(id, _, _, _)| id)
+            .collect()
+    }
+
+    /// End every session of the account, so the next logon gets a fresh one.
+    pub fn logoff(account: &str) -> Result<Value, String> {
+        let ids = sessions_of(account);
+        let mut ended = Vec::new();
+        let mut denied = Vec::new();
+        for id in ids {
+            // Wait for the logoff to finish: a logon racing it would join a dying session.
+            if unsafe { WTSLogoffSession(WTS_CURRENT_SERVER_HANDLE, id, 1) } != 0 {
+                ended.push(id);
+            } else {
+                denied.push(id);
+            }
+        }
+        if !denied.is_empty() {
+            return Err(format!(
+                "could not end session(s) {denied:?} of {account}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(json!({"ok": true, "account": account, "ended": ended}))
+    }
+
+    /// End the session this process runs in (the logon shell calls this when the server exits, so a
+    /// finished environment does not leave a session behind for the next logon to reconnect to).
+    pub fn end_current_session() -> bool {
+        use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+        let mut id = 0u32;
+        if unsafe { ProcessIdToSessionId(std::process::id(), &mut id) } == 0 {
+            return false;
+        }
+        unsafe { WTSLogoffSession(WTS_CURRENT_SERVER_HANDLE, id, 0) != 0 }
+    }
+
+    fn state_name(state: i32) -> &'static str {
+        #[allow(non_upper_case_globals)]
+        match state {
+            WTSActive => "active",
+            WTSConnected => "connected",
+            WTSConnectQuery => "connect-query",
+            WTSShadow => "shadow",
+            WTSDisconnected => "disconnected",
+            WTSIdle => "idle",
+            WTSListen => "listen",
+            WTSReset => "reset",
+            WTSDown => "down",
+            WTSInit => "init",
+            _ => "unknown",
+        }
+    }
+
+    fn sessions() -> Vec<Value> {
+        session_list()
+            .into_iter()
+            .map(|(id, name, user, state)| {
+                json!({"id": id, "name": name, "user": user, "state": state_name(state)})
+            })
+            .collect()
     }
 
     pub fn status() -> Result<Value, String> {
@@ -354,29 +447,67 @@ mod imp {
             "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
             "EditionID",
         );
+        let install_type = reg_string(
+            "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+            "InstallationType",
+        );
         let version = file_version(&termsrv);
+
+        // A Server SKU hosts several sessions natively; every *client* SKU (Home, Pro,
+        // Enterprise, Education) allows only one at a time, so a second logon would disconnect
+        // the console user and the multi-session patch is required. Home has it worse still: it
+        // does not host Remote Desktop at all and ships without `rfxvmt.dll`.
+        let server = install_type
+            .as_deref()
+            .is_some_and(|t| t.eq_ignore_ascii_case("server"));
+        let home = edition
+            .as_deref()
+            .is_some_and(|e| e.to_ascii_lowercase().starts_with("core"));
+        let kind = if server {
+            "server"
+        } else if home {
+            "home"
+        } else {
+            "client"
+        };
+        let needs_termwrap = !server;
 
         let mut missing: Vec<&str> = Vec::new();
         let mut reasons: Vec<String> = Vec::new();
-        if plain_termsrv {
+        if plain_termsrv && needs_termwrap {
             missing.push("termwrap-missing");
-            reasons.push(
-                "the multi-session patch (TermWrap) is not installed: a client SKU only allows one session, so a second logon would disconnect the console user".into(),
-            );
+            reasons.push(if home {
+                "this Home SKU does not host Remote Desktop at all and allows only one session; TermWrap (multi-session patch, MIT) lifts both limits".into()
+            } else {
+                "this client SKU allows only one session at a time, so a second logon would disconnect the console user; TermWrap (multi-session patch, MIT) lifts that limit".into()
+            });
         }
         if deny {
             missing.push("rdp-disabled");
-            reasons.push("the Remote Desktop host is disabled (fDenyTSConnections=1)".into());
+            reasons.push(if home {
+                "the Remote Desktop host is disabled, and a Home SKU cannot enable it without the TermWrap patch (fDenyTSConnections=1)".into()
+            } else {
+                "the Remote Desktop host is disabled (fDenyTSConnections=1); it can simply be switched on here".into()
+            });
         }
-        if !rfxvmt_present {
+        // rfxvmt.dll is what a Home SKU lacks to bring the RDP listener up. Once the listener is
+        // actually listening it has done its job (or was not needed), so it only blocks while the
+        // listener is down; `system.rfxvmt` still reports the file itself.
+        if !rfxvmt_present && !listening {
             missing.push("rfxvmt-missing");
-            reasons.push(
-                "rfxvmt.dll is missing: Windows Home does not ship it and the listener stays [not listening] until TermWrap restores it".into(),
-            );
+            reasons.push(if home {
+                "rfxvmt.dll is missing: a Home SKU does not ship it and the listener stays [not listening] until TermWrap restores it".into()
+            } else {
+                "rfxvmt.dll is missing, so the listener will not come up".into()
+            });
         }
         if !group {
             missing.push("rd-users-group-missing");
-            reasons.push("the local group \"Remote Desktop Users\" does not exist".into());
+            reasons.push(if home {
+                "the local group \"Remote Desktop Users\" does not exist on a Home SKU; TermWrap's install recreates it".into()
+            } else {
+                "the local group \"Remote Desktop Users\" does not exist".into()
+            });
         }
         if service != "running" {
             missing.push("term-service-stopped");
@@ -390,12 +521,18 @@ mod imp {
         }
         let ready = missing.is_empty();
 
+        // `needsTermWrap` says whether this machine needs the patch at all: a Server SKU hosts
+        // several sessions natively, every client SKU does not.
         Ok(json!({
             "ok": true,
             "ready": ready,
             "missing": missing,
             "reasons": reasons,
             "edition": edition,
+            "editionKind": kind,
+            "server": server,
+            "home": home,
+            "needsTermWrap": needs_termwrap,
             "termsrv": {
                 "path": termsrv,
                 "exists": Path::new(&termsrv).is_file(),

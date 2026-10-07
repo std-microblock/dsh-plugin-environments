@@ -36,6 +36,11 @@ tokio = { version = "1", default-features = false, features = ["rt", "net", "io-
 [target."cfg(windows)".dependencies]
 # Screenshot encoding (sys.screenshot is Windows-only).
 png = { version = "0.18", default-features = false }
+# Headless RDP logon for separate-session mode (see src/rdp.rs); ironrdp-connector brings in sspi.
+ironrdp = { version = "0.17", default-features = false, features = ["connector", "session", "pdu", "graphics"] }
+ironrdp-blocking = "0.10"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+x509-cert = { version = "0.2", default-features = false }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Globalization",
@@ -49,7 +54,9 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Services",
   "Win32_System_StationsAndDesktops",
   "Win32_Security",
+  "Win32_Security_Authorization",
   "Win32_Security_Cryptography",
+  "Win32_Security_Authentication_Identity",
   "Win32_NetworkManagement_NetManagement",
   "Win32_Graphics_Gdi",
   "Win32_Graphics_Dwm",

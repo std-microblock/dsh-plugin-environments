@@ -3,7 +3,16 @@ import { useEffect, useState, type InputHTMLAttributes, type ReactNode } from 'r
 import { Button, Modal, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import { call, invalidate, messageOf } from './api.ts'
 import type { Translate } from './host-api.ts'
-import { IconCheck, IconCopy, IconSpinner, KindIcon } from './icons.tsx'
+import {
+  IconCheck,
+  IconCopy,
+  IconDesktopPrivate,
+  IconDesktopSession,
+  IconDesktopShared,
+  IconSpinner,
+  KindIcon,
+} from './icons.tsx'
+import { SessionBadge, SessionSetup, useSessionStatus, type SessionState } from './session-mode.tsx'
 import type {
   EnvConfigView,
   EnvKind,
@@ -93,7 +102,7 @@ export function EnvDialog({ open, environment, platform, defaultMountMode, onClo
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<{ ok: boolean; text: string } | undefined>(undefined)
   const [reveal, setReveal] = useState<ReverseRevealView | undefined>(undefined)
-
+  const session = useSessionStatus(kind === 'winuser' ? platform : undefined)
   useEffect(() => {
     if (!open) return
     setKind(environment?.kind)
@@ -159,7 +168,7 @@ export function EnvDialog({ open, environment, platform, defaultMountMode, onClo
         if (!headlessParallel || mountMode) {
           saved = (
             await call<{ environment: EnvView }>('save', {
-              environment: { ...saved, ...lease, config: { account: config.account } },
+              environment: { ...saved, ...lease, config: { account: config.account, desktop: config.desktop } },
             })
           ).environment
         }
@@ -171,6 +180,13 @@ export function EnvDialog({ open, environment, platform, defaultMountMode, onClo
         ).environment
       }
       invalidate()
+      // A separate session cannot come up before the machine is set up for it; a connection
+      // test would only fail, so the saved account is reported as waiting instead.
+      if (kind === 'winuser' && config.desktop === 'session' && !session.ready) {
+        setResult({ ok: true, text: t('desktop.saved.notReady') })
+        setTimeout(onClose, 1400)
+        return
+      }
       const test = await call<TestResultView>('test', { id: saved.id })
       invalidate()
       if (test.ok) {
@@ -218,7 +234,11 @@ export function EnvDialog({ open, environment, platform, defaultMountMode, onClo
         </Button>
       ) : (
         <Button variant="primary" disabled={!valid || busy} onClick={() => void save()}>
-          {busy ? t('action.testing') : kind === 'reverse' ? t('action.save') : t('action.saveAndTest')}
+          {busy
+            ? t('action.testing')
+            : kind === 'reverse' || (kind === 'winuser' && config.desktop === 'session' && !session.ready)
+              ? t('action.save')
+              : t('action.saveAndTest')}
         </Button>
       )}
     </div>
@@ -376,7 +396,10 @@ export function EnvDialog({ open, environment, platform, defaultMountMode, onClo
 
           {kind === 'winuser' && (
             <>
-              <Field label={t('field.account')} hint={t('field.account.hint')}>
+              <Field
+                label={t('field.account')}
+                hint={editing ? t('field.account.hint') : t('field.account.hint.create')}
+              >
                 <TextInput
                   value={config.account}
                   disabled={editing}
@@ -385,34 +408,13 @@ export function EnvDialog({ open, environment, platform, defaultMountMode, onClo
                   mono
                 />
               </Field>
-              {!editing && (
-                <div className="envx-help">
-                  <strong>{t('dialog.account.title')}</strong>
-                  {t('dialog.account.body')}
-                </div>
-              )}
-              <div className="envx-switch-row">
-                <div>
-                  <span>{t('field.privateDesktop')}</span>
-                  <small>{t('field.privateDesktop.hint')}</small>
-                </div>
-                <Switch
-                  checked={config.desktop === 'private'}
-                  onChange={v => setConfig(c => ({ ...c, desktop: v ? 'private' : 'shared' }))}
-                  label={t('field.privateDesktop')}
-                />
-              </div>
-              <div className="envx-switch-row">
-                <div>
-                  <span>{t('field.sessionDesktop')}</span>
-                  <small>{t('field.sessionDesktop.hint')}</small>
-                </div>
-                <Switch
-                  checked={config.desktop === 'session'}
-                  onChange={v => setConfig(c => ({ ...c, desktop: v ? 'session' : 'shared' }))}
-                  label={t('field.sessionDesktop')}
-                />
-              </div>
+              <DesktopModePicker
+                value={config.desktop ?? 'shared'}
+                onChange={desktop => setConfig(c => ({ ...c, desktop }))}
+                session={session}
+                platform={platform}
+                t={t}
+              />
             </>
           )}
 
@@ -467,6 +469,72 @@ export function EnvDialog({ open, environment, platform, defaultMountMode, onClo
         </div>
       )}
     </Modal>
+  )
+}
+
+type DesktopMode = 'shared' | 'private' | 'session'
+const DESKTOP_MODES: { mode: DesktopMode; Icon: (p: { size?: number }) => React.JSX.Element }[] = [
+  { mode: 'shared', Icon: IconDesktopShared },
+  { mode: 'private', Icon: IconDesktopPrivate },
+  { mode: 'session', Icon: IconDesktopSession },
+]
+
+interface DesktopModePickerProps {
+  value: DesktopMode
+  onChange: (mode: DesktopMode) => void
+  session: SessionState
+  platform: string | undefined
+  t: Translate
+}
+
+/** Where the account's windows live: three mutually exclusive choices, described in place. */
+function DesktopModePicker({ value, onChange, session, platform, t }: DesktopModePickerProps) {
+  const move = (e: React.KeyboardEvent, i: number) => {
+    const d =
+      e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0
+    if (!d) return
+    e.preventDefault()
+    const next = DESKTOP_MODES[(i + d + DESKTOP_MODES.length) % DESKTOP_MODES.length]
+    if (!next) return
+    onChange(next.mode)
+    const group = (e.currentTarget as HTMLElement).parentElement
+    ;(group?.querySelector(`[data-mode='${next.mode}']`) as HTMLElement | null)?.focus()
+  }
+  return (
+    <div className="envx-field">
+      <label id="envx-desktop-label">{t('field.desktop')}</label>
+      <div className="envx-modes" role="radiogroup" aria-labelledby="envx-desktop-label">
+        {DESKTOP_MODES.map(({ mode, Icon }, i) => {
+          const on = value === mode
+          return (
+            <button
+              key={mode}
+              type="button"
+              role="radio"
+              aria-checked={on}
+              tabIndex={on ? 0 : -1}
+              className="envx-mode"
+              data-mode={mode}
+              data-on={on ? '' : undefined}
+              onClick={() => onChange(mode)}
+              onKeyDown={e => move(e, i)}
+            >
+              <span className="envx-mode-top">
+                <Icon size={18} />
+                {mode === 'session' && session.status && session.phase !== 'ready' && (
+                  <SessionBadge t={t} state={session} />
+                )}
+              </span>
+              <strong>{t(`desktop.mode.${mode}`)}</strong>
+              <span>{t(`desktop.mode.${mode}.desc`)}</span>
+            </button>
+          )
+        })}
+      </div>
+      {value === 'session' && !session.ready && (
+        <SessionSetup t={t} platform={platform} variant="inline" footnote={t('desktop.mode.session.notReady')} />
+      )}
+    </div>
   )
 }
 

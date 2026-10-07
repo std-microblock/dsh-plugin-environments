@@ -36,8 +36,11 @@ mod imp {
     /// `SECURITY_DESCRIPTOR_REVISION` is not re-exported by windows-sys.
     const SECURITY_DESCRIPTOR_REVISION: i32 = 1;
 
-    /// `DESKTOP_ALL_ACCESS` from winuser.h (desktop rights plus the standard rights).
-    pub const DESKTOP_ALL_ACCESS: u32 = 0x001F_01FF;
+    /// `DESKTOP_ALL_ACCESS` from winuser.h: `STANDARD_RIGHTS_REQUIRED | desktop access rights`.
+    /// The high half is 0x000F, not 0x001F — asking for `SYNCHRONIZE`, which a desktop object does
+    /// not grant through its generic mapping, makes every `OpenDesktop`/`OpenInputDesktop` call fail
+    /// with access denied.
+    pub const DESKTOP_ALL_ACCESS: u32 = 0x000F_01FF;
     const UOI_NAME: i32 = 2;
 
     fn wide(s: &str) -> Vec<u16> {
@@ -298,8 +301,13 @@ mod imp {
         }
 
         /// Name of the desktop that currently receives input in this session.
+        ///
+        /// Only the name is needed, and `DESKTOP_READOBJECTS` is the least access that allows it:
+        /// the input desktop usually belongs to another security context (winlogon, another
+        /// account), so anything broader can be denied and would silently report "not the input
+        /// desktop" — which routes screen capture down the per-window path.
         pub fn input_name() -> Option<String> {
-            let h = unsafe { OpenInputDesktop(0, 0, DESKTOP_ALL_ACCESS) };
+            let h = unsafe { OpenInputDesktop(0, 0, DESKTOP_READOBJECTS) };
             if h.is_null() {
                 return None;
             }

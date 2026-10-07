@@ -8,6 +8,8 @@ mod ops;
 mod proc;
 mod protocol;
 mod pty;
+#[cfg(windows)]
+mod rdp;
 mod screen;
 mod search;
 mod secure;
@@ -92,7 +94,21 @@ fn main() {
             once,
             exit_idle,
             lifeline,
+            no_console,
+            end_session,
         } => {
+            // Separate-session mode starts this process as the account's logon shell, and Windows
+            // gives a console application a console: on Windows 11 that is a visible Windows
+            // Terminal window sitting on the account's desktop (and stealing focus). The server
+            // talks over TCP and needs no console, so detach from it.
+            #[cfg(windows)]
+            if no_console {
+                unsafe {
+                    windows_sys::Win32::System::Console::FreeConsole();
+                }
+            }
+            #[cfg(not(windows))]
+            let _ = no_console;
             // Read the secret before `run` starts the lifeline watcher: both read stdin, and if the
             // watcher wins the race it swallows the secret line, leaving this read blocked forever.
             let secret = match transport::read_secret(secret.token, secret.file, secret.stdin) {
@@ -109,7 +125,7 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            run(
+            let code = run(
                 lifeline,
                 Box::new(move |life| {
                     Box::pin(async move {
@@ -124,7 +140,18 @@ fn main() {
                         transport::serve(opts, life).await
                     })
                 }),
-            )
+            );
+            // Separate-session mode: this process is the account's logon shell, and Windows does not
+            // necessarily end the session when its shell exits (it can sit at the logon screen
+            // instead). A session left behind is worse than useless: the next logon reconnects to it
+            // and never runs the shell again.
+            #[cfg(windows)]
+            if end_session {
+                session_status::end_current_session();
+            }
+            #[cfg(not(windows))]
+            let _ = end_session;
+            code
         }
         Cmd::Connect {
             url,

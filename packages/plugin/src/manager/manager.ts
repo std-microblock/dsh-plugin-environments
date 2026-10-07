@@ -442,7 +442,7 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
           account: c.account ?? '',
           dataDir: this.dataDir,
           cwd: c.cwd,
-          desktop: c.desktop === 'private' ? 'private' : 'shared',
+          desktop: c.desktop === 'private' || c.desktop === 'session' ? c.desktop : 'shared',
         })
       default:
         throw new EnvError('EINVAL', `unknown environment kind ${String(def.kind)}`)

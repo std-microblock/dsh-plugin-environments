@@ -76,9 +76,22 @@ mod install {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::NetworkManagement::NetManagement::*;
     use windows_sys::Win32::System::Registry::*;
     use windows_sys::Win32::System::Services::*;
+
+    /// Listener key whose DACL decides who may open a Remote Desktop connection at all.
+    const RDP_TCP_KEY: &str =
+        "SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp";
+    /// Holds `DefaultSecurity`, the descriptor Windows copies to a listener that has none.
+    const WINSTATIONS_KEY: &str =
+        "SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations";
+    /// `WINSTATION_QUERY | WINSTATION_CONNECT | WINSTATION_LOGON`: the access the default
+    /// descriptor grants to the built-in "Remote Desktop Users" alias.
+    const WINSTATION_USER_ACCESS: u32 = 0x121;
+    /// `SECURITY_DESCRIPTOR_REVISION`, also not re-exported by windows-sys.
+    const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 
     fn wide(s: &str) -> Vec<u16> {
         OsStr::new(s)
@@ -118,9 +131,12 @@ mod install {
         let mut parm = 0u32;
         let rc =
             unsafe { NetLocalGroupAdd(null_mut(), 1, &mut info as *mut _ as *mut u8, &mut parm) };
+        // A local group that already exists is reported as ERROR_ALIAS_EXISTS (1379), not as
+        // NERR_GroupExists (which is for global groups); both mean there is nothing to do.
+        const ERROR_ALIAS_EXISTS: u32 = 1379;
         if rc == 0 {
             created = true;
-        } else if rc != NERR_GroupExists {
+        } else if rc != NERR_GroupExists && rc != ERROR_ALIAS_EXISTS {
             return Err(format!(
                 "NetLocalGroupAdd(Remote Desktop Users) failed with code {rc}"
             ));
@@ -128,9 +144,213 @@ mod install {
         Ok(created)
     }
 
-    /// Add an account to the local `Remote Desktop Users` group, which is what grants the
-    /// "log on through Remote Desktop Services" right the session logon needs.
+    /// SID bytes of a local account or group.
+    fn account_sid(name: &str) -> Result<Vec<u8>, String> {
+        use windows_sys::Win32::Security::{LookupAccountNameW, SID_NAME_USE};
+        let w = wide(name);
+        let mut sid_len = 0u32;
+        let mut dom_len = 0u32;
+        let mut kind: SID_NAME_USE = 0;
+        // Size query: fails with ERROR_INSUFFICIENT_BUFFER and fills in both lengths.
+        unsafe {
+            LookupAccountNameW(
+                null_mut(),
+                w.as_ptr(),
+                null_mut(),
+                &mut sid_len,
+                null_mut(),
+                &mut dom_len,
+                &mut kind,
+            );
+        }
+        if sid_len == 0 {
+            return Err(format!("the local account {name} does not exist"));
+        }
+        let mut sid = vec![0u8; sid_len as usize];
+        let mut dom = vec![0u16; dom_len.max(1) as usize];
+        let ok = unsafe {
+            LookupAccountNameW(
+                null_mut(),
+                w.as_ptr(),
+                sid.as_mut_ptr() as *mut _,
+                &mut sid_len,
+                dom.as_mut_ptr(),
+                &mut dom_len,
+                &mut kind,
+            )
+        };
+        if ok == 0 {
+            return Err(format!("looking up account {name} failed"));
+        }
+        Ok(sid)
+    }
+
+    /// The listener's security descriptor as the registry stores it (a self-relative
+    /// `SECURITY_DESCRIPTOR`). Windows keeps it on the `RDP-Tcp` key and falls back to the
+    /// `WinStations` default when that key has none.
+    fn listener_descriptor() -> Result<Vec<u8>, String> {
+        for (key, value) in [(RDP_TCP_KEY, "Security"), (WINSTATIONS_KEY, "DefaultSecurity")] {
+            if let Some(bytes) = reg_binary(key, value) {
+                return Ok(bytes);
+            }
+        }
+        Err("the Remote Desktop listener has no security descriptor to extend".into())
+    }
+
+    fn reg_binary(subkey: &str, value: &str) -> Option<Vec<u8>> {
+        let k = wide(subkey);
+        let v = wide(value);
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut len = buf.len() as u32;
+        let rc = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                k.as_ptr(),
+                v.as_ptr(),
+                RRF_RT_REG_BINARY,
+                null_mut(),
+                buf.as_mut_ptr() as *mut _,
+                &mut len,
+            )
+        };
+        if rc != 0 {
+            return None;
+        }
+        buf.truncate(len as usize);
+        Some(buf)
+    }
+
+    fn set_binary(subkey: &str, value: &str, data: &[u8]) -> Result<(), String> {
+        let k = wide(subkey);
+        let v = wide(value);
+        let rc = unsafe {
+            RegSetKeyValueW(
+                HKEY_LOCAL_MACHINE,
+                k.as_ptr(),
+                v.as_ptr(),
+                REG_BINARY,
+                data.as_ptr() as *const _,
+                data.len() as u32,
+            )
+        };
+        if rc != 0 {
+            return Err(format!("writing {subkey}\\{value} failed with code {rc}"));
+        }
+        Ok(())
+    }
+
+    /// Let an account through the listener's own security descriptor.
+    ///
+    /// Connecting is gated on the `RDP-Tcp` listener's DACL, which grants `WINSTATION_QUERY |
+    /// CONNECT | LOGON` to Administrators and to the *built-in* Remote Desktop Users alias
+    /// (S-1-5-32-555). Windows Home has no such alias — the group the install creates there is an
+    /// ordinary machine group, so membership does not satisfy that ACE — and until this runs the
+    /// server answers the logon with "access denied" during CredSSP, before any credentials are
+    /// even checked.
+    ///
+    /// The descriptor is rebuilt from an absolute copy of the stored one, so owner, group, audit
+    /// SACL and control flags survive: a descriptor carrying only a DACL is accepted by the
+    /// registry but makes `TermService` refuse every connection.
+    fn allow_listener(account: &str) -> Result<(), String> {
+        use windows_sys::Win32::Security::Authorization::{
+            EXPLICIT_ACCESS_W, GRANT_ACCESS, NO_MULTIPLE_TRUSTEE, SetEntriesInAclW, TRUSTEE_IS_SID,
+            TRUSTEE_IS_USER, TRUSTEE_W,
+        };
+        use windows_sys::Win32::Security::{
+            ACL, GetSecurityDescriptorDacl, MakeAbsoluteSD, MakeSelfRelativeSD,
+            PSECURITY_DESCRIPTOR, PSID, SetSecurityDescriptorDacl,
+        };
+        let mut sid = account_sid(account)?;
+        let mut stored = listener_descriptor()?;
+        unsafe {
+            // MakeAbsoluteSD sizes itself: the first call fills in the required lengths.
+            let (mut abs_len, mut dacl_len, mut sacl_len, mut owner_len, mut group_len) =
+                (0u32, 0u32, 0u32, 0u32, 0u32);
+            MakeAbsoluteSD(
+                stored.as_mut_ptr() as PSECURITY_DESCRIPTOR,
+                null_mut(),
+                &mut abs_len,
+                null_mut(),
+                &mut dacl_len,
+                null_mut(),
+                &mut sacl_len,
+                null_mut(),
+                &mut owner_len,
+                null_mut(),
+                &mut group_len,
+            );
+            let mut absolute = vec![0u8; abs_len as usize];
+            let mut dacl_buf = vec![0u8; dacl_len as usize];
+            let mut sacl_buf = vec![0u8; sacl_len as usize];
+            let mut owner_buf = vec![0u8; owner_len as usize];
+            let mut group_buf = vec![0u8; group_len as usize];
+            if MakeAbsoluteSD(
+                stored.as_mut_ptr() as PSECURITY_DESCRIPTOR,
+                absolute.as_mut_ptr() as PSECURITY_DESCRIPTOR,
+                &mut abs_len,
+                dacl_buf.as_mut_ptr() as *mut ACL,
+                &mut dacl_len,
+                sacl_buf.as_mut_ptr() as *mut ACL,
+                &mut sacl_len,
+                owner_buf.as_mut_ptr() as PSID,
+                &mut owner_len,
+                group_buf.as_mut_ptr() as PSID,
+                &mut group_len,
+            ) == 0
+            {
+                return Err("MakeAbsoluteSD failed".into());
+            }
+            let absolute = absolute.as_mut_ptr() as PSECURITY_DESCRIPTOR;
+            let mut dacl: *mut ACL = null_mut();
+            let mut present = 0;
+            let mut defaulted = 0;
+            if GetSecurityDescriptorDacl(absolute, &mut present, &mut dacl, &mut defaulted) == 0 {
+                return Err("GetSecurityDescriptorDacl failed".into());
+            }
+            let entry = EXPLICIT_ACCESS_W {
+                grfAccessPermissions: WINSTATION_USER_ACCESS,
+                grfAccessMode: GRANT_ACCESS,
+                grfInheritance: 0,
+                Trustee: TRUSTEE_W {
+                    pMultipleTrustee: null_mut(),
+                    MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+                    TrusteeForm: TRUSTEE_IS_SID,
+                    TrusteeType: TRUSTEE_IS_USER,
+                    ptstrName: sid.as_mut_ptr() as *mut u16,
+                },
+            };
+            let mut updated: *mut ACL = null_mut();
+            let rc = SetEntriesInAclW(1, &entry, dacl, &mut updated);
+            if rc != 0 {
+                return Err(format!("SetEntriesInAclW failed with code {rc}"));
+            }
+            let relative = if SetSecurityDescriptorDacl(absolute, 1, updated, defaulted) == 0 {
+                Vec::new()
+            } else {
+                let mut size = 0u32;
+                MakeSelfRelativeSD(absolute, null_mut(), &mut size);
+                let mut out = vec![0u8; size as usize];
+                if MakeSelfRelativeSD(absolute, out.as_mut_ptr() as PSECURITY_DESCRIPTOR, &mut size) == 0 {
+                    Vec::new()
+                } else {
+                    out.truncate(size as usize);
+                    out
+                }
+            };
+            LocalFree(updated as _);
+            if relative.is_empty() {
+                return Err("building the new listener descriptor failed".into());
+            }
+            set_binary(RDP_TCP_KEY, "Security", &relative)
+        }
+    }
+
+    /// Let an account log on through Remote Desktop: membership of `Remote Desktop Users` (for
+    /// Pro and Server, where that group carries the right), the right itself on the account (which
+    /// is what makes it work on Home) and access to the listener (again because Home has no
+    /// built-in Remote Desktop Users alias). Idempotent.
     pub fn allow_account(account: &str) -> Result<Value, String> {
+        let group_created = ensure_remote_desktop_users()?;
         let group = wide("Remote Desktop Users");
         let member = wide(account);
         let mut members = [LOCALGROUP_MEMBERS_INFO_3 {
@@ -148,10 +368,62 @@ mod install {
         // 1378 = ERROR_ALREADY_MEMBER: the account is set up already.
         if rc != 0 && rc != 1378 {
             return Err(format!(
-                "adding {account} to \"Remote Desktop Users\" failed with code {rc} (is the group installed? run `session install` first)"
+                "adding {account} to \"Remote Desktop Users\" failed with code {rc}"
             ));
         }
-        Ok(json!({ "ok": true, "account": account, "alreadyMember": rc == 1378 }))
+        let mut sid = account_sid(account)?;
+        grant_remote_logon(&mut sid)?;
+        allow_listener(account)?;
+        Ok(json!({
+            "ok": true,
+            "account": account,
+            "alreadyMember": rc == 1378,
+            "groupCreated": group_created,
+            "remoteLogonRight": true,
+            "listenerAccess": true,
+        }))
+    }
+
+    /// Grant `SeRemoteInteractiveLogonRight` to a SID.    ///
+    /// The default policy grants it to Administrators and to the *well-known* Remote Desktop
+    /// Users alias (S-1-5-32-555). Windows Home has no such alias, and the same-named group the
+    /// install creates there gets an ordinary machine SID that the policy does not mention — so
+    /// membership alone grants nothing on Home. Granting the right to the account itself works on
+    /// every SKU.
+    fn grant_remote_logon(sid: &mut [u8]) -> Result<(), String> {
+        use windows_sys::Win32::Security::Authentication::Identity::*;
+        let right = wide("SeRemoteInteractiveLogonRight");
+        let chars = (right.len() - 1) as u16;
+        let rights = LSA_UNICODE_STRING {
+            Length: chars * 2,
+            MaximumLength: chars * 2,
+            Buffer: right.as_ptr() as *mut u16,
+        };
+        let attrs: LSA_OBJECT_ATTRIBUTES = unsafe { std::mem::zeroed() };
+        let mut policy: LSA_HANDLE = 0 as LSA_HANDLE;
+        unsafe {
+            let st = LsaOpenPolicy(
+                null_mut(),
+                &attrs,
+                (POLICY_CREATE_ACCOUNT | POLICY_LOOKUP_NAMES) as u32,
+                &mut policy,
+            );
+            if st != 0 {
+                return Err(format!(
+                    "LsaOpenPolicy failed with code {} (needs administrator rights)",
+                    LsaNtStatusToWinError(st)
+                ));
+            }
+            let st = LsaAddAccountRights(policy, sid.as_mut_ptr() as *mut _, &rights, 1);
+            LsaClose(policy);
+            if st != 0 {
+                return Err(format!(
+                    "granting SeRemoteInteractiveLogonRight failed with code {}",
+                    LsaNtStatusToWinError(st)
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// `reg.exe import <file>` — exactly what TermWrap's README tells a human to do.
@@ -238,6 +510,31 @@ mod install {
                 target.display()
             ),
         }
+    }
+
+    /// Turn this machine into a Remote Desktop host **without** the patch.
+    ///
+    /// This is the right path for a Server SKU, which hosts several sessions natively: all it
+    /// needs is the listener switched on and the accounts allowed to log on. On a client SKU the
+    /// same steps are necessary but not sufficient (one session at a time), which is what the
+    /// TermWrap install adds.
+    pub fn enable_host() -> Result<Value, String> {
+        set_dword(
+            "SYSTEM\\CurrentControlSet\\Control\\Terminal Server",
+            "fDenyTSConnections",
+            0,
+        )?;
+        let group_created = ensure_remote_desktop_users()?;
+        let term = start_service("TermService")?;
+        // UmRdpService exists on client SKUs too; only report it when this machine has it.
+        let um = start_service("UmRdpService").ok();
+        Ok(json!({
+            "ok": true,
+            "rdUsersGroupCreated": group_created,
+            "services": { "TermService": term, "UmRdpService": um },
+            "rebootRequired": false,
+            "note": "the Remote Desktop host is enabled; on a non-Server SKU the multi-session patch (TermWrap) is still what lets a second session exist next to yours",
+        }))
     }
 
     /// Everything `session install` does after the payload is verified.
@@ -330,7 +627,7 @@ mod install {
 }
 
 #[cfg(windows)]
-pub use install::{allow_account, run};
+pub use install::{allow_account, enable_host, run};
 
 /// Arguments check shared by the CLI and tests.
 pub fn require_payload(dir: &str) -> Result<PathBuf, String> {

@@ -179,6 +179,37 @@ export function IconCheck({ size }: IconProps) {
   )
 }
 
+/** Shared desktop: a monitor with the human's pointer on it. */
+export function IconDesktopShared({ size }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="M3 5h18v11H3zM9 20h6M12 16v4" />
+      <path d="m10 8 4.5 1.6-2 .7-.7 2z" />
+    </Svg>
+  )
+}
+
+/** Private desktop: a second, hidden desktop behind the visible one. */
+export function IconDesktopPrivate({ size }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="M7 3h14v9" strokeDasharray="2 2.2" />
+      <path d="M3 7h14v9H3zM7 20h6M10 16v4" />
+    </Svg>
+  )
+}
+
+/** Separate session: a monitor with its own user. */
+export function IconDesktopSession({ size }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="M3 5h18v11H3zM9 20h6M12 16v4" />
+      <circle cx="12" cy="9" r="1.8" />
+      <path d="M9 13.4a3.2 3.2 0 0 1 6 0" />
+    </Svg>
+  )
+}
+
 export function IconMount({ size }: IconProps) {
   return (
     <Svg size={size}>

@@ -57,6 +57,14 @@ pub enum Cmd {
         /// Exit (killing every spawned process) when stdin closes
         #[arg(long)]
         lifeline: bool,
+        /// Detach from the console Windows allocated for this process (session shell: keeps a
+        /// console window off the account's desktop)
+        #[arg(long = "no-console")]
+        no_console: bool,
+        /// End this Windows session when the server exits (session shell: a finished environment
+        /// must not leave a logged-on session behind for the next logon to reconnect to)
+        #[arg(long = "end-session")]
+        end_session: bool,
     },
     /// Dial the plugin (reverse connection), reconnecting with backoff
     #[command(group(ArgGroup::new("secret-required").args(["token", "file", "stdin"]).required(true)))]
@@ -109,6 +117,13 @@ pub enum SessionCmd {
         #[arg(long)]
         account: String,
     },
+    /// End every session of an account (elevated), so the next logon creates a fresh one
+    Logoff {
+        #[arg(long)]
+        account: String,
+    },
+    /// Enable the Remote Desktop host without the patch (Server SKUs; elevated)
+    Enable,
 }
 
 #[derive(Subcommand, Debug, PartialEq)]
@@ -157,26 +172,25 @@ pub enum WinUserCmd {
         #[arg(long, value_name = "PATH")]
         path: String,
     },
-    /// Write a `.rdp` that logs the account into a session of its own and starts a program there
-    RdpFile {
+    /// Log the account on to a session of its own, headlessly, and hold it open
+    Session {
         #[arg(long)]
         name: String,
         #[arg(long = "secret-file", value_name = "PATH")]
         secret_file: String,
-        #[arg(long, value_name = "PATH")]
-        out: String,
-        /// Host the client connects to
+        /// Program the session runs instead of the desktop shell (normally our own `serve`)
+        #[arg(long)]
+        shell: Option<String>,
+        /// Host of the Remote Desktop listener
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
         #[arg(long, default_value_t = 3389)]
         port: u16,
+        /// Resolution of the account's own screen
         #[arg(long, default_value_t = 1280)]
-        width: u32,
+        width: u16,
         #[arg(long, default_value_t = 800)]
-        height: u32,
-        /// Program to start in the session
-        #[arg(long)]
-        shell: Option<String>,
+        height: u16,
     },
 }
 
@@ -206,6 +220,8 @@ mod tests {
                 once: false,
                 exit_idle: false,
                 lifeline: false,
+                no_console: false,
+                end_session: false,
             }
         );
         assert_eq!(
@@ -229,6 +245,8 @@ mod tests {
                 once: true,
                 exit_idle: false,
                 lifeline: false,
+                no_console: false,
+                end_session: false,
             }
         );
         assert!(p(&["serve", "--bogus"]).is_err());

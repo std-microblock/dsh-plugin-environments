@@ -5,7 +5,7 @@ import { call, invalidate, useAction, useEnvState } from './api.ts'
 import { RemoteBrowser } from './browser.tsx'
 import { DesktopView } from './desktop-view.tsx'
 import { ConfirmDialog, EnvDialog } from './env-dialog.tsx'
-import { SessionBanner } from './session-banner.tsx'
+import { useSessionStatus } from './session-mode.tsx'
 import type { Translate } from './host-api.ts'
 import {
   IconEdit,
@@ -81,9 +81,11 @@ interface EnvCardProps {
   onDelete: (env: EnvView) => void
   onWorkspace: (env: EnvView) => void
   onDesktop: (env: EnvView) => void
+  /** Whether separate-session mode works on this machine (undefined until probed). */
+  sessionReady?: boolean | undefined
 }
 
-function EnvCard({ env, t, onEdit, onDelete, onWorkspace, onDesktop }: EnvCardProps) {
+function EnvCard({ env, t, onEdit, onDelete, onWorkspace, onDesktop, sessionReady }: EnvCardProps) {
   const test = useAction()
   const status = statusOf(env, t)
   const sub = [t(`kind.${env.kind}`), target(env)].filter(Boolean).join(' · ')
@@ -134,6 +136,14 @@ function EnvCard({ env, t, onEdit, onDelete, onWorkspace, onDesktop }: EnvCardPr
         )}
         {env.builtin && <span className="envx-chip">{t('status.builtin')}</span>}
       </div>
+      {env.kind === 'winuser' && env.config.desktop === 'session' && sessionReady === false && (
+        <div className="envx-card-notice">
+          <span>{t('desktop.card.notReady')}</span>
+          <button type="button" className="envx-textbtn" onClick={() => onEdit(env)}>
+            {t('desktop.card.setup')}
+          </button>
+        </div>
+      )}
       {(test.error || (status.state === 'error' && status.detail)) && (
         <div className="envx-error-line">{test.error ?? status.detail}</div>
       )}
@@ -142,12 +152,6 @@ function EnvCard({ env, t, onEdit, onDelete, onWorkspace, onDesktop }: EnvCardPr
           <IconFolder size={14} />
           {t('action.newWorkspace')}
         </button>
-        {canView && (
-          <button type="button" className="envx-linkbtn" onClick={() => onDesktop(env)}>
-            <IconScreenshot size={14} />
-            {t('action.viewDesktop')}
-          </button>
-        )}
         <button
           type="button"
           className="envx-linkbtn"
@@ -162,49 +166,69 @@ function EnvCard({ env, t, onEdit, onDelete, onWorkspace, onDesktop }: EnvCardPr
           {test.busy ? <IconSpinner size={14} /> : <IconPlug size={14} />}
           {test.busy ? t('action.testing') : t('action.test')}
         </button>
-        <span className="envx-spacer" />
-        {env.discovered && (
-          <Tooltip label={t('action.addDevice')} side="top">
-            <button
-              type="button"
-              className="envx-iconbtn"
-              aria-label={t('action.addDevice')}
-              onClick={() =>
-                void call('save', {
-                  environment: {
-                    id: env.id,
-                    name: env.name,
-                    kind: 'adb',
-                    config: env.config,
-                    description: env.description,
-                  },
-                }).then(invalidate)
-              }
-            >
-              <IconPlus size={16} />
-            </button>
-          </Tooltip>
-        )}
-        {!env.builtin && !env.discovered && (
-          <>
-            <Tooltip label={t('action.edit')} side="top">
-              <button type="button" className="envx-iconbtn" aria-label={t('action.edit')} onClick={() => onEdit(env)}>
-                <IconEdit size={16} />
-              </button>
-            </Tooltip>
-            <Tooltip label={t('action.delete')} side="top">
+        {/* One wrapping unit: on a narrow card the whole icon cluster moves to a second line
+            (right-aligned) instead of stranding the last icon on a line of its own. */}
+        <span className="envx-card-tools">
+          {canView && (
+            <Tooltip label={t('action.viewDesktop')} side="top">
               <button
                 type="button"
                 className="envx-iconbtn"
-                data-danger=""
-                aria-label={t('action.delete')}
-                onClick={() => onDelete(env)}
+                aria-label={t('action.viewDesktop')}
+                onClick={() => onDesktop(env)}
               >
-                <IconTrash size={16} />
+                <IconScreenshot size={16} />
               </button>
             </Tooltip>
-          </>
-        )}
+          )}
+          {env.discovered && (
+            <Tooltip label={t('action.addDevice')} side="top">
+              <button
+                type="button"
+                className="envx-iconbtn"
+                aria-label={t('action.addDevice')}
+                onClick={() =>
+                  void call('save', {
+                    environment: {
+                      id: env.id,
+                      name: env.name,
+                      kind: 'adb',
+                      config: env.config,
+                      description: env.description,
+                    },
+                  }).then(invalidate)
+                }
+              >
+                <IconPlus size={16} />
+              </button>
+            </Tooltip>
+          )}
+          {!env.builtin && !env.discovered && (
+            <>
+              <Tooltip label={t('action.edit')} side="top">
+                <button
+                  type="button"
+                  className="envx-iconbtn"
+                  aria-label={t('action.edit')}
+                  onClick={() => onEdit(env)}
+                >
+                  <IconEdit size={16} />
+                </button>
+              </Tooltip>
+              <Tooltip label={t('action.delete')} side="top">
+                <button
+                  type="button"
+                  className="envx-iconbtn"
+                  data-danger=""
+                  aria-label={t('action.delete')}
+                  onClick={() => onDelete(env)}
+                >
+                  <IconTrash size={16} />
+                </button>
+              </Tooltip>
+            </>
+          )}
+        </span>
       </div>
     </article>
   )
@@ -227,6 +251,9 @@ export function EnvironmentsPage({ t, startSession }: { t: Translate; startSessi
   const byId: Record<string, EnvView | undefined> = Object.fromEntries(envs.map(e => [e.id, e]))
   const workspaces = data?.remoteWorkspaces ?? []
   const leases = data?.leases ?? []
+  // Only accounts that actually use a separate session care whether this machine can host one.
+  const usesSession = envs.some(e => e.kind === 'winuser' && e.config.desktop === 'session')
+  const session = useSessionStatus(usesSession ? data?.platform : undefined)
 
   const onCreated = (value: CreatedWorkspaceView, start: boolean) => {
     setDialog(undefined)
@@ -267,7 +294,6 @@ export function EnvironmentsPage({ t, startSession }: { t: Translate; startSessi
           </header>
 
           {error && <div className="envx-banner">{t('err.generic', { message: error })}</div>}
-          <SessionBanner t={t} platform={data?.platform} />
           {data?.discovered.adbError && envs.some(e => e.kind === 'adb') && (
             <div className="envx-banner" data-tone="info">
               {t('adb.error', { message: data.discovered.adbError })}
@@ -287,6 +313,7 @@ export function EnvironmentsPage({ t, startSession }: { t: Translate; startSessi
                   key={env.id}
                   env={env}
                   t={t}
+                  sessionReady={session.status ? session.ready : undefined}
                   onEdit={e => setDialog({ type: 'env', environment: e })}
                   onDelete={e => setDialog({ type: 'delete', environment: e })}
                   onWorkspace={e => setDialog({ type: 'browser', envId: e.id })}

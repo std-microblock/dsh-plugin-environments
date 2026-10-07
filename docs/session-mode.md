@@ -42,6 +42,43 @@ TermWrap 用「替换 Terminal Services 的服务 DLL + 在内存里打补丁」
 
 安装后回到「环境」页面重新探测即可看到状态变化。
 
+## 每个账户还要单独放行（`session allow`，需要管理员授权）
+
+连接能不能建立，看的是**监听器自己的安全描述符** `WinStations\RDP-Tcp\Security`：默认只把
+`WINSTATION_QUERY | CONNECT | LOGON`（`0x121`）给 Administrators 和**内置**的 Remote Desktop
+Users 别名（S-1-5-32-555）。家庭版根本没有这个别名——安装时创建的那个同名组是普通本机组
+（SID 是 `S-1-5-21-…`），加进去不满足那条 ACE。所以每个账户第一次连接前，`session allow`
+（管理员）会做三件事，缺一条都会被拒：
+
+1. 加入本机组 `Remote Desktop Users`（Pro/Server 上这条就够）；
+2. 把「允许通过远程桌面服务登录」(`SeRemoteInteractiveLogonRight`) **直接授予账户本身**
+   （家庭版靠这条；组本身不携带这项权限）；
+3. 在监听器描述符里**给该账户的 SID 加一条 `0x121` 的 ACE**。
+
+前两条缺失时，服务器在 CredSSP 的 early user auth 阶段直接回 `access denied`——密码根本没被
+校验，客户端只看到「access denied」，很容易误判成密码错。第 3 条若没写对，现象一样。
+
+**改这个描述符必须整体保留**：它是自相对的 `SECURITY_DESCRIPTOR`，带 owner（`O:SY`）、group
+和一条审计 SACL（`S:(AU;FA;CCWPCR;;;WD)`）。先 `MakeAbsoluteSD` 复制成绝对形式、只替换 DACL，
+再 `MakeSelfRelativeSD` 写回；只写一个 `D:(…)` 描述符虽然能被注册表接受，但 `TermService`
+会拒绝之后**所有**连接（包括本来就正常的账户），而且必须重启服务或重启机器才能恢复。
+
+## 会话的生命周期
+
+shell 命令带 `--no-console --end-session`：前者让 Windows 给控制台程序分配的那个窗口（Win11 上是
+Windows Terminal）不出现在账户桌面上，后者让**服务端退出时把这个会话也结束掉**。这第二个参数不
+是洁癖：Windows 不保证 shell 退出后会话就结束（它可能停在登录界面），而留下来的会话比没有更糟——
+下一次登录会**重连**到它，于是 shell 根本不会运行，环境服务端也就永远不会监听我们的端口，客户端
+只会看到「连不上」并重试到超时（表现就是「卡住」）。
+
+万一还是留下了这样的会话（例如连接中途被杀），`winuser session` 会先检查该账户是否已有会话，
+有就返回 `{"code":"session-busy","sessions":[…]}` 而不是硬登；插件收到后调用需要管理员权限的
+`session logoff --account <账户>` 结束它，再重试一次。手工排障时可以直接用这条命令，例如：
+
+```sh
+dsh-env-server session logoff --account dsh-test1   # 需要管理员
+```
+
 ## 打包与分发
 
 Payload **不加密**，连同 `LICENSE` 明文**打在插件包里**（`vendor/termwrap/`，
@@ -71,9 +108,23 @@ node scripts/stage-termwrap.ts --from <下载的发布包> --version <版本>
 - 第三方、未签名补丁，微软官方不支持；Defender 会把它识别为 `HackTool`。
 - Windows 更新可能让偏移失效，需要更新 TermWrap 后重装/重启。
 - 会话模式占内存（每会话约 100–200 MB），且必须保持会话「已连接」（断开的 RDP 会话不再
-  渲染，截图会黑）。插件用回环 `mstsc` 维持连接。
-- 家庭版还需要 `rfxvmt.dll`：Windows 家庭版不附带它，缺它时监听器会一直 `[not listening]`。
-  探测会把这一项列为 `rfxvmt-missing`。
+  渲染，截图会黑）。登录由 `dsh-env-server` 自带的**无界面 RDP 客户端**完成（IronRDP，见
+  `crates/dsh-env-server/src/rdp.rs`），它同时负责一直把连接挂着；`mstsc` 不再参与。
+- 会话里的 shell 不是 `explorer.exe`，而是环境服务端本身：登录前会把账户自己的
+  `HKCU\Software\Microsoft\Windows NT\CurrentVersion\Winlogon\Shell` 指向
+  `<服务端> serve … --no-console`。用注册表而不是 RDP 协议的 `alternate shell`，是因为当前
+  Windows 已经不再采信客户端那个字段（实测会话照样起 explorer）。`--no-console` 让 Windows
+  为控制台程序分配的窗口（Win11 上是 Windows Terminal）从这个会话的桌面上消失，否则它会一直
+  挡在智能体自己的窗口旁边。
+- 这个 shell 是**每个账户一份**的持久设置：账户下次登录（包括在控制台登录）跑的还是这条命令。
+  `winuser delete --purge-profile` 会连同配置文件一起删掉。
+- 家庭版可能缺 `rfxvmt.dll`：Windows 家庭版不附带它，有的机器缺它时监听器会一直
+  `[not listening]`。只有在 3389 没在监听时，探测才会把它列为 `rfxvmt-missing`；监听器已经起来
+  就说明不需要它（实测 26100 家庭版 + TermWrap 不需要）。
+- 家庭版上安装创建的 `Remote Desktop Users` 组只是同名的普通本机组（SID 是 `S-1-5-21-…`，不是
+  内置的 `S-1-5-32-555`），而「允许通过远程桌面服务登录」(`SeRemoteInteractiveLogonRight`)
+  在默认策略里只授予内置 SID，所以光加入这个组没有用。`session allow` 因此除了加组，还会把这项
+  权限直接授予账户本身，在所有版本上都成立。
 - 法律/授权：客户端 SKU 同时多会话不在 Windows 客户端授权范围内（RDS CAL 只适用于
   Windows Server 会话主机，救不了这一条）。是否使用请自行判断。
 

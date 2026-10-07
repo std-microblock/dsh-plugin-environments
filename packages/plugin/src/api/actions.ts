@@ -402,6 +402,17 @@ export function createActions(
       return { ...result, payloadVersion: payload.version }
     },
     /**
+     * Switch the Remote Desktop host on without installing anything. That is the whole job on a
+     * Server SKU, which hosts several sessions natively; on a client SKU it is not enough (one
+     * session at a time), which is why the UI offers the TermWrap install there instead.
+     */
+    async 'session.enable'() {
+      if (process.platform !== 'win32') {
+        throw new EnvError('UNSUPPORTED', 'Remote Desktop hosting is only available on Windows')
+      }
+      return await runServerElevated(['session', 'enable'])
+    },
+    /**
      * Let an account log on through Remote Desktop (elevated), which is what the session logon
      * needs. Idempotent: an account that is already a member is fine.
      */
@@ -449,13 +460,14 @@ export function createActions(
         dataDir: manager.dataDir,
         grantPaths: Array.isArray(grantPaths) ? grantPaths.map(String) : [],
       })
+      const mode = str(desktop)
       const def = manager.upsert({
         id: `win_${account.toLowerCase()}`,
         name: str(environmentName) || `Windows · ${account}`,
         kind: 'winuser',
         // The desktop choice made while creating the account must survive into the definition,
         // otherwise a fresh account would silently fall back to the human's desktop.
-        config: { account, desktop: str(desktop) === 'private' ? 'private' : 'shared' },
+        config: { account, desktop: mode === 'private' || mode === 'session' ? mode : 'shared' },
         description: `Local account ${account}`,
       })
       return { environment: manager.publicDef(def) }

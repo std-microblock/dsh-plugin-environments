@@ -120,149 +120,6 @@ mod imp {
         }
     }
 
-    /// Protect a secret the way the Remote Desktop client stores `password 51:b:` — DPAPI with
-    /// the description `psw`, no entropy. Only the user who wrote it (the harness user, which is
-    /// also the one running `mstsc`) can decrypt it.
-    fn dpapi_protect_rdp(secret: &[u8]) -> Result<Vec<u8>> {
-        unsafe {
-            let input = CRYPT_INTEGER_BLOB {
-                cbData: secret.len() as u32,
-                pbData: secret.as_ptr() as *mut u8,
-            };
-            let mut output = CRYPT_INTEGER_BLOB {
-                cbData: 0,
-                pbData: null_mut(),
-            };
-            let desc = wide("psw");
-            if CryptProtectData(
-                &input,
-                desc.as_ptr(),
-                null(),
-                null(),
-                null(),
-                CRYPTPROTECT_UI_FORBIDDEN,
-                &mut output,
-            ) == 0
-            {
-                bail!(
-                    "CryptProtectData failed: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
-            let v = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
-            LocalFree(output.pbData as _);
-            Ok(v)
-        }
-    }
-
-    /// Inputs of a generated `.rdp` file.
-    pub struct RdpOptions<'a> {
-        pub account: &'a str,
-        pub host: &'a str,
-        pub port: u16,
-        /// Resolution of the account's own screen.
-        pub width: u32,
-        pub height: u32,
-        /// Program started as the session's shell (**our** server), so nothing has to be
-        /// registered in the account's profile to get the environment running inside the session.
-        pub shell: Option<&'a str>,
-        /// `password 51:b:` value, already hex encoded.
-        pub password_hex: &'a str,
-    }
-
-    /// The `.rdp` text `mstsc` reads. Split out from the command so it can be tested without
-    /// touching DPAPI or the file system.
-    pub fn rdp_text(o: &RdpOptions<'_>) -> String {
-        let mut out = String::new();
-        let mut line = |s: String| {
-            out.push_str(&s);
-            out.push_str("\r\n");
-        };
-        line("screen mode id:i:1".into());
-        line("use multimon:i:0".into());
-        line(format!("desktopwidth:i:{}", o.width));
-        line(format!("desktopheight:i:{}", o.height));
-        line("session bpp:i:32".into());
-        line(format!("full address:s:{}:{}", o.host, o.port));
-        // A local account: `.\name` is unambiguous and matches how the launcher logs on.
-        line(format!("username:s:.\\{}", o.account));
-        line(format!("password 51:b:{}", o.password_hex));
-        line("prompt for credentials:i:0".into());
-        line("promptcredentialonce:i:0".into());
-        line("authentication level:i:2".into());
-        line("enablecredsspsupport:i:1".into());
-        line("negotiate security layer:i:1".into());
-        if let Some(shell) = o.shell {
-            line(format!("alternate shell:s:{shell}"));
-        }
-        // Nothing of the human's session is redirected: this is a private workspace.
-        line("audiomode:i:2".into());
-        line("redirectclipboard:i:0".into());
-        line("redirectprinters:i:0".into());
-        line("redirectcomports:i:0".into());
-        line("redirectsmartcards:i:0".into());
-        line("redirectwebauthn:i:0".into());
-        line("devicestoredirect:s:".into());
-        line("drivestoredirect:s:".into());
-        line("bitmapcachepersistenable:i:0".into());
-        line("disable wallpaper:i:1".into());
-        line("disable full window drag:i:1".into());
-        line("disable menu anims:i:1".into());
-        line("allow font smoothing:i:0".into());
-        line("allow desktop composition:i:0".into());
-        line("connection type:i:7".into());
-        line("networkautodetect:i:1".into());
-        line("bandwidthautodetect:i:1".into());
-        out
-    }
-
-    /// Write a `.rdp` that logs the account into a session of its own and starts `shell` in it.
-    #[allow(clippy::too_many_arguments)]
-    pub fn rdp_file(
-        name: &str,
-        secret_file: &str,
-        out_path: &str,
-        host: &str,
-        port: u16,
-        width: u32,
-        height: u32,
-        shell: Option<&str>,
-    ) -> Result<serde_json::Value> {
-        let encoded = std::fs::read_to_string(secret_file)
-            .with_context(|| format!("reading {secret_file}"))?;
-        let protected = BASE64
-            .decode(encoded.trim())
-            .with_context(|| format!("decoding {secret_file}"))?;
-        let password = String::from_utf8(dpapi_unprotect(&protected)?)
-            .context("the stored password is not UTF-8")?;
-        // mstsc expects the password as DPAPI-protected UTF-16LE, hex encoded.
-        let mut utf16: Vec<u8> = Vec::with_capacity(password.len() * 2);
-        for unit in password.encode_utf16() {
-            utf16.extend_from_slice(&unit.to_le_bytes());
-        }
-        let blob = dpapi_protect_rdp(&utf16)?;
-        let hex: String = blob.iter().map(|b| format!("{b:02x}")).collect();
-        let text = rdp_text(&RdpOptions {
-            account: name,
-            host,
-            port,
-            width,
-            height,
-            shell,
-            password_hex: &hex,
-        });
-        std::fs::write(out_path, text.as_bytes())
-            .with_context(|| format!("writing {out_path}"))?;
-        Ok(json!({
-            "ok": true,
-            "path": out_path,
-            "address": format!("{host}:{port}"),
-            "width": width,
-            "height": height,
-            "shell": shell,
-        }))
-    }
-
     /// String form (`S-1-5-21-...`) of the account's SID.
     pub fn account_sid(name: &str) -> Option<String> {
         use windows_sys::Win32::Security::*;
@@ -731,6 +588,100 @@ mod imp {
             Ok(json!({"ok": true, "pid": pid, "exited": exit}))
         }
     }
+    /// Point the account's own logon shell at `command`, so the next logon of that account runs it
+    /// instead of `explorer.exe`.
+    ///
+    /// The client-side `alternate shell` field of the RDP protocol is what this used to do, but
+    /// current Windows builds ignore it, so the session's shell has to come from the account's own
+    /// profile. Writing it needs the account's hive, which is what running `reg.exe` as the account
+    /// through the secondary logon service gives us; a fresh profile is created on the way.
+    pub fn set_shell(name: &str, secret_file: &str, command: &str) -> Result<serde_json::Value> {
+        let key = "HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon";
+        let program = [
+            "C:\\Windows\\System32\\reg.exe".to_string(),
+            "add".to_string(),
+            key.to_string(),
+            "/v".to_string(),
+            "Shell".to_string(),
+            "/t".to_string(),
+            "REG_SZ".to_string(),
+            "/d".to_string(),
+            command.to_string(),
+            "/f".to_string(),
+        ];
+        let result = launch(name, secret_file, None, None, &program, false)?;
+        // `reg.exe` finishes long before the launcher's early-exit window closes, which `launch`
+        // reports as a failure; exit code 0 means the value was written.
+        if result["ok"] == json!(false) {
+            if result["exitCode"] == json!(0) {
+                return Ok(json!({"ok": true, "shell": command}));
+            }
+            bail!(
+                "writing the account's logon shell failed: {}",
+                result["error"].as_str().unwrap_or("unknown error")
+            );
+        }
+        Ok(json!({"ok": true, "shell": command}))
+    }
+
+    /// Log the account on to a session of its own and hold it open until stdin closes.
+    ///
+    /// The session's shell runs [`crate::winuser::session`]'s `shell` command, which is normally our
+    /// own `serve`: that is what puts the environment server inside the account's session, where it
+    /// can capture the account's own desktop and inject input into it.
+    pub fn session(
+        name: &str,
+        secret_file: &str,
+        shell: Option<&str>,
+        host: &str,
+        port: u16,
+        width: u16,
+        height: u16,
+    ) -> Result<serde_json::Value> {
+        let encoded = std::fs::read_to_string(secret_file)
+            .with_context(|| format!("reading {secret_file}"))?;
+        let protected = BASE64
+            .decode(encoded.trim())
+            .with_context(|| format!("decoding {secret_file}"))?;
+        let password = String::from_utf8(dpapi_unprotect(&protected)?)
+            .context("the stored password is not UTF-8")?;
+        // Catch what the Environments page cannot: a definition whose account was never created (or
+        // was deleted) would otherwise fail deep inside the logon as a bare "access denied".
+        if account_sid(name).is_none() {
+            bail!(
+                "the local account `{name}` does not exist; create the account again from the Environments page"
+            );
+        }
+        // A session of this account that is still logged on would swallow the connection: Remote
+        // Desktop reconnects to it instead of creating a session, so this logon shell never runs and
+        // nothing ever listens on our port. The caller ends it (that needs administrator rights) and
+        // tries again.
+        let busy = crate::session_status::sessions_of(name);
+        if !busy.is_empty() {
+            return Ok(json!({
+                "ok": false,
+                "code": "session-busy",
+                "sessions": busy,
+                "error": format!(
+                    "the account {name} is already logged on in session {}; end it and try again",
+                    busy.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+                ),
+            }));
+        }
+        if let Some(shell) = shell {
+            set_shell(name, secret_file, shell)?;
+        }
+        crate::rdp::run(&crate::rdp::Options {
+            account: name.to_string(),
+            password,
+            domain: std::env::var("COMPUTERNAME").ok(),
+            host: host.to_string(),
+            port,
+            width,
+            height,
+            shell: shell.map(str::to_string),
+        })
+    }
 }
 
 pub use crate::cli::WinUserCmd;
@@ -761,24 +712,22 @@ pub fn run(cmd: WinUserCmd) -> anyhow::Result<serde_json::Value> {
                 supervise,
             ),
             WinUserCmd::Grant { name, path } => imp::grant(&name, &path),
-            WinUserCmd::RdpFile {
+            WinUserCmd::Session {
                 name,
                 secret_file,
-                out,
+                shell,
                 host,
                 port,
                 width,
                 height,
-                shell,
-            } => imp::rdp_file(
+            } => imp::session(
                 &name,
                 &secret_file,
-                &out,
+                shell.as_deref(),
                 &host,
                 port,
                 width,
                 height,
-                shell.as_deref(),
             ),
         }
     }
@@ -803,40 +752,6 @@ mod tests {
         assert!(imp::profile_path("S-1-5-21-1-2-3-4").is_none());
     }
 
-    #[test]
-    fn rdp_text_carries_the_session_settings() {
-        let text = imp::rdp_text(&imp::RdpOptions {
-            account: "dsh-user1",
-            host: "127.0.0.1",
-            port: 3389,
-            width: 1600,
-            height: 900,
-            shell: Some(
-                "C:\\ProgramData\\dsh-env\\dsh-env-server-abc.exe serve --listen 127.0.0.1:7000",
-            ),
-            password_hex: "deadbeef",
-        });
-        assert!(text.contains("full address:s:127.0.0.1:3389"), "{text}");
-        assert!(text.contains("desktopwidth:i:1600"));
-        assert!(text.contains("desktopheight:i:900"));
-        assert!(text.contains("username:s:.\\dsh-user1"));
-        assert!(text.contains("password 51:b:deadbeef"));
-        assert!(text.contains("prompt for credentials:i:0"));
-        assert!(text.contains("alternate shell:s:C:\\ProgramData\\dsh-env\\dsh-env-server-abc.exe serve --listen 127.0.0.1:7000"));
-        assert!(text.contains("redirectclipboard:i:0"));
-        assert!(text.ends_with("\r\n"), "mstsc wants CRLF lines");
-        // Without a shell the key must be absent: an empty value would start an empty session.
-        let plain = imp::rdp_text(&imp::RdpOptions {
-            account: "u",
-            host: "h",
-            port: 1,
-            width: 800,
-            height: 600,
-            shell: None,
-            password_hex: "00",
-        });
-        assert!(!plain.contains("alternate shell"));
-    }
 
     #[test]
     fn launch_reports_missing_secret() {
