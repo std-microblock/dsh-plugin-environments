@@ -155,16 +155,14 @@ on top of the numbers above (nightly dist, measured 2026-10-07):
 | linux arm64 | 544 KiB | 604 KiB |        242 KiB → 270 KiB |
 
 Of that, the RustCrypto crates are ~25 KiB of `.text`; the rest is the
-transport code and the extra tokio pieces it uses. `--cfg chacha20_force_soft
---cfg poly1305_force_soft` (dropping the SIMD backends) would save only ~13 KiB
-and is not used.
+transport code and the extra tokio pieces it uses.
 
 ## Why it is small (keep it that way)
 
 Dependencies are deliberately minimal: `tokio` (current-thread runtime, trimmed
 features), `serde_json` (no default features), `regex-lite`, `miniz_oxide`
 (PNG/zlib encoding for screenshots), `getrandom`, the RustCrypto
-`chacha20poly1305` / `hkdf` / `hmac` / `sha2` / `sha1` (secure channel and the
+`aes-gcm` / `hkdf` / `hmac` / `sha2` / `sha1` (secure channel and the
 WebSocket handshake), plus `libc` / `windows-sys`. WebSocket framing and the
 secure channel are in-tree (`src/ws.rs`, `src/secure.rs`); there is no TLS
 (`rustls`/`tungstenite` would cost several hundred KiB).

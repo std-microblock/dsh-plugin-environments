@@ -1,16 +1,16 @@
 // Secure channel for network transports (docs/protocol.md, "Secure channel"): a pre-shared
-// secret authenticates both peers and keys a ChaCha20-Poly1305 record layer.
+// secret authenticates both peers and keys an AES-256-GCM record layer.
 import crypto from 'node:crypto'
 import type { Transport } from './client.ts'
 import { EnvError } from './errors.ts'
 import { CallbackTransport } from './transports.ts'
 
 export const SECURE_MAGIC = Buffer.from('DSHS')
-export const SECURE_VERSION = 1
+export const SECURE_VERSION = 2
 /** Largest plaintext carried by one record. */
 export const MAX_RECORD = 64 * 1024
 const TAG = 16
-const INFO = Buffer.from('dsh-env secure v1\0')
+const INFO = Buffer.from('dsh-env secure v2\0')
 const HANDSHAKE_TIMEOUT_MS = 15000
 
 /** Per-connection key material. */
@@ -68,7 +68,7 @@ export class RecordCipher {
   seal(plain: Buffer): Buffer {
     const len = Buffer.alloc(4)
     len.writeUInt32BE(plain.length + TAG)
-    const c = crypto.createCipheriv('chacha20-poly1305', this.key, this.nonce(), { authTagLength: TAG })
+    const c = crypto.createCipheriv('aes-256-gcm', this.key, this.nonce(), { authTagLength: TAG })
     c.setAAD(len)
     return Buffer.concat([len, c.update(plain), c.final(), c.getAuthTag()])
   }
@@ -76,7 +76,7 @@ export class RecordCipher {
   /** Decrypt one record body (ciphertext || tag) whose length prefix is `len`. */
   open(len: Buffer, body: Buffer): Buffer {
     if (body.length < TAG) throw new EnvError('PROTOCOL', 'short record')
-    const d = crypto.createDecipheriv('chacha20-poly1305', this.key, this.nonce(), { authTagLength: TAG })
+    const d = crypto.createDecipheriv('aes-256-gcm', this.key, this.nonce(), { authTagLength: TAG })
     d.setAAD(len)
     d.setAuthTag(body.subarray(body.length - TAG))
     try {

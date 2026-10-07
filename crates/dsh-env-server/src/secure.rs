@@ -1,20 +1,20 @@
 //! Secure channel for network transports (docs/protocol.md, "Secure channel").
 //!
-//! A pre-shared secret authenticates both peers and keys a ChaCha20-Poly1305 record layer:
+//! A pre-shared secret authenticates both peers and keys an AES-256-GCM record layer:
 //!
 //! ```text
-//! initiator -> responder  "DSHS" | 0x01 | nonce_i[32] | idLen u8 | id[idLen]
-//! responder -> initiator  "DSHS" | 0x01 | nonce_r[32] | confirm_r[32]
+//! initiator -> responder  "DSHS" | 0x02 | nonce_i[32] | idLen u8 | id[idLen]
+//! responder -> initiator  "DSHS" | 0x02 | nonce_r[32] | confirm_r[32]
 //! initiator -> responder  confirm_i[32]
-//! okm = HKDF-SHA256(salt = nonce_i || nonce_r, ikm = secret, info = "dsh-env secure v1\0" || id, 128)
+//! okm = HKDF-SHA256(salt = nonce_i || nonce_r, ikm = secret, info = "dsh-env secure v2\0" || id, 128)
 //! k_i2r | k_r2i | m_i | m_r = okm
 //! th = SHA-256(initiator hello || responder hello without confirm_r)
 //! confirm_r = HMAC(m_r, "responder" || th); confirm_i = HMAC(m_i, "initiator" || th)
-//! record = u32 BE len | ChaCha20-Poly1305(k_dir, nonce = 0u32 || seq u64 BE, aad = len, plaintext)
+//! record = u32 BE len | AES-256-GCM(k_dir, nonce = 0u32 || seq u64 BE, aad = len, plaintext)
 //! ```
 
-use chacha20poly1305::aead::{AeadInPlace, KeyInit};
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, Tag};
+use aes_gcm::aead::{AeadInPlace, KeyInit};
+use aes_gcm::{Aes256Gcm, Key, Nonce, Tag};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -25,11 +25,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use crate::transport::{BoxRead, BoxWrite, Stream};
 
 pub const MAGIC: &[u8; 4] = b"DSHS";
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 /// Largest plaintext carried by one record.
 pub const MAX_RECORD: usize = 64 * 1024;
 const TAG: usize = 16;
-const INFO: &[u8] = b"dsh-env secure v1\0";
+const INFO: &[u8] = b"dsh-env secure v2\0";
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn invalid(msg: &str) -> io::Error {
@@ -91,14 +91,14 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// One direction of the record layer.
 pub struct Sealer {
-    aead: ChaCha20Poly1305,
+    aead: Aes256Gcm,
     seq: u64,
 }
 
 impl Sealer {
     pub fn new(key: &[u8; 32]) -> Self {
         Sealer {
-            aead: ChaCha20Poly1305::new(Key::from_slice(key)),
+            aead: Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key)),
             seq: 0,
         }
     }
@@ -322,24 +322,24 @@ mod tests {
         let hex = crate::util::hex;
         assert_eq!(
             hex(&k.i2r),
-            "e9b651db395dfa3b9061eda8c64ed31a4508a2aa0c328d847749631742c0df0a"
+            "b9d7290cad79b6b9d1cfa2db673a8adaee66b3366ff96e9ca64c3d1a693e044a"
         );
         assert_eq!(
             hex(&k.r2i),
-            "f67b710eeb64e796ca026c0839fc77a7740c1231b34e8129e3a9c32911b37f9d"
+            "d56c1a157c85ae0f3679b32df8db3233ef0d0e894365c1eea10d94c5b799c7c4"
         );
         assert_eq!(
             hex(&k.confirm_i),
-            "f9ffda2f74147fcb46dd2250f57fdc7853284c3ef757c1e1f1edbe5463834e74"
+            "b16be66f7d570ebc5d0875c4930fb3ad9e735298ac56fd1e492dadd689ae3596"
         );
         assert_eq!(
             hex(&k.confirm_r),
-            "739bee7e2693c60b817611d9f5fe680d58bc15697807c2837b0deb47ed36c21d"
+            "9fd143b0716db3993f1b83ef749979fd06e9dcae579ffec5ecec0031f5c459d5"
         );
         let rec = Sealer::new(&k.i2r).seal(b"hello").unwrap();
         assert_eq!(
             hex(&rec),
-            "00000015b4732d8e75c46eee411a4f1d1ba0bf09b40d323331"
+            "0000001578f3a78b066ffb0e4cc29814f0f071e3f5214dc0d5"
         );
     }
 

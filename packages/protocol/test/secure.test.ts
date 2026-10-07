@@ -43,12 +43,12 @@ const next = (t: Transport) => new Promise<Buffer>(resolve => t.on('data', resol
 
 test('key schedule matches the Rust known-answer vectors', () => {
   const k = deriveKeys('s3cret', Buffer.alloc(32, 1), Buffer.alloc(32, 2), 'env1', Buffer.from('transcript'))
-  assert.equal(k.i2r.toString('hex'), 'e9b651db395dfa3b9061eda8c64ed31a4508a2aa0c328d847749631742c0df0a')
-  assert.equal(k.r2i.toString('hex'), 'f67b710eeb64e796ca026c0839fc77a7740c1231b34e8129e3a9c32911b37f9d')
-  assert.equal(k.confirmI.toString('hex'), 'f9ffda2f74147fcb46dd2250f57fdc7853284c3ef757c1e1f1edbe5463834e74')
-  assert.equal(k.confirmR.toString('hex'), '739bee7e2693c60b817611d9f5fe680d58bc15697807c2837b0deb47ed36c21d')
+  assert.equal(k.i2r.toString('hex'), 'b9d7290cad79b6b9d1cfa2db673a8adaee66b3366ff96e9ca64c3d1a693e044a')
+  assert.equal(k.r2i.toString('hex'), 'd56c1a157c85ae0f3679b32df8db3233ef0d0e894365c1eea10d94c5b799c7c4')
+  assert.equal(k.confirmI.toString('hex'), 'b16be66f7d570ebc5d0875c4930fb3ad9e735298ac56fd1e492dadd689ae3596')
+  assert.equal(k.confirmR.toString('hex'), '9fd143b0716db3993f1b83ef749979fd06e9dcae579ffec5ecec0031f5c459d5')
   const rec = new RecordCipher(k.i2r).seal(Buffer.from('hello'))
-  assert.equal(rec.toString('hex'), '00000015b4732d8e75c46eee411a4f1d1ba0bf09b40d323331')
+  assert.equal(rec.toString('hex'), '0000001578f3a78b066ffb0e4cc29814f0f071e3f5214dc0d5')
 })
 
 test('records reject tampering and replay', () => {

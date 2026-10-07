@@ -49,7 +49,7 @@ dsh plugin --profile desktop add link:G:/dsh-plugin-remote-environments/packages
 
 ## 网络连接
 
-`server` 和 `reverse` 两种环境的连接可能经过公网，所以总是先建立一层安全通道：双方用每个环境独立的高熵共享密钥互相认证，再派生出两个方向各自的 ChaCha20-Poly1305 密钥加密全部流量。密钥本身从不在网络上传输，也不需要证书。细节见 [docs/protocol.md](docs/protocol.md#secure-channel)。
+`server` 和 `reverse` 两种环境的连接可能经过公网，所以总是先建立一层安全通道：双方用每个环境独立的高熵共享密钥互相认证，再派生出两个方向各自的 AES-256-GCM 密钥加密全部流量。密钥本身从不在网络上传输，也不需要证书。细节见 [docs/protocol.md](docs/protocol.md#secure-channel)。
 
 | 谁有公网地址 | 做法                                                                                                                                                                                 |
 | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -182,7 +182,7 @@ pnpm build:client              # packages/plugin/client.js
 pnpm run package               # 发布包 out/dsh-plugin-environments-<版本>.tgz + SHA256SUMS（本地缺少 macOS 二进制时加 --allow-missing）
 ```
 
-`crates/dsh-env-server` 是 Rust 写的 `dsh-env-server`，子命令有 `serve`、`connect`、`stdio`、`winuser create|delete|list|launch|grant`。WebSocket 和安全通道是手写的小实现，加密只依赖 RustCrypto 的 `chacha20poly1305`、`hkdf`、`hmac`、`sha2` / `sha1`。Linux 静态二进制通过 `rust-lld` 交叉编译，不需要额外的工具链。
+`crates/dsh-env-server` 是 Rust 写的 `dsh-env-server`，子命令有 `serve`、`connect`、`stdio`、`winuser create|delete|list|launch|grant`。WebSocket 和安全通道是手写的小实现，加密只依赖 RustCrypto 的 `aes-gcm`、`hkdf`、`hmac`、`sha2` / `sha1`。Linux 静态二进制通过 `rust-lld` 交叉编译，不需要额外的工具链。
 
 ## 已知限制
 

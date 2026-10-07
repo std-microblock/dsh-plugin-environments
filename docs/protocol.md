@@ -259,13 +259,13 @@ Either side may send `{"t":"ping","n":k}`; the peer answers `{"t":"pong","n":k}`
 Network transports run this layer directly on the TCP stream (or on the WebSocket byte stream). It gives mutual authentication and encryption from a pre-shared secret, without certificates. The **initiator** is whoever dialed (the plugin for `serve`, the server for `connect`), the **responder** is whoever listened. The secret is the UTF-8 bytes of the configured token (the plugin generates 256-bit random secrets, base64url); it is never sent.
 
 ```
-initiator → responder   "DSHS" | 0x01 | nonce_i[32] | idLen u8 | id[idLen]
-responder → initiator   "DSHS" | 0x01 | nonce_r[32] | confirm_r[32]
+initiator → responder   "DSHS" | 0x02 | nonce_i[32] | idLen u8 | id[idLen]
+responder → initiator   "DSHS" | 0x02 | nonce_r[32] | confirm_r[32]
 initiator → responder   confirm_i[32]
 
-okm  = HKDF-SHA256(salt = nonce_i ‖ nonce_r, ikm = secret, info = "dsh-env secure v1\0" ‖ id, L = 128)
+okm  = HKDF-SHA256(salt = nonce_i ‖ nonce_r, ikm = secret, info = "dsh-env secure v2\0" ‖ id, L = 128)
 k_i2r = okm[0..32]   k_r2i = okm[32..64]   m_i = okm[64..96]   m_r = okm[96..128]
-th   = SHA-256(initiator hello ‖ "DSHS" ‖ 0x01 ‖ nonce_r)
+th   = SHA-256(initiator hello ‖ "DSHS" ‖ 0x02 ‖ nonce_r)
 confirm_r = HMAC-SHA256(m_r, "responder" ‖ th)
 confirm_i = HMAC-SHA256(m_i, "initiator" ‖ th)
 ```
@@ -278,7 +278,7 @@ After the handshake every byte travels in records:
 
 ```
 u32 BE len            // ciphertext length incl. the 16-byte tag; 16 ≤ len ≤ 65536 + 16
-[len] ChaCha20-Poly1305(key = k_i2r or k_r2i, nonce = 0u32 ‖ seq u64 BE, aad = the 4 len bytes)
+[len] AES-256-GCM(key = k_i2r or k_r2i, nonce = 0u32 ‖ seq u64 BE, aad = the 4 len bytes)
 ```
 
 `seq` starts at 0 per direction and increments per record, so reordered, replayed, dropped or truncated records fail authentication; any failure closes the connection. Records carry an arbitrary slice of the frame byte stream (frames may span records). There is no forward secrecy: anyone holding the secret can decrypt recorded traffic, so rotate secrets that may have leaked.
