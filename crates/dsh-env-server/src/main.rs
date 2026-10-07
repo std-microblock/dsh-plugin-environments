@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 mod cli;
+mod desktop;
 mod fs_ops;
 mod input;
 mod net;
@@ -11,7 +12,9 @@ mod screen;
 mod search;
 mod secure;
 mod session;
+mod session_status;
 mod sys;
+mod termwrap;
 mod transport;
 mod util;
 mod walk;
@@ -72,6 +75,16 @@ fn main() {
             0
         }
         Cmd::Winuser(cmd) => match winuser::run(cmd) {
+            Ok(v) => {
+                println!("{v}");
+                0
+            }
+            Err(e) => {
+                println!("{}", serde_json::json!({"ok": false, "error": e}));
+                1
+            }
+        },
+        Cmd::Session(cmd) => match session_status::run(cmd) {
             Ok(v) => {
                 println!("{v}");
                 0

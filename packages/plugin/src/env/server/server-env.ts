@@ -54,6 +54,8 @@ export class ServerEnvironment extends Environment {
   ssh: SshClient | undefined = undefined
   /** Windows account the server runs as (winuser environments). */
   account: string | undefined = undefined
+  /** Private desktop the account's windows live on, when it has one (`WinSta0\<name>`). */
+  desktopName: string | undefined = undefined
   /** Process id of a server launched for this environment, when known. */
   serverPid: number | undefined = undefined
   /** How the connection is carried (diagnostics), e.g. `ssh-forward`, `ssh-stdio`. */

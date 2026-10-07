@@ -31,8 +31,16 @@ Commands:
              create --name <N> --secret-out <PATH>
              delete --name <N> [--purge-profile]
              list
-             launch --name <N> --secret-file <PATH> [--cwd <PATH>] [--supervise] -- <PROGRAM>...
+             launch --name <N> --secret-file <PATH> [--cwd <PATH>] [--supervise]
+                    [--desktop <NAME>] -- <PROGRAM>...
              grant  --name <N> --path <PATH>
+             rdp-file --name <N> --secret-file <PATH> --out <PATH> [--host H] [--port P]
+                      [--width W] [--height H] [--shell <CMD>]
+
+  session  Real-session mode (one Windows session per isolated account)
+             status               Report whether this machine can host one, and why not
+             install --payload <DIR> [--target <DIR>] [--no-exclusion]   Install TermWrap (elevated; needs a reboot)
+             allow --account <N>  Let the account log on through Remote Desktop (elevated)
 
 Options:
   -h, --help     Print help
@@ -54,6 +62,9 @@ pub enum WinUserCmd {
         name: String,
         secret_file: String,
         cwd: Option<String>,
+        /// Desktop to start the program on (`winsta0\<NAME>`), created if missing and kept
+        /// alive for as long as this launcher runs. Absent = the caller's own desktop.
+        desktop: Option<String>,
         program: Vec<String>,
         /// Stay alive, holding the process in a kill-on-close job, until it exits or
         /// stdin closes.
@@ -62,6 +73,17 @@ pub enum WinUserCmd {
     Grant {
         name: String,
         path: String,
+    },
+    /// Write a `.rdp` that logs the account into a session of its own and starts a program there.
+    RdpFile {
+        name: String,
+        secret_file: String,
+        out: String,
+        host: String,
+        port: u16,
+        width: u32,
+        height: u32,
+        shell: Option<String>,
     },
 }
 
@@ -89,6 +111,21 @@ impl SecretSource {
 }
 
 #[derive(Debug, PartialEq)]
+pub enum SessionCmd {
+    /// Report whether this machine can host a real separate session, and why not.
+    Status,
+    /// Install the bundled TermWrap payload and enable the Remote Desktop host (elevated).
+    Install {
+        payload: String,
+        target: Option<String>,
+        /// Add a Defender exclusion for the install directory first (default on).
+        exclusion: bool,
+    },
+    /// Let an account log on through Remote Desktop (elevated).
+    Allow { account: String },
+}
+
+#[derive(Debug, PartialEq)]
 pub enum Cmd {
     Serve {
         listen: String,
@@ -109,6 +146,7 @@ pub enum Cmd {
         cwd: Option<PathBuf>,
     },
     Winuser(WinUserCmd),
+    Session(SessionCmd),
     Help,
     Version,
 }
@@ -265,6 +303,44 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
                 cwd: o.get("cwd").map(PathBuf::from),
             })
         }
+        "session" => {
+            // Capability probe for the "one real Windows session per isolated account" mode.
+            let (action, rest) = match rest.first() {
+                Some(a) if !a.starts_with('-') => (Some(a.clone()), &rest[1..]),
+                _ => (None, rest),
+            };
+            let o = Opts::parse(
+                rest,
+                if action.as_deref() == Some("install") {
+                    &["no-exclusion"]
+                } else {
+                    &[]
+                },
+                if action.as_deref() == Some("install") {
+                    &["payload", "target"]
+                } else if action.as_deref() == Some("allow") {
+                    &["account"]
+                } else {
+                    &[]
+                },
+            )?;
+            no_rest(&o)?;
+            if o.has("help") {
+                return Ok(Cmd::Help);
+            }
+            match action.as_deref() {
+                Some("status") | None => Ok(Cmd::Session(SessionCmd::Status)),
+                Some("install") => Ok(Cmd::Session(SessionCmd::Install {
+                    payload: o.req("payload")?,
+                    target: o.get("target"),
+                    exclusion: !o.has("no-exclusion"),
+                })),
+                Some("allow") => Ok(Cmd::Session(SessionCmd::Allow {
+                    account: o.req("account")?,
+                })),
+                Some(other) => Err(format!("unknown session command `{other}`")),
+            }
+        }
         "winuser" => {
             let Some(op) = rest.first() else {
                 return Err("missing winuser command".into());
@@ -303,7 +379,11 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
                     WinUserCmd::List
                 }
                 "launch" => {
-                    let o = Opts::parse(rest, &["supervise"], &["name", "secret-file", "cwd"])?;
+                    let o = Opts::parse(
+                        rest,
+                        &["supervise"],
+                        &["name", "secret-file", "cwd", "desktop"],
+                    )?;
                     if o.has("help") {
                         return Ok(Cmd::Help);
                     }
@@ -317,6 +397,7 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
                         name: o.req("name")?,
                         secret_file: o.req("secret-file")?,
                         cwd: o.get("cwd"),
+                        desktop: o.get("desktop"),
                         supervise: o.has("supervise"),
                         program: o.rest,
                     }
@@ -330,6 +411,36 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
                     WinUserCmd::Grant {
                         name: o.req("name")?,
                         path: o.req("path")?,
+                    }
+                }
+                "rdp-file" => {
+                    let o = Opts::parse(
+                        rest,
+                        &[],
+                        &[
+                            "name",
+                            "secret-file",
+                            "out",
+                            "host",
+                            "port",
+                            "width",
+                            "height",
+                            "shell",
+                        ],
+                    )?;
+                    no_rest(&o)?;
+                    if o.has("help") {
+                        return Ok(Cmd::Help);
+                    }
+                    WinUserCmd::RdpFile {
+                        name: o.req("name")?,
+                        secret_file: o.req("secret-file")?,
+                        out: o.req("out")?,
+                        host: o.get("host").unwrap_or_else(|| "127.0.0.1".into()),
+                        port: o.get("port").and_then(|p| p.parse().ok()).unwrap_or(3389),
+                        width: o.get("width").and_then(|p| p.parse().ok()).unwrap_or(1280),
+                        height: o.get("height").and_then(|p| p.parse().ok()).unwrap_or(800),
+                        shell: o.get("shell"),
                     }
                 }
                 other => return Err(format!("unrecognized subcommand '{other}'")),
@@ -439,8 +550,33 @@ mod tests {
                 name: "u".into(),
                 secret_file: "s".into(),
                 cwd: None,
+                desktop: None,
                 program: vec!["a.exe".into(), "--flag".into()],
                 supervise: false,
+            })
+        );
+        assert_eq!(
+            p(&[
+                "winuser",
+                "launch",
+                "--name",
+                "u",
+                "--secret-file",
+                "s",
+                "--desktop",
+                "dsh-x",
+                "--supervise",
+                "--",
+                "a"
+            ])
+            .unwrap(),
+            Cmd::Winuser(WinUserCmd::Launch {
+                name: "u".into(),
+                secret_file: "s".into(),
+                cwd: None,
+                desktop: Some("dsh-x".into()),
+                program: vec!["a".into()],
+                supervise: true,
             })
         );
         assert!(matches!(

@@ -3,9 +3,21 @@ import { useState } from 'react'
 import { Button, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import { call, invalidate, useAction, useEnvState } from './api.ts'
 import { RemoteBrowser } from './browser.tsx'
+import { DesktopView } from './desktop-view.tsx'
 import { ConfirmDialog, EnvDialog } from './env-dialog.tsx'
+import { SessionBanner } from './session-banner.tsx'
 import type { Translate } from './host-api.ts'
-import { IconEdit, IconFolder, IconPlug, IconPlus, IconRefresh, IconSpinner, IconTrash, KindIcon } from './icons.tsx'
+import {
+  IconEdit,
+  IconFolder,
+  IconPlug,
+  IconPlus,
+  IconRefresh,
+  IconScreenshot,
+  IconSpinner,
+  IconTrash,
+  KindIcon,
+} from './icons.tsx'
 import type { CreatedWorkspaceView, EnvView, TestResultView } from './types.ts'
 
 export function relativeTime(t: Translate, ms: number): string {
@@ -63,13 +75,15 @@ interface EnvCardProps {
   onEdit: (env: EnvView) => void
   onDelete: (env: EnvView) => void
   onWorkspace: (env: EnvView) => void
+  onDesktop: (env: EnvView) => void
 }
 
-function EnvCard({ env, t, onEdit, onDelete, onWorkspace }: EnvCardProps) {
+function EnvCard({ env, t, onEdit, onDelete, onWorkspace, onDesktop }: EnvCardProps) {
   const test = useAction()
   const status = statusOf(env, t)
   const sub = [t(`kind.${env.kind}`), target(env)].filter(Boolean).join(' · ')
   const info = env.info
+  const canView = !!info?.caps?.includes('screenshot')
   return (
     <article className="envx-card" data-kind={env.kind}>
       <div className="envx-card-head">
@@ -94,6 +108,15 @@ function EnvCard({ env, t, onEdit, onDelete, onWorkspace }: EnvCardProps) {
         {info && <span className="envx-chip">{t('info.os', { os: info.os, arch: info.arch || '—' })}</span>}
         {info?.user && <span className="envx-chip">{info.user}</span>}
         <span className="envx-chip">{env.exclusive ? t('status.exclusive') : t('status.shared')}</span>
+        {env.kind === 'winuser' && (
+          <span className="envx-chip" data-tone={env.config.desktop === 'shared' ? undefined : 'accent'}>
+            {env.config.desktop === 'private'
+              ? t('desktop.mode.private')
+              : env.config.desktop === 'session'
+                ? t('desktop.mode.session')
+                : t('desktop.mode.shared')}
+          </span>
+        )}
         {env.discovered && (
           <span className="envx-chip" data-tone="accent">
             {t('status.discovered')}
@@ -109,6 +132,12 @@ function EnvCard({ env, t, onEdit, onDelete, onWorkspace }: EnvCardProps) {
           <IconFolder size={14} />
           {t('action.newWorkspace')}
         </button>
+        {canView && (
+          <button type="button" className="envx-linkbtn" onClick={() => onDesktop(env)}>
+            <IconScreenshot size={14} />
+            {t('action.viewDesktop')}
+          </button>
+        )}
         <button
           type="button"
           className="envx-linkbtn"
@@ -181,6 +210,7 @@ type DialogState =
 export function EnvironmentsPage({ t, startSession }: { t: Translate; startSession: (workspaceId: string) => void }) {
   const { data, error, loading, refresh } = useEnvState(undefined, { discover: true })
   const [dialog, setDialog] = useState<DialogState>(undefined)
+  const [desktopEnv, setDesktopEnv] = useState<EnvView | undefined>(undefined)
   const refreshing = useAction()
 
   const envs = data?.environments ?? []
@@ -227,6 +257,7 @@ export function EnvironmentsPage({ t, startSession }: { t: Translate; startSessi
           </header>
 
           {error && <div className="envx-banner">{t('err.generic', { message: error })}</div>}
+          <SessionBanner t={t} platform={data?.platform} />
           {data?.discovered.adbError && envs.some(e => e.kind === 'adb') && (
             <div className="envx-banner" data-tone="info">
               {t('adb.error', { message: data.discovered.adbError })}
@@ -249,6 +280,7 @@ export function EnvironmentsPage({ t, startSession }: { t: Translate; startSessi
                   onEdit={e => setDialog({ type: 'env', environment: e })}
                   onDelete={e => setDialog({ type: 'delete', environment: e })}
                   onWorkspace={e => setDialog({ type: 'browser', envId: e.id })}
+                  onDesktop={setDesktopEnv}
                 />
               ))}
               <button
@@ -410,6 +442,9 @@ export function EnvironmentsPage({ t, startSession }: { t: Translate; startSessi
         onCreated={onCreated}
         t={t}
       />
+      {desktopEnv && (
+        <DesktopView env={byId[desktopEnv.id] ?? desktopEnv} t={t} onClose={() => setDesktopEnv(undefined)} />
+      )}
     </div>
   )
 }

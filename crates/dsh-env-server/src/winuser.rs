@@ -118,6 +118,147 @@ mod imp {
         }
     }
 
+    /// Protect a secret the way the Remote Desktop client stores `password 51:b:` — DPAPI with
+    /// the description `psw`, no entropy. Only the user who wrote it (the harness user, which is
+    /// also the one running `mstsc`) can decrypt it.
+    fn dpapi_protect_rdp(secret: &[u8]) -> Result<Vec<u8>> {
+        unsafe {
+            let input = CRYPT_INTEGER_BLOB {
+                cbData: secret.len() as u32,
+                pbData: secret.as_ptr() as *mut u8,
+            };
+            let mut output = CRYPT_INTEGER_BLOB {
+                cbData: 0,
+                pbData: null_mut(),
+            };
+            let desc = wide("psw");
+            if CryptProtectData(
+                &input,
+                desc.as_ptr(),
+                null(),
+                null(),
+                null(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            ) == 0
+            {
+                bail!(
+                    "CryptProtectData failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+            let v = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+            LocalFree(output.pbData as _);
+            Ok(v)
+        }
+    }
+
+    /// Inputs of a generated `.rdp` file.
+    pub struct RdpOptions<'a> {
+        pub account: &'a str,
+        pub host: &'a str,
+        pub port: u16,
+        /// Resolution of the account's own screen.
+        pub width: u32,
+        pub height: u32,
+        /// Program started as the session's shell (**our** server), so nothing has to be
+        /// registered in the account's profile to get the environment running inside the session.
+        pub shell: Option<&'a str>,
+        /// `password 51:b:` value, already hex encoded.
+        pub password_hex: &'a str,
+    }
+
+    /// The `.rdp` text `mstsc` reads. Split out from the command so it can be tested without
+    /// touching DPAPI or the file system.
+    pub fn rdp_text(o: &RdpOptions<'_>) -> String {
+        let mut out = String::new();
+        let mut line = |s: String| {
+            out.push_str(&s);
+            out.push_str("\r\n");
+        };
+        line("screen mode id:i:1".into());
+        line("use multimon:i:0".into());
+        line(format!("desktopwidth:i:{}", o.width));
+        line(format!("desktopheight:i:{}", o.height));
+        line("session bpp:i:32".into());
+        line(format!("full address:s:{}:{}", o.host, o.port));
+        // A local account: `.\name` is unambiguous and matches how the launcher logs on.
+        line(format!("username:s:.\\{}", o.account));
+        line(format!("password 51:b:{}", o.password_hex));
+        line("prompt for credentials:i:0".into());
+        line("promptcredentialonce:i:0".into());
+        line("authentication level:i:2".into());
+        line("enablecredsspsupport:i:1".into());
+        line("negotiate security layer:i:1".into());
+        if let Some(shell) = o.shell {
+            line(format!("alternate shell:s:{shell}"));
+        }
+        // Nothing of the human's session is redirected: this is a private workspace.
+        line("audiomode:i:2".into());
+        line("redirectclipboard:i:0".into());
+        line("redirectprinters:i:0".into());
+        line("redirectcomports:i:0".into());
+        line("redirectsmartcards:i:0".into());
+        line("redirectwebauthn:i:0".into());
+        line("devicestoredirect:s:".into());
+        line("drivestoredirect:s:".into());
+        line("bitmapcachepersistenable:i:0".into());
+        line("disable wallpaper:i:1".into());
+        line("disable full window drag:i:1".into());
+        line("disable menu anims:i:1".into());
+        line("allow font smoothing:i:0".into());
+        line("allow desktop composition:i:0".into());
+        line("connection type:i:7".into());
+        line("networkautodetect:i:1".into());
+        line("bandwidthautodetect:i:1".into());
+        out
+    }
+
+    /// Write a `.rdp` that logs the account into a session of its own and starts `shell` in it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rdp_file(
+        name: &str,
+        secret_file: &str,
+        out_path: &str,
+        host: &str,
+        port: u16,
+        width: u32,
+        height: u32,
+        shell: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let encoded = std::fs::read_to_string(secret_file)
+            .map_err(|e| format!("reading {secret_file}: {e}"))?;
+        let protected = crate::util::base64_decode(encoded.trim())?;
+        let password =
+            String::from_utf8(dpapi_unprotect(&protected)?).map_err(|e| e.to_string())?;
+        // mstsc expects the password as DPAPI-protected UTF-16LE, hex encoded.
+        let mut utf16: Vec<u8> = Vec::with_capacity(password.len() * 2);
+        for unit in password.encode_utf16() {
+            utf16.extend_from_slice(&unit.to_le_bytes());
+        }
+        let blob = dpapi_protect_rdp(&utf16)?;
+        let hex: String = blob.iter().map(|b| format!("{b:02x}")).collect();
+        let text = rdp_text(&RdpOptions {
+            account: name,
+            host,
+            port,
+            width,
+            height,
+            shell,
+            password_hex: &hex,
+        });
+        std::fs::write(out_path, text.as_bytes())
+            .map_err(|e| format!("writing {out_path}: {e}"))?;
+        Ok(json!({
+            "ok": true,
+            "path": out_path,
+            "address": format!("{host}:{port}"),
+            "width": width,
+            "height": height,
+            "shell": shell,
+        }))
+    }
+
     /// String form (`S-1-5-21-...`) of the account's SID.
     pub fn account_sid(name: &str) -> Option<String> {
         use windows_sys::Win32::Security::*;
@@ -410,17 +551,23 @@ mod imp {
         }
     }
 
-    /// Start `program` as the account on the interactive desktop.
+    /// Start `program` as the account, on the interactive desktop or on a private one.
     ///
     /// The process is created suspended and put into a kill-on-close job owned by this
     /// launcher. With `supervise`, the launcher prints the result line, then stays alive
     /// until the process exits or its stdin closes (the plugin went away or closed the
     /// environment) and takes the whole tree down with it, so nothing started as the
     /// account outlives the connection. Without it the process is detached as before.
+    ///
+    /// With `desktop`, the launcher also creates (or opens) `winsta0\<desktop>` with an ACE
+    /// naming the account and holds the handle for its lifetime: a desktop object dies with
+    /// its last handle, and everything the account starts is placed on it instead of the
+    /// human's `WinSta0\Default`.
     pub fn launch(
         name: &str,
         secret_file: &str,
         cwd: Option<&str>,
+        desktop: Option<&str>,
         program: &[String],
         supervise: bool,
     ) -> Result<serde_json::Value> {
@@ -428,6 +575,23 @@ mod imp {
         if program.is_empty() {
             bail!("missing program");
         }
+        let private = match desktop {
+            None => None,
+            Some(d) => {
+                if !supervise {
+                    bail!(
+                        "--desktop needs --supervise: the desktop is destroyed when its last handle closes, so the launcher has to stay alive while the environment runs"
+                    );
+                }
+                Some(crate::desktop::Desktop::open_or_create(
+                    d,
+                    &[name.to_string()],
+                )?)
+            }
+        };
+        let wdesktop = private
+            .as_ref()
+            .map(|d| wide(&format!("winsta0\\{}", d.name)));
         let encoded = std::fs::read_to_string(secret_file)
             .map_err(|e| format!("reading {secret_file}: {e}"))?;
         let protected = crate::util::base64_decode(encoded.trim())?;
@@ -454,8 +618,14 @@ mod imp {
             si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
             // A null desktop makes the secondary logon service use the caller's window
             // station/desktop (WinSta0\Default) AND grant the account's logon SID access to
-            // it, so GUI programs started by the account show up on the user's desktop.
-            si.lpDesktop = null_mut();
+            // it, so GUI programs started by the account show up on the user's desktop. A
+            // named desktop instead puts everything the account starts on its own desktop;
+            // it must already exist and carry an ACE for the account (see `private` above),
+            // otherwise the child dies during loader init with 0xC0000142.
+            si.lpDesktop = match &wdesktop {
+                Some(w) => w.as_ptr() as *mut u16,
+                None => null_mut(),
+            };
             si.dwFlags = STARTF_USESHOWWINDOW;
             si.wShowWindow = 0; // SW_HIDE, should a console window be created anyway
             let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
@@ -510,6 +680,14 @@ mod imp {
                 }));
             }
             let started = json!({"ok": true, "pid": pid, "job": in_job});
+            let started = match &private {
+                Some(d) => {
+                    let mut v = started;
+                    v["desktop"] = json!(format!("winsta0\\{}", d.name));
+                    v
+                }
+                None => started,
+            };
             if !supervise {
                 CloseHandle(pi.hProcess);
                 return Ok(started);
@@ -603,10 +781,37 @@ pub fn run(cmd: WinUserCmd) -> std::result::Result<serde_json::Value, String> {
                 name,
                 secret_file,
                 cwd,
+                desktop,
                 program,
                 supervise,
-            } => imp::launch(&name, &secret_file, cwd.as_deref(), &program, supervise),
+            } => imp::launch(
+                &name,
+                &secret_file,
+                cwd.as_deref(),
+                desktop.as_deref(),
+                &program,
+                supervise,
+            ),
             WinUserCmd::Grant { name, path } => imp::grant(&name, &path),
+            WinUserCmd::RdpFile {
+                name,
+                secret_file,
+                out,
+                host,
+                port,
+                width,
+                height,
+                shell,
+            } => imp::rdp_file(
+                &name,
+                &secret_file,
+                &out,
+                &host,
+                port,
+                width,
+                height,
+                shell.as_deref(),
+            ),
         };
         r.map_err(|e| e.0)
     }
@@ -632,10 +837,46 @@ mod tests {
     }
 
     #[test]
+    fn rdp_text_carries_the_session_settings() {
+        let text = imp::rdp_text(&imp::RdpOptions {
+            account: "dsh-user1",
+            host: "127.0.0.1",
+            port: 3389,
+            width: 1600,
+            height: 900,
+            shell: Some(
+                "C:\\ProgramData\\dsh-env\\dsh-env-server-abc.exe serve --listen 127.0.0.1:7000",
+            ),
+            password_hex: "deadbeef",
+        });
+        assert!(text.contains("full address:s:127.0.0.1:3389"), "{text}");
+        assert!(text.contains("desktopwidth:i:1600"));
+        assert!(text.contains("desktopheight:i:900"));
+        assert!(text.contains("username:s:.\\dsh-user1"));
+        assert!(text.contains("password 51:b:deadbeef"));
+        assert!(text.contains("prompt for credentials:i:0"));
+        assert!(text.contains("alternate shell:s:C:\\ProgramData\\dsh-env\\dsh-env-server-abc.exe serve --listen 127.0.0.1:7000"));
+        assert!(text.contains("redirectclipboard:i:0"));
+        assert!(text.ends_with("\r\n"), "mstsc wants CRLF lines");
+        // Without a shell the key must be absent: an empty value would start an empty session.
+        let plain = imp::rdp_text(&imp::RdpOptions {
+            account: "u",
+            host: "h",
+            port: 1,
+            width: 800,
+            height: 600,
+            shell: None,
+            password_hex: "00",
+        });
+        assert!(!plain.contains("alternate shell"));
+    }
+
+    #[test]
     fn launch_reports_missing_secret() {
         let e = imp::launch(
             "x",
             "Z:\\dsh-no-such\\secret",
+            None,
             None,
             &["cmd.exe".into()],
             false,

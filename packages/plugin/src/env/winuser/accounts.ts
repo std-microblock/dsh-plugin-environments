@@ -89,8 +89,15 @@ async function runElevated(
   return parsed
 }
 
-/** One account reported by `dsh-env-server winuser list`. */
-export interface WindowsAccount {
+/**
+ * Run any `dsh-env-server` subcommand elevated (gsudo, else a UAC prompt). Used by the account
+ * commands and by the TermWrap installer, which both have to touch machine-wide state.
+ */
+export async function runServerElevated(args: string[], opts: { timeoutMs?: number } = {}): Promise<WinuserResult> {
+  return await runElevated(args, opts)
+}
+
+/** One account reported by `dsh-env-server winuser list`. */ export interface WindowsAccount {
   name: string
   sid: string | null
   /** Registered profile directory; null before the account's first logon. */

@@ -1,8 +1,13 @@
 // End-to-end check of the `winuser` environment on a real Windows host (needs administrator
 // approval through gsudo or UAC for create/grant/delete):
 //   node packages/plugin/test/manual/real-winuser-flow.ts [account] [--keep] [--no-create]
+//     [--desktop shared|private|session]
 // Creates the account (default dshtest2), opens it from an inaccessible host cwd, exercises
 // fs/exec/pty/screenshot/input/GUI/kill-on-disconnect, then deletes it with its profile.
+//
+// `--desktop private` additionally checks that the account's windows stay off the human's
+// desktop, and `--desktop session` runs the whole thing inside a session of its own (that one
+// needs the TermWrap install and a reboot first; see real-session-mode.ts).
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -16,12 +21,15 @@ import {
   grantWindowsAccount,
   listWindowsAccounts,
 } from '../../src/env/winuser/accounts.ts'
-import { openWindowsAccount } from '../../src/env/winuser/winuser-env.ts'
+import { openWindowsAccount, type DesktopMode } from '../../src/env/winuser/winuser-env.ts'
 
 const args = process.argv.slice(2)
 const account = args.find(a => !a.startsWith('--')) ?? 'dshtest2'
 const keep = args.includes('--keep')
 const create = !args.includes('--no-create')
+const modeArg = args[args.indexOf('--desktop') + 1]
+const desktop: DesktopMode =
+  args.includes('--desktop') && (modeArg === 'private' || modeArg === 'session') ? modeArg : 'shared'
 const dataDir = path.resolve('.cache/wu-flow')
 const work = path.resolve('.cache/wu-flow-工作区')
 fs.mkdirSync(work, { recursive: true })
@@ -65,8 +73,8 @@ process.chdir(os.homedir())
 let env: ServerEnvironment | undefined
 const t0 = Date.now()
 try {
-  env = await openWindowsAccount({ id: 'w', name: 'W', account, dataDir })
-  check('open (first logon creates the profile)', true, `${Date.now() - t0} ms`)
+  env = await openWindowsAccount({ id: 'w', name: 'W', account, dataDir, desktop })
+  check(`open (${desktop} desktop, first logon creates the profile)`, true, `${Date.now() - t0} ms`)
 } catch (e) {
   check('open', false, `${errorCode(e) ?? ''} ${errorMessage(e)}`)
 }
@@ -74,6 +82,17 @@ try {
 if (env) {
   const info = env.info
   check('server runs as the account', info?.user.toLowerCase() === account.toLowerCase(), info?.user)
+  if (desktop === 'private') {
+    // The whole point of the mode: the account's windows must not land on the human's desktop.
+    check('reports its private desktop', /^dsh-/.test(env.desktopName ?? ''), env.desktopName)
+    const onHuman = host('tasklist', ['/fo', 'csv', '/nh', '/fi', `USERNAME eq ${account}`])
+    console.log(`   processes as the account (they exist; their windows are off-screen):\n${onHuman.trim()}`)
+    const humanWindows = await env.windows()
+    check(
+      'private desktop lists only its own windows',
+      humanWindows.every(w => w.pid > 0),
+    )
+  }
   const profile = info?.home ?? ''
   check('home is the account profile', /\\Users\\/i.test(profile) && profile.toLowerCase().includes(account), profile)
   check('default cwd is the profile', info?.cwd.toLowerCase() === profile.toLowerCase(), info?.cwd)
@@ -141,26 +160,72 @@ if (env) {
   const win = await env.exec({
     command: '(Get-Process notepad -ErrorAction SilentlyContinue | Where-Object MainWindowHandle -ne 0).Count',
   })
-  check('GUI app opens a window on the desktop', Number(text(win.stdout)) > 0, text(win.stdout))
+  check('GUI app opens a window on its desktop', Number(text(win.stdout)) > 0, text(win.stdout))
 
   try {
     const shot = await env.screenshot()
     check('screenshot', shot.width > 0 && shot.png.length > 1000, `${shot.width}x${shot.height}`)
-    fs.writeFileSync(path.resolve(path.dirname(dataDir), 'wu-flow-shot.png'), shot.png)
+    fs.writeFileSync(path.resolve(path.dirname(dataDir), `wu-flow-shot-${desktop}.png`), shot.png)
   } catch (e) {
     check('screenshot', false, errorMessage(e))
   }
   await gui.kill()
-  try {
+
+  const humanCursor = () =>
+    host('powershell.exe', [
+      '-NoProfile',
+      '-Command',
+      'Add-Type -AssemblyName System.Windows.Forms; $p=[System.Windows.Forms.Cursor]::Position; "$($p.X),$($p.Y)"',
+    ]).trim()
+  const humanNotepadWindows = () => {
+    // The host enumerates its own desktop, so a window on a private desktop is invisible here.
+    const out = host('powershell.exe', [
+      '-NoProfile',
+      '-Command',
+      '(Get-Process notepad -ErrorAction SilentlyContinue | Where-Object MainWindowHandle -ne 0).Count',
+    ])
+    return Number(out.trim()) || 0
+  }
+
+  if (desktop === 'shared') {
+    try {
+      await env.input([{ kind: 'move', x: 37, y: 41 }])
+      // Physical pixels, like sys.input and sys.screenshot.
+      const pos = await env.exec({
+        command:
+          'Add-Type -Name D -Namespace W -MemberDefinition \'[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();\'; [void][W.D]::SetProcessDPIAware(); Add-Type -AssemblyName System.Windows.Forms; $p=[System.Windows.Forms.Cursor]::Position; "$($p.X),$($p.Y)"',
+      })
+      check('input moves the shared cursor', text(pos.stdout) === '37,41', text(pos.stdout) || text(pos.stderr))
+    } catch (e) {
+      check('input', false, errorMessage(e))
+    }
+  } else {
+    // Neither mode may touch the human's pointer: `private` cannot (SendInput is refused on a
+    // non-input desktop), `session` has a pointer of its own.
+    const before = humanCursor()
     await env.input([{ kind: 'move', x: 37, y: 41 }])
-    // Physical pixels, like sys.input and sys.screenshot.
-    const pos = await env.exec({
-      command:
-        'Add-Type -Name D -Namespace W -MemberDefinition \'[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();\'; [void][W.D]::SetProcessDPIAware(); Add-Type -AssemblyName System.Windows.Forms; $p=[System.Windows.Forms.Cursor]::Position; "$($p.X),$($p.Y)"',
-    })
-    check('input moves the shared cursor', text(pos.stdout) === '37,41', text(pos.stdout) || text(pos.stderr))
-  } catch (e) {
-    check('input', false, errorMessage(e))
+    await sleep(300)
+    check('the human cursor never moves', humanCursor() === before, `${before} -> ${humanCursor()}`)
+    try {
+      const inside = await env.exec({
+        command:
+          'Add-Type -AssemblyName System.Windows.Forms; $p=[System.Windows.Forms.Cursor]::Position; "$($p.X),$($p.Y)"',
+      })
+      const pos = text(inside.stdout)
+      check(
+        desktop === 'session' ? 'the session has its own real cursor' : 'the private desktop has no real cursor',
+        desktop === 'session' ? pos === '37,41' : pos !== '37,41',
+        pos,
+      )
+    } catch (e) {
+      check('cursor probe', false, errorMessage(e))
+    }
+    if (desktop === 'private') {
+      const gui2 = await env.spawn({ argv: ['notepad.exe'] })
+      await sleep(2500)
+      check('the account window stays invisible to the human', humanNotepadWindows() === 0, humanNotepadWindows())
+      await gui2.kill()
+    }
   }
 
   // Processes die with the connection.

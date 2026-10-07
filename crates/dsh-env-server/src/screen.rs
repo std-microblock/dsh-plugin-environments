@@ -132,6 +132,7 @@ pub struct Captured {
 #[cfg(windows)]
 pub mod win {
     use super::*;
+    use crate::desktop::{Attached, Desktop};
     use crate::protocol::OpError;
     use serde_json::{Value, json};
     use std::mem::{size_of, zeroed};
@@ -139,6 +140,7 @@ pub mod win {
     use windows_sys::Win32::Graphics::Dwm::*;
     use windows_sys::Win32::Graphics::Gdi::*;
     use windows_sys::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
+    use windows_sys::Win32::System::StationsAndDesktops::EnumDesktopWindows;
     use windows_sys::Win32::System::Threading::*;
     use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
@@ -359,6 +361,97 @@ pub mod win {
         }
     }
 
+    /// A desktop that is not the session's input desktop has no screen surface: `GetDC(NULL)`
+    /// plus `BitBlt` comes back black, because DWM only composites the active desktop. Render
+    /// every visible top-level window of that desktop with `PrintWindow` instead and stack
+    /// them bottom-to-top.
+    fn capture_composite(rect: Rect, desk: &Desktop, cursor: bool) -> Result<Vec<u8>, OpError> {
+        unsafe {
+            let screen = GetDC(std::ptr::null_mut());
+            if screen.is_null() {
+                return Err(OpError::new("EIO", "GetDC failed"));
+            }
+            let mem = CreateCompatibleDC(screen);
+            let bmp = CreateCompatibleBitmap(screen, rect.w, rect.h);
+            let old = SelectObject(mem, bmp);
+            let brush = CreateSolidBrush(0);
+            let full = RECT {
+                left: 0,
+                top: 0,
+                right: rect.w,
+                bottom: rect.h,
+            };
+            FillRect(mem, &full, brush);
+            DeleteObject(brush as _);
+
+            let mut list: Vec<HWND> = Vec::new();
+            EnumDesktopWindows(desk.handle(), Some(enum_cb), &mut list as *mut _ as LPARAM);
+            // Topmost first; paint the reverse so overlaps end up right.
+            for h in list.iter().rev() {
+                if IsWindowVisible(*h) == 0 {
+                    continue;
+                }
+                let mut wr: RECT = zeroed();
+                if GetWindowRect(*h, &mut wr) == 0 {
+                    continue;
+                }
+                let (w, hh) = (wr.right - wr.left, wr.bottom - wr.top);
+                if w <= 0 || hh <= 0 {
+                    continue;
+                }
+                if wr.right <= rect.x
+                    || wr.bottom <= rect.y
+                    || wr.left >= rect.x + rect.w
+                    || wr.top >= rect.y + rect.h
+                {
+                    continue;
+                }
+                let tmp = CreateCompatibleDC(screen);
+                let tb = CreateCompatibleBitmap(screen, w, hh);
+                let told = SelectObject(tmp, tb);
+                if PrintWindow(*h, tmp, PW_RENDERFULLCONTENT) != 0 {
+                    BitBlt(
+                        mem,
+                        wr.left - rect.x,
+                        wr.top - rect.y,
+                        w,
+                        hh,
+                        tmp,
+                        0,
+                        0,
+                        SRCCOPY,
+                    );
+                }
+                SelectObject(tmp, told);
+                DeleteObject(tb as _);
+                DeleteDC(tmp);
+            }
+            if cursor && let Some((vx, vy)) = crate::input::virtual_cursor() {
+                // No real pointer exists on a private desktop, so draw the synthetic one.
+                let arrow = LoadCursorW(std::ptr::null_mut(), IDC_ARROW);
+                if !arrow.is_null() {
+                    DrawIconEx(
+                        mem,
+                        vx - rect.x,
+                        vy - rect.y,
+                        arrow,
+                        0,
+                        0,
+                        0,
+                        std::ptr::null_mut(),
+                        DI_NORMAL | DI_DEFAULTSIZE,
+                    );
+                }
+            }
+            let rgb = read_rgb(mem, bmp, rect.w, rect.h);
+            SelectObject(mem, old);
+            DeleteObject(bmp as _);
+            DeleteDC(mem);
+            ReleaseDC(std::ptr::null_mut(), screen);
+            rgb.ok_or_else(|| OpError::new("EIO", "desktop capture failed"))
+        }
+    }
+
     /// Render a window with PrintWindow (works when it is covered), cropped to its visible frame.
     fn capture_window(h: HWND, cursor: bool) -> Result<(Rect, Vec<u8>), OpError> {
         if unsafe { IsWindow(h) } == 0 {
@@ -417,8 +510,11 @@ pub mod win {
         Ok((frame, out))
     }
 
-    pub fn capture(spec: &CaptureSpec) -> Result<Captured, OpError> {
-        let cursor = spec.cursor.then(cursor_pos).flatten();
+    pub fn capture(spec: &CaptureSpec, desk: &Desktop) -> Result<Captured, OpError> {
+        let _guard = Attached::enter(desk).map_err(|e| OpError::new("EIO", e))?;
+        let input = desk.is_input();
+        // Only the input desktop has a pointer we may read or move.
+        let cursor = (spec.cursor && input).then(cursor_pos).flatten();
         if let Some(h) = spec.window {
             let (rect, rgb) = capture_window(hwnd(h), spec.cursor)?;
             return Ok(Captured { rect, rgb, cursor });
@@ -447,7 +543,11 @@ pub mod win {
                 .ok_or_else(|| OpError::invalid("rect lies outside the desktop"))?,
             None => base,
         };
-        let rgb = capture_screen(rect, spec.cursor)?;
+        let rgb = if input {
+            capture_screen(rect, spec.cursor)?
+        } else {
+            capture_composite(rect, desk, spec.cursor)?
+        };
         Ok(Captured { rect, rgb, cursor })
     }
 
@@ -506,10 +606,11 @@ pub mod win {
         1
     }
 
-    /// Top-level, visible, titled, uncloaked windows in z-order (topmost first).
-    pub fn windows(all: bool) -> Value {
+    /// Top-level, visible, titled, uncloaked windows of `desk` in z-order (topmost first).
+    pub fn windows(all: bool, desk: &Desktop) -> Result<Value, OpError> {
+        let _guard = Attached::enter(desk).map_err(|e| OpError::new("EIO", e))?;
         let mut hs: Vec<HWND> = Vec::new();
-        unsafe { EnumWindows(Some(enum_cb), &mut hs as *mut _ as LPARAM) };
+        unsafe { EnumDesktopWindows(desk.handle(), Some(enum_cb), &mut hs as *mut _ as LPARAM) };
         let fg = unsafe { GetForegroundWindow() };
         let mut out = Vec::new();
         for h in hs {
@@ -546,7 +647,7 @@ pub mod win {
                 "topmost": ex & WS_EX_TOPMOST != 0,
             }));
         }
-        json!({ "windows": out, "foreground": fg as usize as u64 })
+        Ok(json!({ "windows": out, "foreground": fg as usize as u64 }))
     }
 
     fn force_foreground(h: HWND) -> bool {
@@ -581,7 +682,13 @@ pub mod win {
         }
     }
 
-    pub fn window_action(h: u64, action: &str, rect: Option<Rect>) -> Result<Value, OpError> {
+    pub fn window_action(
+        h: u64,
+        action: &str,
+        rect: Option<Rect>,
+        desk: &Desktop,
+    ) -> Result<Value, OpError> {
+        let _guard = Attached::enter(desk).map_err(|e| OpError::new("EIO", e))?;
         let h = hwnd(h);
         if unsafe { IsWindow(h) } == 0 {
             return Err(OpError::new("ENOENT", "no such window"));
@@ -639,6 +746,105 @@ pub mod win {
             "minimized": unsafe { IsIconic(h) } != 0,
             "rect": r.map(|r| r.json()),
         }))
+    }
+}
+
+#[cfg(all(test, windows))]
+mod private_desktop_tests {
+    use super::*;
+    use crate::desktop::Desktop;
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr::null_mut;
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW, TerminateProcess,
+    };
+
+    fn wide(s: &str) -> Vec<u16> {
+        OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    /// Launches a GUI program on a private desktop and captures that desktop: the window must
+    /// show up in the composite (BitBlt alone would give a black frame).
+    ///
+    /// Skipped unless `DSH_TEST_GUIAPP` points at a built window program (the manual harness
+    /// uses `guiapp.exe`), because the crate must not ship a test binary.
+    #[test]
+    fn composite_capture_renders_windows_on_a_private_desktop() {
+        let Ok(gui) = std::env::var("DSH_TEST_GUIAPP") else {
+            eprintln!("DSH_TEST_GUIAPP is not set; skipping the private-desktop capture test");
+            return;
+        };
+        if !std::path::Path::new(&gui).exists() {
+            eprintln!("DSH_TEST_GUIAPP={gui} does not exist; skipping");
+            return;
+        }
+        let user = std::env::var("USERNAME").expect("USERNAME");
+        let name = format!("dsh-shottest-{}", std::process::id());
+        let desk = Desktop::open_or_create(&name, &[user]).expect("create desktop");
+
+        let mut cmd = wide(&format!("\"{gui}\" dshshot"));
+        let mut desktop = wide(&format!("winsta0\\{name}"));
+        let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        si.lpDesktop = desktop.as_mut_ptr();
+        let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            CreateProcessW(
+                null_mut(),
+                cmd.as_mut_ptr(),
+                null_mut(),
+                null_mut(),
+                0,
+                0,
+                null_mut(),
+                null_mut(),
+                &si,
+                &mut pi,
+            )
+        };
+        assert_ne!(ok, 0, "CreateProcessW on {name} failed");
+        // A child that cannot connect to the desktop dies during loader init (0xC0000142).
+        let waited = unsafe {
+            windows_sys::Win32::System::Threading::WaitForSingleObject(pi.hProcess, 3000)
+        };
+        if waited == 0 {
+            let mut code = 0u32;
+            unsafe {
+                windows_sys::Win32::System::Threading::GetExitCodeProcess(pi.hProcess, &mut code)
+            };
+            panic!("the GUI program exited immediately with 0x{code:08X} on `{name}`");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let spec = CaptureSpec::default();
+        let shot = win::capture(&spec, &desk).expect("capture the private desktop");
+        // guiapp paints #005AB4; a black frame means the composite did not render anything.
+        let blue = shot
+            .rgb
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .filter(|p| {
+                p[0] < 30 && (p[1] as i32 - 90).abs() < 40 && (p[2] as i32 - 180).abs() < 40
+            })
+            .count();
+        unsafe {
+            TerminateProcess(pi.hProcess, 1);
+            windows_sys::Win32::Foundation::CloseHandle(pi.hThread);
+            windows_sys::Win32::Foundation::CloseHandle(pi.hProcess);
+        }
+        assert!(
+            blue > 500,
+            "expected the window's blue background in the capture, found {blue} pixels"
+        );
+        assert!(
+            !shot.rgb.iter().all(|&b| b == 0),
+            "the private-desktop capture came back black"
+        );
     }
 }
 

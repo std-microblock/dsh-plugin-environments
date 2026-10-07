@@ -16,6 +16,8 @@ export interface EnvConfigView {
   serverPath?: string
   serial?: string
   account?: string
+  /** winuser: `shared` (the human's desktop), `private` (own desktop) or `session` */
+  desktop?: 'shared' | 'private' | 'session'
 }
 
 export interface InfoView {

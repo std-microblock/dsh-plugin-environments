@@ -14,6 +14,7 @@
     "dist",
     "bin",
     "android",
+    "vendor",
     "client.js",
     "cordis.patch.yml",
     "README.md",

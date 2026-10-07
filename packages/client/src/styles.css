@@ -398,6 +398,20 @@
 .envx-dialog-wide {
   width: min(720px, calc(100vw - 48px));
 }
+/* live desktop viewer: a wide dialog holding the newest frame */
+.envx-desktop {
+  width: min(1180px, calc(100vw - 48px));
+}
+.envx-desktop-frame {
+  min-height: 240px;
+  max-height: min(72vh, 900px);
+  overflow: auto;
+  background: #000;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
 .envx-form {
   display: flex;
   flex-direction: column;

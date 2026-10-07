@@ -138,6 +138,15 @@ export function IconPlug({ size }: IconProps) {
   )
 }
 
+/** A monitor: "look at this environment's desktop". */
+export function IconScreenshot({ size }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="M3 5h18v11H3zM9 20h6M12 16v4" />
+    </Svg>
+  )
+}
+
 export function IconUp({ size }: IconProps) {
   return (
     <Svg size={size}>

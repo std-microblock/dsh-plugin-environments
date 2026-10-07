@@ -97,7 +97,7 @@ function publishedManifest(source: Manifest): Manifest {
   }
   const files = out['files']
   const listed = Array.isArray(files) ? files.filter(f => typeof f === 'string') : []
-  for (const need of ['dist', 'bin', 'android', 'client.js', 'cordis.patch.yml', 'README.md', 'LICENSE']) {
+  for (const need of ['dist', 'bin', 'android', 'vendor', 'client.js', 'cordis.patch.yml', 'README.md', 'LICENSE']) {
     if (!listed.includes(need)) errors.push(`packages/plugin/package.json: "files" lacks ${need}`)
   }
   if (errors.length) fail(errors.join('\n'))
@@ -209,6 +209,20 @@ async function main(): Promise<void> {
   fs.cpSync(path.join(PLUGIN_DIR, 'dist'), path.join(STAGE, 'dist'), { recursive: true })
   // The device-side clipboard helper pushed to Android devices, with its source for auditing.
   fs.cpSync(path.join(PLUGIN_DIR, 'android'), path.join(STAGE, 'android'), { recursive: true })
+  // Bundled third-party payloads (TermWrap, MIT): shipped in the clear with hashes and licence.
+  const vendorDir = path.join(PLUGIN_DIR, 'vendor')
+  const vendorEntries: string[] = []
+  if (fs.existsSync(vendorDir)) {
+    fs.cpSync(vendorDir, path.join(STAGE, 'vendor'), { recursive: true })
+    const walk = (dir: string, prefix: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const rel = prefix ? `${prefix}/${entry.name}` : entry.name
+        if (entry.isDirectory()) walk(path.join(dir, entry.name), rel)
+        else vendorEntries.push(`package/vendor/${rel}`)
+      }
+    }
+    walk(vendorDir, '')
+  }
   for (const f of ['client.js', 'cordis.patch.yml', 'README.md']) {
     fs.copyFileSync(path.join(PLUGIN_DIR, f), path.join(STAGE, f))
   }
@@ -238,11 +252,12 @@ async function main(): Promise<void> {
     'package/android/dsh-clipboard.jar',
     'package/android/README.md',
     'package/android/src/dsh/Clipboard.java',
+    ...vendorEntries,
     ...binaries.map(b => `package/bin/${b.target}/${b.exe}.br`),
   ]
   const absent = expected.filter(e => !entries.has(e))
   if (absent.length) fail(`tarball lacks ${absent.join(', ')}`)
-  const unexpected = [...entries.keys()].filter(e => !/^package\/(dist|bin)\//.test(e) && !expected.includes(e))
+  const unexpected = [...entries.keys()].filter(e => !/^package\/(dist|bin|vendor)\//.test(e) && !expected.includes(e))
   if (unexpected.length) fail(`tarball has unexpected files: ${unexpected.join(', ')}`)
   const packed = JSON.parse(entries.get('package/package.json')?.toString('utf8') ?? '{}') as Manifest
   if (packed['devDependencies'] || packed['scripts'] || JSON.stringify(packed).includes('workspace:')) {

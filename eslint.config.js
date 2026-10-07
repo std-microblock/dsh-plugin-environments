@@ -12,6 +12,10 @@ export default tseslint.config(
       'crates/**',
       'packages/plugin/client.js',
       'packages/plugin/bin/**',
+      // Bundled third-party payloads (TermWrap): vendored binaries, not our sources.
+      'packages/plugin/vendor/**',
+      // Build outputs: `pnpm package` keeps a staging copy here between runs.
+      'out/**',
       '.cache/**',
       '.tmp-scan/**',
       '.work/**',

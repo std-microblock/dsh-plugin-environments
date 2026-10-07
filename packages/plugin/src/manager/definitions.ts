@@ -36,6 +36,8 @@ export interface EnvironmentConfig {
   adb?: string
   /** winuser */
   account?: string
+  /** winuser: `shared` (the human's desktop), `private` (its own desktop) or `session` */
+  desktop?: 'shared' | 'private' | 'session'
 }
 
 export interface EnvironmentDefinition {

@@ -6,6 +6,25 @@
 use crate::protocol::OpError;
 use serde_json::Value;
 
+/// Synthetic pointer position on a private desktop. There is no real cursor there (the session
+/// has exactly one, owned by its input desktop), so the server remembers where it last "moved"
+/// the pointer and draws it into screenshots itself.
+#[cfg(windows)]
+static VIRTUAL_CURSOR: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(i64::MIN);
+
+/// Last synthetic pointer position, if the pointer has been moved on a private desktop.
+#[cfg(windows)]
+pub fn virtual_cursor() -> Option<(i32, i32)> {
+    let v = VIRTUAL_CURSOR.load(std::sync::atomic::Ordering::Relaxed);
+    (v != i64::MIN).then(|| ((v >> 32) as i32, v as u32 as i32))
+}
+
+#[cfg(windows)]
+fn set_virtual_cursor(x: i32, y: i32) {
+    let v = ((x as i64) << 32) | (y as u32 as i64);
+    VIRTUAL_CURSOR.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Button {
     Left,
@@ -404,6 +423,8 @@ pub mod win {
     use std::mem::{size_of, zeroed};
     use std::thread::sleep;
     use std::time::Duration;
+    use windows_sys::Win32::Foundation::{HWND, POINT};
+    use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -756,7 +777,15 @@ pub mod win {
 
     /// Run a batch in order. Keys and buttons still held at the end (or after an error)
     /// are released so nothing stays stuck on the user's desktop.
-    pub fn run(actions: &[Action]) -> Result<(), OpError> {
+    ///
+    /// `SendInput` and `SetCursorPos` only reach the session's *input* desktop; on a private
+    /// desktop they fail with ERROR_ACCESS_DENIED, so the batch is delivered as window
+    /// messages instead and the pointer position is tracked synthetically for screenshots.
+    pub fn run(actions: &[Action], desk: &crate::desktop::Desktop) -> Result<(), OpError> {
+        let _guard = crate::desktop::Attached::enter(desk).map_err(|e| OpError::new("EIO", e))?;
+        if !desk.is_input() {
+            return run_msg(actions);
+        }
         let mut held = Held::default();
         let mut result = Ok(());
         for a in actions {
@@ -776,6 +805,328 @@ pub mod win {
         for b in std::mem::take(&mut held.buttons) {
             let (_, up, data) = button_flags(b);
             let _ = send(&[mouse(up, 0, 0, data)]);
+        }
+        result
+    }
+
+    // ---- message-based injection (private desktops) --------------------------
+
+    const WM_MOUSEMOVE: u32 = 0x0200;
+    const WM_LBUTTONDOWN: u32 = 0x0201;
+    const WM_LBUTTONUP: u32 = 0x0202;
+    const WM_RBUTTONDOWN: u32 = 0x0204;
+    const WM_RBUTTONUP: u32 = 0x0205;
+    const WM_MBUTTONDOWN: u32 = 0x0207;
+    const WM_MBUTTONUP: u32 = 0x0208;
+    const WM_MOUSEWHEEL: u32 = 0x020A;
+    const WM_XBUTTONDOWN: u32 = 0x020B;
+    const WM_XBUTTONUP: u32 = 0x020C;
+    const WM_MOUSEHWHEEL: u32 = 0x020E;
+    const WM_KEYDOWN: u32 = 0x0100;
+    const WM_KEYUP: u32 = 0x0101;
+    const WM_CHAR: u32 = 0x0102;
+
+    /// Synthetic pointer position plus everything still held, for the message path.
+    #[derive(Default)]
+    struct MsgState {
+        x: i32,
+        y: i32,
+        keys: Vec<Vk>,
+        buttons: Vec<Button>,
+    }
+
+    fn lparam(x: i32, y: i32) -> isize {
+        (((y as u32 & 0xFFFF) << 16) | (x as u32 & 0xFFFF)) as isize
+    }
+
+    /// The window at a screen point of the calling thread's desktop, plus that point in the
+    /// window's client coordinates.
+    unsafe fn hit(x: i32, y: i32) -> Option<(HWND, i32, i32)> {
+        let mut p = POINT { x, y };
+        let h = unsafe { WindowFromPoint(p) };
+        if h.is_null() {
+            return None;
+        }
+        unsafe { ScreenToClient(h, &mut p) };
+        Some((h, p.x, p.y))
+    }
+
+    fn post(h: HWND, msg: u32, w: usize, l: isize) -> Result<(), OpError> {
+        if unsafe { PostMessageW(h, msg, w, l) } == 0 {
+            return Err(OpError::new(
+                "EIO",
+                format!(
+                    "PostMessage(0x{msg:04X}) failed: {}",
+                    std::io::Error::last_os_error()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn msg_move(st: &mut MsgState, x: f64, y: f64) -> Result<(), OpError> {
+        st.x = x.round() as i32;
+        st.y = y.round() as i32;
+        set_virtual_cursor(st.x, st.y);
+        if let Some((h, cx, cy)) = unsafe { hit(st.x, st.y) } {
+            post(h, WM_MOUSEMOVE, 0, lparam(cx, cy))?;
+        }
+        Ok(())
+    }
+
+    /// Where keyboard messages should go: the target thread's focus window when it has one,
+    /// otherwise the top-level ancestor of the window under the synthetic pointer. Posting to
+    /// the deepest child (e.g. a static label) would never reach the application.
+    unsafe fn keyboard_target(st: &MsgState) -> Option<HWND> {
+        let (h, _, _) = unsafe { hit(st.x, st.y) }?;
+        let mut tid = 0u32;
+        unsafe { GetWindowThreadProcessId(h, &mut tid) };
+        if tid != 0 {
+            let mut gti: GUITHREADINFO = unsafe { zeroed() };
+            gti.cbSize = size_of::<GUITHREADINFO>() as u32;
+            if unsafe { GetGUIThreadInfo(tid, &mut gti) } != 0 && !gti.hwndFocus.is_null() {
+                return Some(gti.hwndFocus);
+            }
+        }
+        let root = unsafe { GetAncestor(h, GA_ROOT) };
+        Some(if root.is_null() { h } else { root })
+    }
+
+    fn msg_button_message(b: Button, down: bool) -> (u32, usize) {
+        match b {
+            Button::Left => (if down { WM_LBUTTONDOWN } else { WM_LBUTTONUP }, 0x0001),
+            Button::Right => (if down { WM_RBUTTONDOWN } else { WM_RBUTTONUP }, 0x0002),
+            Button::Middle => (if down { WM_MBUTTONDOWN } else { WM_MBUTTONUP }, 0x0010),
+            Button::X1 => (
+                if down { WM_XBUTTONDOWN } else { WM_XBUTTONUP },
+                0x0020 | (1 << 16),
+            ),
+            Button::X2 => (
+                if down { WM_XBUTTONDOWN } else { WM_XBUTTONUP },
+                0x0040 | (2 << 16),
+            ),
+        }
+    }
+
+    fn msg_button_event(st: &mut MsgState, b: Button, down: bool) -> Result<(), OpError> {
+        let Some((h, cx, cy)) = (unsafe { hit(st.x, st.y) }) else {
+            return Ok(());
+        };
+        post(h, WM_MOUSEMOVE, 0, lparam(cx, cy))?;
+        let (msg, flags) = msg_button_message(b, down);
+        post(h, msg, flags, lparam(cx, cy))
+    }
+
+    fn msg_key_event(st: &mut MsgState, k: Vk, down: bool) -> Result<(), OpError> {
+        let Some(h) = (unsafe { keyboard_target(st) }) else {
+            return Ok(());
+        };
+        let scan = unsafe { MapVirtualKeyW(k.code as u32, MAPVK_VK_TO_VSC) } as isize;
+        let mut lp = 1isize | (scan << 16);
+        if k.extended {
+            lp |= 1 << 24;
+        }
+        lp |= 1 << 30;
+        if !down {
+            lp |= 1 << 31;
+        }
+        post(
+            h,
+            if down { WM_KEYDOWN } else { WM_KEYUP },
+            k.code as usize,
+            lp,
+        )
+    }
+
+    fn msg_modifiers(
+        st: &mut MsgState,
+        mods: &[String],
+        f: impl FnOnce(&mut MsgState) -> Result<(), OpError>,
+    ) -> Result<(), OpError> {
+        let vks = resolve_all(mods)?;
+        for k in &vks {
+            msg_key_event(st, *k, true)?;
+        }
+        let r = f(st);
+        for k in vks.iter().rev() {
+            let _ = msg_key_event(st, *k, false);
+        }
+        r
+    }
+
+    fn perform_msg(action: &Action, st: &mut MsgState) -> Result<(), OpError> {
+        match action {
+            Action::Move { x, y } => msg_move(st, *x, *y),
+            Action::Click {
+                at,
+                button,
+                count,
+                modifiers,
+            } => {
+                if let Some((x, y)) = at {
+                    msg_move(st, *x, *y)?;
+                }
+                msg_modifiers(st, modifiers, |st| {
+                    for _ in 0..*count {
+                        msg_button_event(st, *button, true)?;
+                        msg_button_event(st, *button, false)?;
+                    }
+                    Ok(())
+                })
+            }
+            Action::Down { at, button } => {
+                if let Some((x, y)) = at {
+                    msg_move(st, *x, *y)?;
+                }
+                st.buttons.push(*button);
+                msg_button_event(st, *button, true)
+            }
+            Action::Up { at, button } => {
+                if let Some((x, y)) = at {
+                    msg_move(st, *x, *y)?;
+                }
+                st.buttons.retain(|b| b != button);
+                msg_button_event(st, *button, false)
+            }
+            Action::Drag {
+                path,
+                button,
+                duration_ms,
+                modifiers,
+            } => msg_modifiers(st, modifiers, |st| {
+                const STEP: u64 = 15;
+                let pts = interpolate(path, *duration_ms, STEP);
+                let first = pts[0];
+                msg_move(st, first.0, first.1)?;
+                msg_button_event(st, *button, true)?;
+                st.buttons.push(*button);
+                let pause = Duration::from_millis(*duration_ms / pts.len().max(1) as u64);
+                for (x, y) in &pts[1..] {
+                    msg_move(st, *x, *y)?;
+                    sleep(pause);
+                }
+                st.buttons.retain(|b| b != button);
+                msg_button_event(st, *button, false)
+            }),
+            Action::Scroll {
+                at,
+                dx,
+                dy,
+                modifiers,
+            } => {
+                if let Some((x, y)) = at {
+                    msg_move(st, *x, *y)?;
+                }
+                let (px, py) = (st.x, st.y);
+                msg_modifiers(st, modifiers, |_st| {
+                    for (amount, vertical) in [(*dy, true), (*dx, false)] {
+                        let whole = amount.trunc();
+                        for _ in 0..(whole.abs() as u32) {
+                            msg_wheel(px, py, whole.signum(), vertical)?;
+                            sleep(Duration::from_millis(15));
+                        }
+                        let frac = amount - whole;
+                        if frac.abs() > 0.01 {
+                            msg_wheel(px, py, frac, vertical)?;
+                        }
+                    }
+                    Ok(())
+                })
+            }
+            Action::Type { text, delay_ms } => {
+                for s in text_strokes(text) {
+                    match s {
+                        Ok(unit) => {
+                            if let Some(h) = unsafe { keyboard_target(st) } {
+                                post(h, WM_CHAR, unit as usize, 1)?;
+                            }
+                        }
+                        Err(code) => {
+                            let k = Vk {
+                                code,
+                                extended: false,
+                            };
+                            msg_key_event(st, k, true)?;
+                            msg_key_event(st, k, false)?;
+                        }
+                    }
+                    if *delay_ms > 0 {
+                        sleep(Duration::from_millis(*delay_ms));
+                    }
+                }
+                Ok(())
+            }
+            Action::Key {
+                keys,
+                repeat,
+                hold_ms,
+            } => {
+                let vks = resolve_all(keys)?;
+                for _ in 0..(*repeat).max(1) {
+                    for k in &vks {
+                        msg_key_event(st, *k, true)?;
+                    }
+                    sleep(Duration::from_millis((*hold_ms).max(1)));
+                    for k in vks.iter().rev() {
+                        msg_key_event(st, *k, false)?;
+                    }
+                    st.keys.retain(|h| !vks.contains(h));
+                }
+                Ok(())
+            }
+            Action::KeyDown { keys } => {
+                let vks = resolve_all(keys)?;
+                for k in &vks {
+                    msg_key_event(st, *k, true)?;
+                }
+                st.keys.extend(vks);
+                Ok(())
+            }
+            Action::KeyUp { keys } => {
+                let vks = resolve_all(keys)?;
+                for k in vks.iter().rev() {
+                    msg_key_event(st, *k, false)?;
+                }
+                st.keys.retain(|h| !vks.contains(h));
+                Ok(())
+            }
+            Action::Wait { ms } => {
+                sleep(Duration::from_millis(*ms));
+                Ok(())
+            }
+        }
+    }
+
+    fn msg_wheel(sx: i32, sy: i32, notches: f64, vertical: bool) -> Result<(), OpError> {
+        let Some((h, _, _)) = (unsafe { hit(sx, sy) }) else {
+            return Ok(());
+        };
+        let delta = (notches * 120.0).round() as i16;
+        let w = (delta as u16 as usize) << 16;
+        // Wheel messages carry *screen* coordinates in lParam.
+        let msg = if vertical {
+            WM_MOUSEWHEEL
+        } else {
+            WM_MOUSEHWHEEL
+        };
+        post(h, msg, w, lparam(sx, sy))
+    }
+
+    fn run_msg(actions: &[Action]) -> Result<(), OpError> {
+        let mut st = MsgState::default();
+        let mut result = Ok(());
+        for a in actions {
+            if let Err(e) = perform_msg(a, &mut st) {
+                result = Err(e);
+                break;
+            }
+        }
+        let keys = std::mem::take(&mut st.keys);
+        for k in keys.iter().rev() {
+            let _ = msg_key_event(&mut st, *k, false);
+        }
+        for b in std::mem::take(&mut st.buttons) {
+            let _ = msg_button_event(&mut st, b, false);
         }
         result
     }
@@ -894,5 +1245,107 @@ mod tests {
         assert_eq!(*pts.last().unwrap(), (100.0, 100.0));
         assert!((pts[10].0 - 100.0).abs() < 1e-9 && pts[10].1.abs() < 1e-9);
         assert_eq!(interpolate(&[(1.0, 1.0), (1.0, 1.0)], 100, 10).len(), 2);
+    }
+}
+
+/// End-to-end check of the message injector against a real window on a private desktop.
+/// Skipped unless `DSH_TEST_GUIAPP` points at a built window program (the manual harness uses
+/// `guiapp.exe`, whose log records the clicks and keystrokes it receives).
+#[cfg(all(test, windows))]
+mod private_desktop_input_tests {
+    use super::*;
+    use crate::desktop::Desktop;
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, GetExitCodeProcess, PROCESS_INFORMATION, STARTUPINFOW, TerminateProcess,
+        WaitForSingleObject,
+    };
+
+    fn wide(s: &str) -> Vec<u16> {
+        OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    #[test]
+    fn message_injection_reaches_a_window_on_a_private_desktop() {
+        let Ok(gui) = std::env::var("DSH_TEST_GUIAPP") else {
+            eprintln!("DSH_TEST_GUIAPP is not set; skipping the private-desktop input test");
+            return;
+        };
+        if !std::path::Path::new(&gui).exists() {
+            eprintln!("DSH_TEST_GUIAPP={gui} does not exist; skipping");
+            return;
+        }
+        let user = std::env::var("USERNAME").expect("USERNAME");
+        let name = format!("dsh-inputtest-{}", std::process::id());
+        let desk = Desktop::open_or_create(&name, &[user]).expect("create desktop");
+        let log = std::env::temp_dir().join(format!("guiapp-input-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&log);
+
+        let mut cmd = wide(&format!("\"{gui}\" in \"{}\"", log.display()));
+        let mut desktop = wide(&format!("winsta0\\{name}"));
+        let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        si.lpDesktop = desktop.as_mut_ptr();
+        let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            CreateProcessW(
+                std::ptr::null_mut(),
+                cmd.as_mut_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &si,
+                &mut pi,
+            )
+        };
+        assert_ne!(ok, 0, "CreateProcessW on {name} failed");
+        if unsafe { WaitForSingleObject(pi.hProcess, 3000) } == 0 {
+            let mut code = 0u32;
+            unsafe { GetExitCodeProcess(pi.hProcess, &mut code) };
+            panic!("the GUI program exited immediately with 0x{code:08X} on `{name}`");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(800));
+
+        // The window sits at (60,60) with a 640x400 client area; (160,160) is inside it.
+        let actions = vec![
+            Action::Click {
+                at: Some((180.0, 200.0)),
+                button: Button::Left,
+                count: 1,
+                modifiers: vec![],
+            },
+            Action::Type {
+                text: "abc".into(),
+                delay_ms: 20,
+            },
+            Action::Wait { ms: 400 },
+        ];
+        let injected = win::run(&actions, &desk);
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        let exists = log.exists();
+        unsafe {
+            TerminateProcess(pi.hProcess, 1);
+            windows_sys::Win32::Foundation::CloseHandle(pi.hThread);
+            windows_sys::Win32::Foundation::CloseHandle(pi.hProcess);
+        }
+        let _ = std::fs::remove_file(&log);
+        injected.expect("inject");
+        assert!(
+            text.contains("MouseDown"),
+            "the click never reached the window (pid={} log={} exists={exists}):\n{text}",
+            pi.dwProcessId,
+            log.display()
+        );
+        assert!(
+            text.contains("KeyPress 97"),
+            "the typed text never reached the window:\n{text}"
+        );
     }
 }

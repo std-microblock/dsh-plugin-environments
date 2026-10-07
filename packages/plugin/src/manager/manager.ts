@@ -293,6 +293,13 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
     if (input.kind === 'ssh' && !config['host']) throw new EnvError('EINVAL', 'host is required')
     if (input.kind === 'adb' && !config['serial']) throw new EnvError('EINVAL', 'serial is required')
     if (input.kind === 'winuser' && !config['account']) throw new EnvError('EINVAL', 'account is required')
+    if (input.kind === 'winuser') {
+      // Anything but an explicit mode keeps the historical shared-desktop behaviour.
+      const mode = config['desktop']
+      config['desktop'] = mode === 'private' || mode === 'session' ? mode : 'shared'
+    } else {
+      delete config['desktop']
+    }
     if (config['port'] !== undefined) config['port'] = Number(config['port'])
     const def: EnvironmentDefinition = {
       id,
@@ -360,7 +367,13 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
         return env.open()
       }
       case 'winuser':
-        return openWindowsAccount({ ...base, account: c.account ?? '', dataDir: this.dataDir, cwd: c.cwd })
+        return openWindowsAccount({
+          ...base,
+          account: c.account ?? '',
+          dataDir: this.dataDir,
+          cwd: c.cwd,
+          desktop: c.desktop === 'private' ? 'private' : 'shared',
+        })
       default:
         throw new EnvError('EINVAL', `unknown environment kind ${String(def.kind)}`)
     }

@@ -2,7 +2,15 @@
 import os from 'node:os'
 import path from 'node:path'
 import { EnvError, errorCode, errorMessage, type Info } from '@dsh-environments/protocol'
-import { ACCOUNT_RE, createWindowsAccount, deleteWindowsAccount, listWindowsAccounts } from '../env/winuser/accounts.ts'
+import {
+  ACCOUNT_RE,
+  createWindowsAccount,
+  deleteWindowsAccount,
+  listWindowsAccounts,
+  runServerElevated,
+} from '../env/winuser/accounts.ts'
+import type { Environment } from '../env/environment.ts'
+import { probeSession, termwrapPayload } from '../env/winuser/session-mode.ts'
 import type { Borrowing } from '../borrowing/index.ts'
 import { reverseCommands, sanitizeReverseSettings } from '../env/server/reverse.ts'
 import { sessionStarted, type PluginContext } from '../host-api.ts'
@@ -185,6 +193,47 @@ export function createActions(
         return { ok: false, error: errorMessage(e), code: errorCode(e) }
       }
     },
+    /**
+     * One live frame of an environment's desktop for the Environments page viewer.
+     *
+     * A connection a live lease already holds is preferred: that is the desktop the agent is
+     * actually working on. For a `session`-mode account opening a second connection would start a
+     * *second* session, so the viewer asks for a running session instead of inventing one. Every
+     * other environment falls back to the same short-lived browse connection the file browser
+     * uses (a private desktop is created on demand and closed again once the viewer stops asking).
+     */
+    async 'desktop.frame'({ envId, maxWidth, cursor }) {
+      const id = text(envId)
+      if (!id) throw new EnvError('EINVAL', 'envId is required')
+      const width = Math.min(Math.max(Math.round(Number(maxWidth) || 960), 120), 2560)
+      const frame = async (env: Environment) => {
+        if (!env.hasCap('screenshot')) {
+          throw new EnvError('UNSUPPORTED', `${env.name} cannot show a desktop`)
+        }
+        const shot = await env.capture({ maxWidth: width, cursor: cursor !== false })
+        if (!shot.png) throw new EnvError('EIO', `${env.name} returned no image`)
+        const desktopName = (env as { desktopName?: string }).desktopName
+        return {
+          mime: 'image/png',
+          data: shot.png.toString('base64'),
+          width: shot.width,
+          height: shot.height,
+          desktop: desktopName ?? null,
+          cursor: shot.cursor ?? null,
+          at: Date.now(),
+        }
+      }
+      const leased = manager.leasesOf(id)[0]?.env
+      if (leased && !leased.closed) return await frame(leased)
+      const def = manager.require(id)
+      if (def.kind === 'winuser' && def.config.desktop === 'session') {
+        throw new EnvError(
+          'EBUSY',
+          'this account has no session running right now; start one from a session before watching its desktop',
+        )
+      }
+      return await manager.browse(id, frame)
+    },
     async 'fs.list'({ envId, path: p }) {
       const id = text(envId)
       return manager.browse(id, async env => {
@@ -314,10 +363,66 @@ export function createActions(
     async 'lease.release'({ leaseId }) {
       return { released: await borrowing.releaseLease(text(leaseId)) }
     },
+    /**
+     * Install the TermWrap payload (elevated) so this machine can host one session per isolated
+     * account. Always needs a reboot: the wrapper DLL is loaded by the Terminal Services service
+     * at start-up. The payload travels inside our own release package (MIT, plain files), so the
+     * install needs no network access.
+     */
+    async 'session.install'() {
+      if (process.platform !== 'win32') {
+        throw new EnvError('UNSUPPORTED', 'TermWrap can only be installed on a Windows host')
+      }
+      const payload = termwrapPayload()
+      if (!payload.present) {
+        throw new EnvError(
+          'ENOENT',
+          'this build was packaged without the TermWrap payload; install TermWrap manually (see docs/session-mode.md)',
+        )
+      }
+      const result = await runServerElevated(['session', 'install', '--payload', payload.dir])
+      return { ...result, payloadVersion: payload.version }
+    },
+    /**
+     * Let an account log on through Remote Desktop (elevated), which is what the session logon
+     * needs. Idempotent: an account that is already a member is fine.
+     */
+    async 'session.allow'({ account }) {
+      if (process.platform !== 'win32') {
+        throw new EnvError('UNSUPPORTED', 'Remote Desktop logon is only available on Windows')
+      }
+      const name = str(account) ?? ''
+      if (!ACCOUNT_RE.test(name)) throw new EnvError('EINVAL', 'a valid account name is required')
+      return await runServerElevated(['session', 'allow', '--account', name])
+    },
     async 'winuser.list'() {
       return { accounts: await listWindowsAccounts(), supported: process.platform === 'win32' }
     },
-    async 'winuser.create'({ name, environmentName, grantPaths }) {
+    /**
+     * Whether this machine can host a separate session per isolated account, and whether the
+     * TermWrap payload needed for it shipped with this build.
+     */
+    async 'session.status'() {
+      const payload = termwrapPayload()
+      const termwrap = {
+        present: payload.present,
+        version: payload.version,
+        license: payload.license,
+        files: payload.files,
+      }
+      if (process.platform !== 'win32') {
+        return {
+          ok: true,
+          ready: false,
+          missing: ['not-windows'],
+          reasons: ['real sessions are only available on Windows hosts'],
+          termwrap,
+        }
+      }
+      const probe = await probeSession()
+      return { ...probe, termwrap }
+    },
+    async 'winuser.create'({ name, environmentName, grantPaths, desktop }) {
       const account = str(name) ?? ''
       if (!ACCOUNT_RE.test(account)) {
         throw new EnvError('EINVAL', 'account name must be 1-20 letters, digits, _ or -, starting with a letter')
@@ -330,7 +435,9 @@ export function createActions(
         id: `win_${account.toLowerCase()}`,
         name: str(environmentName) || `Windows · ${account}`,
         kind: 'winuser',
-        config: { account },
+        // The desktop choice made while creating the account must survive into the definition,
+        // otherwise a fresh account would silently fall back to the human's desktop.
+        config: { account, desktop: str(desktop) === 'private' ? 'private' : 'shared' },
         description: `Local account ${account}`,
       })
       return { environment: manager.publicDef(def) }

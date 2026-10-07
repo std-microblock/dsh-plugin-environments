@@ -141,7 +141,11 @@ export function EnvDialog({ open, environment, platform, onClose, t }: EnvDialog
       }
       if (kind === 'winuser' && !editing) {
         saved = (
-          await call<{ environment: EnvView }>('winuser.create', { name: config.account, environmentName: name.trim() })
+          await call<{ environment: EnvView }>('winuser.create', {
+            name: config.account,
+            environmentName: name.trim(),
+            desktop: config.desktop,
+          })
         ).environment
       } else {
         saved = (
@@ -371,6 +375,28 @@ export function EnvDialog({ open, environment, platform, onClose, t }: EnvDialog
                   {t('dialog.account.body')}
                 </div>
               )}
+              <div className="envx-switch-row">
+                <div>
+                  <span>{t('field.privateDesktop')}</span>
+                  <small>{t('field.privateDesktop.hint')}</small>
+                </div>
+                <Switch
+                  checked={config.desktop === 'private'}
+                  onChange={v => setConfig(c => ({ ...c, desktop: v ? 'private' : 'shared' }))}
+                  label={t('field.privateDesktop')}
+                />
+              </div>
+              <div className="envx-switch-row">
+                <div>
+                  <span>{t('field.sessionDesktop')}</span>
+                  <small>{t('field.sessionDesktop.hint')}</small>
+                </div>
+                <Switch
+                  checked={config.desktop === 'session'}
+                  onChange={v => setConfig(c => ({ ...c, desktop: v ? 'session' : 'shared' }))}
+                  label={t('field.sessionDesktop')}
+                />
+              </div>
             </>
           )}
 
