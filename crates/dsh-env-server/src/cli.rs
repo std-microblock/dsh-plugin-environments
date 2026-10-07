@@ -1,462 +1,198 @@
-//! Minimal command-line parsing (replaces clap; same flags and subcommands).
+//! Command-line interface (clap derive).
+//!
+//! The plugin builds these argument lists itself (`packages/plugin/src`: `serve`,
+//! `connect`, `stdio`, `winuser ...`), so flag names are part of its contract. The
+//! hidden `__utf8-console` trampoline is handled in `main` before clap runs.
 
+use clap::{ArgGroup, Args, Parser, Subcommand};
 use std::path::PathBuf;
 
-pub const USAGE: &str = "\
-Remote environment server for the DeepSeek Harness environments plugin
-
-Usage: dsh-env-server <COMMAND>
-
-Commands:
-  serve    Listen for the plugin (TCP or WebSocket, always over the secure channel)
-             --listen <ADDR>      host:port, tcp://host:port or ws://host:port/path
-                                  [default: 127.0.0.1:7461]
-             --token-stdin        Read the shared secret from the first line of stdin
-             --token-file <PATH>  Read the shared secret from a file
-             --token <TOKEN>      Shared secret (visible to other users in ps; avoid)
-                                  Without a secret a random one is generated and printed.
-             --cwd <PATH>         Working directory for relative paths (`~` = home)
-             --once               Exit after the first connection ends
-             --exit-idle          Exit when the last session ends
-             --lifeline           Exit (killing every spawned process) when stdin closes
-  connect  Dial the plugin (reverse connection), reconnecting with backoff
-             <URL>                tcp://host:port or ws://host:port/path
-             --id <ID>            Environment id configured in the plugin
-             --token-stdin | --token-file <PATH> | --token <TOKEN>
-             --cwd <PATH>
-             --lifeline
-  stdio    Serve exactly one session on stdin/stdout
-             --cwd <PATH>
-  winuser  Manage dsh-managed local Windows accounts
-             create --name <N> --secret-out <PATH>
-             delete --name <N> [--purge-profile]
-             list
-             launch --name <N> --secret-file <PATH> [--cwd <PATH>] [--supervise]
-                    [--desktop <NAME>] -- <PROGRAM>...
-             grant  --name <N> --path <PATH>
-             rdp-file --name <N> --secret-file <PATH> --out <PATH> [--host H] [--port P]
-                      [--width W] [--height H] [--shell <CMD>]
-
-  session  Real-session mode (one Windows session per isolated account)
-             status               Report whether this machine can host one, and why not
-             install --payload <DIR> [--target <DIR>] [--no-exclusion]   Install TermWrap (elevated; needs a reboot)
-             allow --account <N>  Let the account log on through Remote Desktop (elevated)
-
-Options:
-  -h, --help     Print help
-  -V, --version  Print version
-";
-
-#[derive(Debug, PartialEq)]
-pub enum WinUserCmd {
-    Create {
-        name: String,
-        secret_out: String,
-    },
-    Delete {
-        name: String,
-        purge_profile: bool,
-    },
-    List,
-    Launch {
-        name: String,
-        secret_file: String,
-        cwd: Option<String>,
-        /// Desktop to start the program on (`winsta0\<NAME>`), created if missing and kept
-        /// alive for as long as this launcher runs. Absent = the caller's own desktop.
-        desktop: Option<String>,
-        program: Vec<String>,
-        /// Stay alive, holding the process in a kill-on-close job, until it exits or
-        /// stdin closes.
-        supervise: bool,
-    },
-    Grant {
-        name: String,
-        path: String,
-    },
-    /// Write a `.rdp` that logs the account into a session of its own and starts a program there.
-    RdpFile {
-        name: String,
-        secret_file: String,
-        out: String,
-        host: String,
-        port: u16,
-        width: u32,
-        height: u32,
-        shell: Option<String>,
-    },
+#[derive(Parser, Debug, PartialEq)]
+#[command(
+    name = "dsh-env-server",
+    version,
+    about = "Remote environment server for the DeepSeek Harness environments plugin",
+    disable_help_subcommand = true
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub cmd: Cmd,
 }
 
-/// Where the shared secret comes from.
-#[derive(Debug, PartialEq, Default)]
+/// Where the shared secret comes from (at most one source).
+#[derive(Args, Debug, PartialEq, Default)]
+#[group(id = "secret", multiple = false)]
 pub struct SecretSource {
+    /// Shared secret (visible to other users in `ps`; prefer --token-stdin)
+    #[arg(long, value_name = "TOKEN")]
     pub token: Option<String>,
+    /// Read the shared secret from a file
+    #[arg(long = "token-file", value_name = "PATH")]
     pub file: Option<PathBuf>,
+    /// Read the shared secret from the first line of stdin
+    #[arg(long = "token-stdin")]
     pub stdin: bool,
 }
 
-impl SecretSource {
-    fn from(o: &Opts) -> Result<SecretSource, String> {
-        let s = SecretSource {
-            token: o.get("token"),
-            file: o.get("token-file").map(PathBuf::from),
-            stdin: o.has("token-stdin"),
-        };
-        let n = s.token.is_some() as u8 + s.file.is_some() as u8 + s.stdin as u8;
-        if n > 1 {
-            return Err("use only one of --token, --token-file, --token-stdin".into());
-        }
-        Ok(s)
-    }
+#[derive(Subcommand, Debug, PartialEq)]
+pub enum Cmd {
+    /// Listen for the plugin (TCP or WebSocket, always over the secure channel)
+    ///
+    /// Without a secret a random one is generated and printed.
+    Serve {
+        /// host:port, tcp://host:port or ws://host:port/path
+        #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:7461")]
+        listen: String,
+        #[command(flatten)]
+        secret: SecretSource,
+        /// Working directory for relative paths (`~` = home)
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<PathBuf>,
+        /// Exit after the first connection ends
+        #[arg(long)]
+        once: bool,
+        /// Exit when the last session ends
+        #[arg(long = "exit-idle")]
+        exit_idle: bool,
+        /// Exit (killing every spawned process) when stdin closes
+        #[arg(long)]
+        lifeline: bool,
+    },
+    /// Dial the plugin (reverse connection), reconnecting with backoff
+    #[command(group(ArgGroup::new("secret-required").args(["token", "file", "stdin"]).required(true)))]
+    Connect {
+        /// tcp://host:port or ws://host:port/path
+        url: String,
+        /// Environment id configured in the plugin
+        #[arg(long)]
+        id: String,
+        #[command(flatten)]
+        secret: SecretSource,
+        /// Working directory for relative paths (`~` = home)
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<PathBuf>,
+        /// Exit (killing every spawned process) when stdin closes
+        #[arg(long)]
+        lifeline: bool,
+    },
+    /// Serve exactly one session on stdin/stdout
+    Stdio {
+        /// Working directory for relative paths (`~` = home)
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<PathBuf>,
+    },
+    /// Manage dsh-managed local Windows accounts
+    #[command(subcommand)]
+    Winuser(WinUserCmd),
+    /// Real-session mode: one real Windows session per isolated account
+    #[command(subcommand)]
+    Session(SessionCmd),
 }
 
-#[derive(Debug, PartialEq)]
+/// Real-session mode (one Windows session per isolated account).
+#[derive(Subcommand, Debug, PartialEq)]
 pub enum SessionCmd {
-    /// Report whether this machine can host a real separate session, and why not.
+    /// Report whether this machine can host a real separate session, and why not
     Status,
-    /// Install the bundled TermWrap payload and enable the Remote Desktop host (elevated).
+    /// Install the bundled TermWrap payload and enable the Remote Desktop host (elevated)
     Install {
+        #[arg(long, value_name = "DIR")]
         payload: String,
+        #[arg(long, value_name = "DIR")]
         target: Option<String>,
-        /// Add a Defender exclusion for the install directory first (default on).
+        /// Add a Defender exclusion for the install directory first (default on)
+        #[arg(long = "no-exclusion", action = clap::ArgAction::SetFalse)]
         exclusion: bool,
     },
-    /// Let an account log on through Remote Desktop (elevated).
-    Allow { account: String },
-}
-
-#[derive(Debug, PartialEq)]
-pub enum Cmd {
-    Serve {
-        listen: String,
-        secret: SecretSource,
-        cwd: Option<PathBuf>,
-        once: bool,
-        exit_idle: bool,
-        lifeline: bool,
+    /// Let an account log on through Remote Desktop (elevated)
+    Allow {
+        #[arg(long)]
+        account: String,
     },
-    Connect {
-        url: String,
-        id: String,
-        secret: SecretSource,
-        cwd: Option<PathBuf>,
-        lifeline: bool,
+}
+
+#[derive(Subcommand, Debug, PartialEq)]
+pub enum WinUserCmd {
+    /// Create an account and store its DPAPI-protected password
+    Create {
+        #[arg(long)]
+        name: String,
+        #[arg(long = "secret-out", value_name = "PATH")]
+        secret_out: String,
     },
-    Stdio {
-        cwd: Option<PathBuf>,
+    /// Delete a dsh-managed account
+    Delete {
+        #[arg(long)]
+        name: String,
+        /// Also remove the account's profile directory
+        #[arg(long = "purge-profile")]
+        purge_profile: bool,
     },
-    Winuser(WinUserCmd),
-    Session(SessionCmd),
-    Help,
-    Version,
-}
-
-/// Parsed `--key value` / `--key=value` / `--flag` options plus trailing args after `--`.
-struct Opts {
-    pairs: Vec<(String, Option<String>)>,
-    rest: Vec<String>,
-    saw_dashdash: bool,
-}
-
-impl Opts {
-    fn parse(args: &[String], flags: &[&str], values: &[&str]) -> Result<Opts, String> {
-        let mut pairs = Vec::new();
-        let mut i = 0;
-        while i < args.len() {
-            let a = &args[i];
-            if a == "--" {
-                return Ok(Opts {
-                    pairs,
-                    rest: args[i + 1..].to_vec(),
-                    saw_dashdash: true,
-                });
-            }
-            if a == "-h" || a == "--help" {
-                pairs.push(("help".into(), None));
-                i += 1;
-                continue;
-            }
-            let Some(body) = a.strip_prefix("--") else {
-                return Err(format!("unexpected argument '{a}'"));
-            };
-            let (key, inline) = match body.split_once('=') {
-                Some((k, v)) => (k, Some(v.to_string())),
-                None => (body, None),
-            };
-            if flags.contains(&key) {
-                if inline.is_some() {
-                    return Err(format!("unexpected value for '--{key}'"));
-                }
-                pairs.push((key.to_string(), None));
-            } else if values.contains(&key) {
-                let v = match inline {
-                    Some(v) => v,
-                    None => {
-                        i += 1;
-                        args.get(i)
-                            .cloned()
-                            .ok_or_else(|| format!("a value is required for '--{key} <VALUE>'"))?
-                    }
-                };
-                if pairs.iter().any(|(k, _)| k == key) {
-                    return Err(format!(
-                        "the argument '--{key}' cannot be used multiple times"
-                    ));
-                }
-                pairs.push((key.to_string(), Some(v)));
-            } else {
-                return Err(format!("unexpected argument '--{key}'"));
-            }
-            i += 1;
-        }
-        Ok(Opts {
-            pairs,
-            rest: Vec::new(),
-            saw_dashdash: false,
-        })
-    }
-    fn has(&self, k: &str) -> bool {
-        self.pairs.iter().any(|(key, _)| key == k)
-    }
-    fn get(&self, k: &str) -> Option<String> {
-        self.pairs
-            .iter()
-            .find(|(key, _)| key == k)
-            .and_then(|(_, v)| v.clone())
-    }
-    fn req(&self, k: &str) -> Result<String, String> {
-        self.get(k).ok_or_else(|| {
-            format!("the following required arguments were not provided: --{k} <VALUE>")
-        })
-    }
-}
-
-pub fn parse(args: &[String]) -> Result<Cmd, String> {
-    let Some(sub) = args.first() else {
-        return Err("missing command".into());
-    };
-    let rest = &args[1..];
-    let no_rest = |o: &Opts| {
-        if o.saw_dashdash && !o.rest.is_empty() {
-            Err(format!("unexpected argument '{}'", o.rest[0]))
-        } else {
-            Ok(())
-        }
-    };
-    match sub.as_str() {
-        "-h" | "--help" | "help" => Ok(Cmd::Help),
-        "-V" | "--version" => Ok(Cmd::Version),
-        "serve" => {
-            let o = Opts::parse(
-                rest,
-                &["once", "exit-idle", "lifeline", "token-stdin"],
-                &["listen", "token", "token-file", "cwd"],
-            )?;
-            no_rest(&o)?;
-            if o.has("help") {
-                return Ok(Cmd::Help);
-            }
-            Ok(Cmd::Serve {
-                listen: o.get("listen").unwrap_or_else(|| "127.0.0.1:7461".into()),
-                secret: SecretSource::from(&o)?,
-                cwd: o.get("cwd").map(PathBuf::from),
-                once: o.has("once"),
-                exit_idle: o.has("exit-idle"),
-                lifeline: o.has("lifeline"),
-            })
-        }
-        "connect" => {
-            let (url, rest) = match rest.first() {
-                Some(u) if !u.starts_with('-') => (Some(u.clone()), &rest[1..]),
-                _ => (None, rest),
-            };
-            let o = Opts::parse(
-                rest,
-                &["lifeline", "token-stdin"],
-                &["id", "token", "token-file", "cwd"],
-            )?;
-            no_rest(&o)?;
-            if o.has("help") {
-                return Ok(Cmd::Help);
-            }
-            let secret = SecretSource::from(&o)?;
-            if secret == SecretSource::default() {
-                return Err(
-                    "connect needs a secret: --token-stdin, --token-file or --token".into(),
-                );
-            }
-            Ok(Cmd::Connect {
-                url: url.ok_or("the following required arguments were not provided: <URL>")?,
-                id: o.req("id")?,
-                secret,
-                cwd: o.get("cwd").map(PathBuf::from),
-                lifeline: o.has("lifeline"),
-            })
-        }
-        "stdio" => {
-            let o = Opts::parse(rest, &[], &["cwd"])?;
-            no_rest(&o)?;
-            if o.has("help") {
-                return Ok(Cmd::Help);
-            }
-            Ok(Cmd::Stdio {
-                cwd: o.get("cwd").map(PathBuf::from),
-            })
-        }
-        "session" => {
-            // Capability probe for the "one real Windows session per isolated account" mode.
-            let (action, rest) = match rest.first() {
-                Some(a) if !a.starts_with('-') => (Some(a.clone()), &rest[1..]),
-                _ => (None, rest),
-            };
-            let o = Opts::parse(
-                rest,
-                if action.as_deref() == Some("install") {
-                    &["no-exclusion"]
-                } else {
-                    &[]
-                },
-                if action.as_deref() == Some("install") {
-                    &["payload", "target"]
-                } else if action.as_deref() == Some("allow") {
-                    &["account"]
-                } else {
-                    &[]
-                },
-            )?;
-            no_rest(&o)?;
-            if o.has("help") {
-                return Ok(Cmd::Help);
-            }
-            match action.as_deref() {
-                Some("status") | None => Ok(Cmd::Session(SessionCmd::Status)),
-                Some("install") => Ok(Cmd::Session(SessionCmd::Install {
-                    payload: o.req("payload")?,
-                    target: o.get("target"),
-                    exclusion: !o.has("no-exclusion"),
-                })),
-                Some("allow") => Ok(Cmd::Session(SessionCmd::Allow {
-                    account: o.req("account")?,
-                })),
-                Some(other) => Err(format!("unknown session command `{other}`")),
-            }
-        }
-        "winuser" => {
-            let Some(op) = rest.first() else {
-                return Err("missing winuser command".into());
-            };
-            let rest = &rest[1..];
-            let cmd = match op.as_str() {
-                "-h" | "--help" | "help" => return Ok(Cmd::Help),
-                "create" => {
-                    let o = Opts::parse(rest, &[], &["name", "secret-out"])?;
-                    no_rest(&o)?;
-                    if o.has("help") {
-                        return Ok(Cmd::Help);
-                    }
-                    WinUserCmd::Create {
-                        name: o.req("name")?,
-                        secret_out: o.req("secret-out")?,
-                    }
-                }
-                "delete" => {
-                    let o = Opts::parse(rest, &["purge-profile"], &["name"])?;
-                    no_rest(&o)?;
-                    if o.has("help") {
-                        return Ok(Cmd::Help);
-                    }
-                    WinUserCmd::Delete {
-                        name: o.req("name")?,
-                        purge_profile: o.has("purge-profile"),
-                    }
-                }
-                "list" => {
-                    let o = Opts::parse(rest, &[], &[])?;
-                    no_rest(&o)?;
-                    if o.has("help") {
-                        return Ok(Cmd::Help);
-                    }
-                    WinUserCmd::List
-                }
-                "launch" => {
-                    let o = Opts::parse(
-                        rest,
-                        &["supervise"],
-                        &["name", "secret-file", "cwd", "desktop"],
-                    )?;
-                    if o.has("help") {
-                        return Ok(Cmd::Help);
-                    }
-                    if o.rest.is_empty() {
-                        return Err(
-                            "the following required arguments were not provided: -- <PROGRAM>..."
-                                .into(),
-                        );
-                    }
-                    WinUserCmd::Launch {
-                        name: o.req("name")?,
-                        secret_file: o.req("secret-file")?,
-                        cwd: o.get("cwd"),
-                        desktop: o.get("desktop"),
-                        supervise: o.has("supervise"),
-                        program: o.rest,
-                    }
-                }
-                "grant" => {
-                    let o = Opts::parse(rest, &[], &["name", "path"])?;
-                    no_rest(&o)?;
-                    if o.has("help") {
-                        return Ok(Cmd::Help);
-                    }
-                    WinUserCmd::Grant {
-                        name: o.req("name")?,
-                        path: o.req("path")?,
-                    }
-                }
-                "rdp-file" => {
-                    let o = Opts::parse(
-                        rest,
-                        &[],
-                        &[
-                            "name",
-                            "secret-file",
-                            "out",
-                            "host",
-                            "port",
-                            "width",
-                            "height",
-                            "shell",
-                        ],
-                    )?;
-                    no_rest(&o)?;
-                    if o.has("help") {
-                        return Ok(Cmd::Help);
-                    }
-                    WinUserCmd::RdpFile {
-                        name: o.req("name")?,
-                        secret_file: o.req("secret-file")?,
-                        out: o.req("out")?,
-                        host: o.get("host").unwrap_or_else(|| "127.0.0.1".into()),
-                        port: o.get("port").and_then(|p| p.parse().ok()).unwrap_or(3389),
-                        width: o.get("width").and_then(|p| p.parse().ok()).unwrap_or(1280),
-                        height: o.get("height").and_then(|p| p.parse().ok()).unwrap_or(800),
-                        shell: o.get("shell"),
-                    }
-                }
-                other => return Err(format!("unrecognized subcommand '{other}'")),
-            };
-            Ok(Cmd::Winuser(cmd))
-        }
-        other => Err(format!("unrecognized subcommand '{other}'")),
-    }
+    /// List dsh-managed accounts (JSON)
+    List,
+    /// Start a program as the account on the interactive desktop
+    Launch {
+        #[arg(long)]
+        name: String,
+        #[arg(long = "secret-file", value_name = "PATH")]
+        secret_file: String,
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<String>,
+        /// Desktop to start the program on (`winsta0\<NAME>`), created if missing and kept
+        /// alive for as long as this launcher runs. Absent = the caller's own desktop.
+        #[arg(long, value_name = "NAME")]
+        desktop: Option<String>,
+        /// Stay alive, holding the process in a kill-on-close job, until it exits or
+        /// stdin closes
+        #[arg(long)]
+        supervise: bool,
+        /// Program and arguments (after `--`)
+        #[arg(last = true, required = true, value_name = "PROGRAM")]
+        program: Vec<String>,
+    },
+    /// Grant the account modify access to a directory tree
+    Grant {
+        #[arg(long)]
+        name: String,
+        #[arg(long, value_name = "PATH")]
+        path: String,
+    },
+    /// Write a `.rdp` that logs the account into a session of its own and starts a program there
+    RdpFile {
+        #[arg(long)]
+        name: String,
+        #[arg(long = "secret-file", value_name = "PATH")]
+        secret_file: String,
+        #[arg(long, value_name = "PATH")]
+        out: String,
+        /// Host the client connects to
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 3389)]
+        port: u16,
+        #[arg(long, default_value_t = 1280)]
+        width: u32,
+        #[arg(long, default_value_t = 800)]
+        height: u32,
+        /// Program to start in the session
+        #[arg(long)]
+        shell: Option<String>,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
-    fn p(s: &[&str]) -> Result<Cmd, String> {
-        parse(&s.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    fn p(s: &[&str]) -> Result<Cmd, clap::Error> {
+        Cli::try_parse_from(std::iter::once("dsh-env-server").chain(s.iter().copied()))
+            .map(|c| c.cmd)
+    }
+
+    #[test]
+    fn definition_is_valid() {
+        Cli::command().debug_assert();
     }
 
     #[test]
@@ -498,6 +234,7 @@ mod tests {
         assert!(p(&["serve", "--bogus"]).is_err());
         assert!(p(&["serve", "--token"]).is_err());
         assert!(p(&["serve", "--token", "a", "--token-stdin"]).is_err());
+        assert!(p(&["serve", "--once", "--once"]).is_err());
         match p(&["serve", "--token-stdin", "--lifeline", "--exit-idle"]).unwrap() {
             Cmd::Serve {
                 secret,
@@ -526,9 +263,46 @@ mod tests {
                 lifeline: false,
             }
         );
+        // The plugin's argument order (reverse.test.ts / connect.ts).
+        assert!(matches!(
+            p(&[
+                "connect",
+                "tcp://h:1",
+                "--id",
+                "e1",
+                "--token-stdin",
+                "--lifeline",
+                "--cwd",
+                "/c"
+            ]),
+            Ok(Cmd::Connect { lifeline: true, .. })
+        ));
         assert!(p(&["connect", "tcp://h:1", "--id", "e1"]).is_err());
         assert!(p(&["connect", "--id", "e1", "--token-stdin"]).is_err());
         assert!(p(&["connect", "tcp://h:1", "--token-stdin"]).is_err());
+        assert!(
+            p(&[
+                "connect",
+                "tcp://h:1",
+                "--id",
+                "e1",
+                "--token",
+                "a",
+                "--token-stdin"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn stdio_args() {
+        assert_eq!(
+            p(&["stdio", "--cwd", "/w"]).unwrap(),
+            Cmd::Stdio {
+                cwd: Some("/w".into())
+            }
+        );
+        assert!(p(&["stdio", "extra"]).is_err());
     }
 
     #[test]
@@ -579,7 +353,8 @@ mod tests {
                 supervise: true,
             })
         );
-        assert!(matches!(
+        // The plugin's launch line (winuser-env.ts): the program's own flags follow `--`.
+        assert_eq!(
             p(&[
                 "winuser",
                 "launch",
@@ -588,19 +363,80 @@ mod tests {
                 "--secret-file",
                 "s",
                 "--supervise",
+                "--cwd",
+                "C:\\w",
                 "--",
-                "a"
-            ]),
-            Ok(Cmd::Winuser(WinUserCmd::Launch {
+                "srv.exe",
+                "serve",
+                "--listen",
+                "127.0.0.1:1",
+                "--token",
+                "t",
+                "--once",
+                "--cwd",
+                "~"
+            ])
+            .unwrap(),
+            Cmd::Winuser(WinUserCmd::Launch {
+                name: "u".into(),
+                secret_file: "s".into(),
+                cwd: Some("C:\\w".into()),
+                desktop: None,
+                program: [
+                    "srv.exe",
+                    "serve",
+                    "--listen",
+                    "127.0.0.1:1",
+                    "--token",
+                    "t",
+                    "--once",
+                    "--cwd",
+                    "~"
+                ]
+                .map(String::from)
+                .to_vec(),
                 supervise: true,
-                ..
-            }))
-        ));
+            })
+        );
         assert!(p(&["winuser", "launch", "--name", "u", "--secret-file", "s"]).is_err());
         assert_eq!(
             p(&["winuser", "list"]).unwrap(),
             Cmd::Winuser(WinUserCmd::List)
         );
         assert!(p(&["winuser", "create", "--name", "u"]).is_err());
+        assert_eq!(
+            p(&["winuser", "delete", "--name", "u", "--purge-profile"]).unwrap(),
+            Cmd::Winuser(WinUserCmd::Delete {
+                name: "u".into(),
+                purge_profile: true
+            })
+        );
+        assert_eq!(
+            p(&["winuser", "grant", "--name", "u", "--path", "C:\\d"]).unwrap(),
+            Cmd::Winuser(WinUserCmd::Grant {
+                name: "u".into(),
+                path: "C:\\d".into()
+            })
+        );
+    }
+
+    #[test]
+    fn help_and_version() {
+        use clap::error::ErrorKind;
+        assert_eq!(
+            p(&["--version"]).unwrap_err().kind(),
+            ErrorKind::DisplayVersion
+        );
+        assert_eq!(p(&["-V"]).unwrap_err().kind(), ErrorKind::DisplayVersion);
+        assert_eq!(p(&["--help"]).unwrap_err().kind(), ErrorKind::DisplayHelp);
+        assert_eq!(
+            p(&["serve", "-h"]).unwrap_err().kind(),
+            ErrorKind::DisplayHelp
+        );
+        let help = Cli::command().render_long_help().to_string();
+        for sub in ["serve", "connect", "stdio", "winuser", "session"] {
+            assert!(help.contains(sub), "{help}");
+        }
+        assert!(p(&[]).is_err());
     }
 }

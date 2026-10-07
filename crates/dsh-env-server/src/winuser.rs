@@ -2,7 +2,9 @@
 
 #[cfg(windows)]
 mod imp {
-    use super::{Result, bail};
+    use anyhow::{Context, Result, bail};
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64;
     use serde_json::json;
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
@@ -227,10 +229,12 @@ mod imp {
         shell: Option<&str>,
     ) -> Result<serde_json::Value> {
         let encoded = std::fs::read_to_string(secret_file)
-            .map_err(|e| format!("reading {secret_file}: {e}"))?;
-        let protected = crate::util::base64_decode(encoded.trim())?;
-        let password =
-            String::from_utf8(dpapi_unprotect(&protected)?).map_err(|e| e.to_string())?;
+            .with_context(|| format!("reading {secret_file}"))?;
+        let protected = BASE64
+            .decode(encoded.trim())
+            .with_context(|| format!("decoding {secret_file}"))?;
+        let password = String::from_utf8(dpapi_unprotect(&protected)?)
+            .context("the stored password is not UTF-8")?;
         // mstsc expects the password as DPAPI-protected UTF-16LE, hex encoded.
         let mut utf16: Vec<u8> = Vec::with_capacity(password.len() * 2);
         for unit in password.encode_utf16() {
@@ -248,7 +252,7 @@ mod imp {
             password_hex: &hex,
         });
         std::fs::write(out_path, text.as_bytes())
-            .map_err(|e| format!("writing {out_path}: {e}"))?;
+            .with_context(|| format!("writing {out_path}"))?;
         Ok(json!({
             "ok": true,
             "path": out_path,
@@ -345,7 +349,7 @@ mod imp {
             .args(args)
             .stdin(std::process::Stdio::null())
             .output()
-            .map_err(|e| format!("{program}: {e}"))?;
+            .with_context(|| program.to_string())?;
         let cp = crate::util::codepage::oem();
         let mut text = crate::util::codepage::decode_any(cp, &out.stdout);
         text.push_str(&crate::util::codepage::decode_any(cp, &out.stderr));
@@ -379,8 +383,8 @@ mod imp {
             bail!("NetUserAdd failed with code {rc} (parameter {parm_err})");
         }
         let protected = dpapi_protect(password.as_bytes())?;
-        let encoded = crate::util::base64_encode(&protected);
-        std::fs::write(secret_out, encoded).map_err(|e| format!("writing {secret_out}: {e}"))?;
+        let encoded = BASE64.encode(&protected);
+        std::fs::write(secret_out, encoded).with_context(|| format!("writing {secret_out}"))?;
         Ok(json!({"ok": true, "name": name}))
     }
 
@@ -583,20 +587,22 @@ mod imp {
                         "--desktop needs --supervise: the desktop is destroyed when its last handle closes, so the launcher has to stay alive while the environment runs"
                     );
                 }
-                Some(crate::desktop::Desktop::open_or_create(
-                    d,
-                    &[name.to_string()],
-                )?)
+                Some(
+                    crate::desktop::Desktop::open_or_create(d, &[name.to_string()])
+                        .map_err(anyhow::Error::msg)?,
+                )
             }
         };
         let wdesktop = private
             .as_ref()
             .map(|d| wide(&format!("winsta0\\{}", d.name)));
         let encoded = std::fs::read_to_string(secret_file)
-            .map_err(|e| format!("reading {secret_file}: {e}"))?;
-        let protected = crate::util::base64_decode(encoded.trim())?;
-        let password =
-            String::from_utf8(dpapi_unprotect(&protected)?).map_err(|e| e.to_string())?;
+            .with_context(|| format!("reading {secret_file}"))?;
+        let protected = BASE64
+            .decode(encoded.trim())
+            .with_context(|| format!("decoding {secret_file}"))?;
+        let password = String::from_utf8(dpapi_unprotect(&protected)?)
+            .context("the stored password is not UTF-8")?;
         let cmdline = program
             .iter()
             .map(|a| quote_arg(a))
@@ -727,50 +733,12 @@ mod imp {
     }
 }
 
-/// Error type for winuser commands (message only).
-#[cfg(windows)]
-#[derive(Debug)]
-pub struct Error(pub String);
-
-#[cfg(windows)]
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-#[cfg(windows)]
-impl From<String> for Error {
-    fn from(s: String) -> Self {
-        Error(s)
-    }
-}
-
-#[cfg(windows)]
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Error(e.to_string())
-    }
-}
-
-#[cfg(windows)]
-pub type Result<T> = std::result::Result<T, Error>;
-
-#[cfg(windows)]
-macro_rules! bail {
-    ($($t:tt)*) => {
-        return Err($crate::winuser::Error(format!($($t)*)))
-    };
-}
-#[cfg(windows)]
-pub(crate) use bail;
-
 pub use crate::cli::WinUserCmd;
 
-pub fn run(cmd: WinUserCmd) -> std::result::Result<serde_json::Value, String> {
+pub fn run(cmd: WinUserCmd) -> anyhow::Result<serde_json::Value> {
     #[cfg(windows)]
     {
-        let r = match cmd {
+        match cmd {
             WinUserCmd::Create { name, secret_out } => imp::create(&name, &secret_out),
             WinUserCmd::Delete {
                 name,
@@ -812,13 +780,12 @@ pub fn run(cmd: WinUserCmd) -> std::result::Result<serde_json::Value, String> {
                 height,
                 shell.as_deref(),
             ),
-        };
-        r.map_err(|e| e.0)
+        }
     }
     #[cfg(not(windows))]
     {
         let _ = cmd;
-        Err("winuser commands are only available on Windows".into())
+        anyhow::bail!("winuser commands are only available on Windows")
     }
 }
 
@@ -882,6 +849,7 @@ mod tests {
             false,
         )
         .unwrap_err();
-        assert!(e.0.contains("reading"), "{}", e.0);
+        let e = format!("{e:#}");
+        assert!(e.contains("reading"), "{e}");
     }
 }

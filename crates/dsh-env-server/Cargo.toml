@@ -6,9 +6,17 @@ description = "Remote environment server for the DeepSeek Harness environments p
 license = "MIT"
 repository = "https://github.com/std-microblock/dsh-plugin-environments"
 
-# Dependencies are deliberately few and feature-trimmed: the binary ships for five
-# targets inside the plugin package. See docs/building-server.md before adding any.
+# The binary ships for five targets inside the plugin package: prefer established
+# crates, but trim their features (default-features = false) and keep size in check
+# through the build profiles. See docs/building-server.md.
 [dependencies]
+# Internal / CLI errors. Without `std` there is no backtrace capture (which would
+# pull std's symbolizer back into the nightly immediate-abort build); `?` and
+# `.context()` work the same through `core::error::Error`.
+anyhow = { version = "1", default-features = false }
+base64 = "0.23"
+# CLI; colours, "did you mean" suggestions and terminal-width help wrapping are off.
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 # Secure channel for network transports (docs/protocol.md "Secure channel").
 aes-gcm = { version = "0.10", default-features = false, features = ["aes"] }
 getrandom = "0.3"
@@ -16,12 +24,18 @@ hkdf = "0.12"
 hmac = "0.12"
 sha1 = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false }
-miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
-regex-lite = "0.1"
+# fs.glob / fs.grep: ripgrep's walker, glob matcher and search engine.
+globset = { version = "0.4", default-features = false }
+grep-matcher = "0.1"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+ignore = "0.4"
 serde_json = { version = "1", default-features = false, features = ["std"] }
 tokio = { version = "1", default-features = false, features = ["rt", "net", "io-util", "io-std", "process", "time", "sync", "fs", "macros"] }
 
 [target."cfg(windows)".dependencies]
+# Screenshot encoding (sys.screenshot is Windows-only).
+png = { version = "0.18", default-features = false }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Globalization",

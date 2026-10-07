@@ -17,11 +17,12 @@ mod sys;
 mod termwrap;
 mod transport;
 mod util;
-mod walk;
 mod winuser;
 mod ws;
 
-use cli::Cmd;
+use anyhow::Context;
+use clap::Parser;
+use cli::{Cli, Cmd};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,37 +51,27 @@ fn runtime() -> tokio::runtime::Runtime {
 fn main() {
     #[cfg(windows)]
     {
+        // Hidden trampoline (see proc.rs); handled before clap so the program's own
+        // arguments are passed through untouched.
         let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
         if raw.first().is_some_and(|a| a == proc::UTF8_TRAMPOLINE) {
             std::process::exit(proc::utf8_trampoline(&raw[1..]));
         }
     }
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let cmd = match cli::parse(&args) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: {e}\n\n{}", cli::USAGE);
-            std::process::exit(2);
-        }
-    };
+    let cmd = Cli::parse().cmd;
     #[cfg(windows)]
     sys::win::init_dpi();
     let code = match cmd {
-        Cmd::Help => {
-            print!("{}", cli::USAGE);
-            0
-        }
-        Cmd::Version => {
-            println!("dsh-env-server {}", sys::VERSION);
-            0
-        }
         Cmd::Winuser(cmd) => match winuser::run(cmd) {
             Ok(v) => {
                 println!("{v}");
                 0
             }
             Err(e) => {
-                println!("{}", serde_json::json!({"ok": false, "error": e}));
+                println!(
+                    "{}",
+                    serde_json::json!({"ok": false, "error": format!("{e:#}")})
+                );
                 1
             }
         },
@@ -114,7 +105,7 @@ fn main() {
                     t
                 }
                 Err(e) => {
-                    eprintln!("dsh-env-server: {e}");
+                    eprintln!("dsh-env-server: {e:#}");
                     std::process::exit(1);
                 }
             };
@@ -122,7 +113,7 @@ fn main() {
                 lifeline,
                 Box::new(move |life| {
                     Box::pin(async move {
-                        let listen = transport::Endpoint::parse(&listen).map_err(invalid_input)?;
+                        let listen = transport::Endpoint::parse(&listen).context("--listen")?;
                         let opts = transport::ServeOptions {
                             listen,
                             secret,
@@ -151,7 +142,7 @@ fn main() {
                     std::process::exit(1);
                 }
                 Err(e) => {
-                    eprintln!("dsh-env-server: {e}");
+                    eprintln!("dsh-env-server: {e:#}");
                     std::process::exit(1);
                 }
             };
@@ -159,7 +150,7 @@ fn main() {
                 lifeline,
                 Box::new(move |life| {
                     Box::pin(async move {
-                        let url = transport::Endpoint::parse(&url).map_err(invalid_input)?;
+                        let url = transport::Endpoint::parse(&url).context("<URL>")?;
                         let opts = transport::ConnectOptions {
                             url,
                             secret,
@@ -203,13 +194,9 @@ fn main() {
     std::process::exit(code);
 }
 
-fn invalid_input(msg: String) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidInput, msg)
-}
-
 /// Run a network command, then shut every session down (killing their process trees) before
 /// the process exits.
-type CmdFuture = std::pin::Pin<Box<dyn Future<Output = std::io::Result<()>>>>;
+type CmdFuture = std::pin::Pin<Box<dyn Future<Output = anyhow::Result<()>>>>;
 
 fn run(lifeline: bool, f: Box<dyn FnOnce(Arc<transport::Lifetime>) -> CmdFuture>) -> i32 {
     let rt = runtime();
@@ -224,7 +211,7 @@ fn run(lifeline: bool, f: Box<dyn FnOnce(Arc<transport::Lifetime>) -> CmdFuture>
         match r {
             Ok(()) => 0,
             Err(e) => {
-                eprintln!("dsh-env-server: {e}");
+                eprintln!("dsh-env-server: {e:#}");
                 1
             }
         }

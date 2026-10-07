@@ -1,6 +1,8 @@
 //! Minimal WebSocket (RFC 6455) transport: HTTP upgrade on both sides, binary frames,
 //! masking, ping/pong and close. The binary message payloads form one byte stream.
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use sha1::{Digest, Sha1};
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -29,7 +31,7 @@ pub fn accept_key(key: &str) -> String {
     let mut h = Sha1::new();
     h.update(key.trim().as_bytes());
     h.update(GUID.as_bytes());
-    crate::util::base64_encode(&h.finalize())
+    BASE64.encode(h.finalize())
 }
 
 /// Encode one (final) frame. Clients must pass a mask.
@@ -231,7 +233,7 @@ pub async fn connect(
 ) -> io::Result<Stream> {
     let mut nonce = [0u8; 16];
     crate::util::random_bytes(&mut nonce);
-    let key = crate::util::base64_encode(&nonce);
+    let key = BASE64.encode(nonce);
     let req = format!(
         "GET {path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\nUser-Agent: dsh-env-server/{}\r\n\r\n",
         crate::sys::VERSION

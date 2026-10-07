@@ -2,6 +2,7 @@
 //! always through the secure channel, plus lifetime control (lifeline, exit when unused).
 
 use crate::session::{self, ConnOptions};
+use anyhow::{Context, bail};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,7 +24,7 @@ pub enum Endpoint {
 
 impl Endpoint {
     /// Parse `host:port`, `tcp://host:port` or `ws://host:port[/path]`.
-    pub fn parse(s: &str) -> Result<Endpoint, String> {
+    pub fn parse(s: &str) -> anyhow::Result<Endpoint> {
         let s = s.trim();
         if let Some(rest) = s.strip_prefix("ws://") {
             let (addr, path) = match rest.find('/') {
@@ -37,16 +38,15 @@ impl Endpoint {
             });
         }
         if s.starts_with("wss://") {
-            return Err(
+            bail!(
                 "wss:// is not supported by the server; listen on ws:// behind a TLS reverse proxy"
-                    .into(),
             );
         }
         let addr = s.strip_prefix("tcp://").unwrap_or(s).trim_end_matches('/');
         if addr.contains("://") {
-            return Err(format!(
+            bail!(
                 "unsupported address '{s}' (use host:port, tcp://host:port or ws://host:port/path)"
-            ));
+            );
         }
         check_addr(addr)?;
         Ok(Endpoint::Tcp {
@@ -61,10 +61,10 @@ impl Endpoint {
     }
 }
 
-fn check_addr(addr: &str) -> Result<(), String> {
+fn check_addr(addr: &str) -> anyhow::Result<()> {
     match addr.rsplit_once(':') {
         Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => Ok(()),
-        _ => Err(format!("address '{addr}' must be host:port")),
+        _ => bail!("address '{addr}' must be host:port"),
     }
 }
 
@@ -148,23 +148,23 @@ pub fn read_secret(
     token: Option<String>,
     file: Option<PathBuf>,
     stdin: bool,
-) -> io::Result<Option<String>> {
+) -> anyhow::Result<Option<String>> {
     let s = match (token, file) {
         (Some(t), _) => t,
-        (None, Some(f)) => std::fs::read_to_string(f)?,
+        (None, Some(f)) => std::fs::read_to_string(&f)
+            .with_context(|| format!("reading the secret from {}", f.display()))?,
         (None, None) if stdin => {
             let mut line = String::new();
-            std::io::stdin().read_line(&mut line)?;
+            std::io::stdin()
+                .read_line(&mut line)
+                .context("reading the secret from stdin")?;
             line
         }
         (None, None) => return Ok(None),
     };
     let s = s.trim().to_string();
     if s.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "the secret is empty",
-        ));
+        bail!("the secret is empty");
     }
     Ok(Some(s))
 }
@@ -197,8 +197,10 @@ async fn run_session(stream: Stream, opts: ConnOptions, life: Arc<Lifetime>) -> 
 }
 
 /// `serve`: accept connections on a TCP or WebSocket listener.
-pub async fn serve(opts: ServeOptions, life: Arc<Lifetime>) -> io::Result<()> {
-    let listener = tokio::net::TcpListener::bind(opts.listen.addr()).await?;
+pub async fn serve(opts: ServeOptions, life: Arc<Lifetime>) -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::bind(opts.listen.addr())
+        .await
+        .with_context(|| format!("listening on {}", opts.listen.addr()))?;
     let local = listener.local_addr()?;
     let mut out = io::stdout();
     writeln!(out, "DSH_ENV_SERVER pid={}", std::process::id())?;
@@ -293,7 +295,7 @@ async fn dial(url: &Endpoint, secret: &[u8], id: &str) -> io::Result<Stream> {
 /// `connect`: dial the plugin and keep one spare authenticated connection waiting. When the
 /// plugin starts using it (sends `hello`) another spare is dialed. Failures back off
 /// exponentially (1 s .. 60 s).
-pub async fn connect(opts: ConnectOptions, life: Arc<Lifetime>) -> io::Result<()> {
+pub async fn connect(opts: ConnectOptions, life: Arc<Lifetime>) -> anyhow::Result<()> {
     let secret = opts.secret.into_bytes();
     let mut backoff = Duration::from_secs(1);
     let mut announced = false;
