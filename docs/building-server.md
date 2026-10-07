@@ -46,10 +46,22 @@ cargo build --release --target <triple>
 # -> target/<triple>/release/dsh-env-server[.exe]
 ```
 
-`[profile.release]` already uses `opt-level = "z"`, fat LTO, one codegen unit,
-`panic = "abort"` and `strip = true`.
+`[profile.release]` uses `opt-level = "z"`, fat LTO, one codegen unit,
+`panic = "abort"` and `strip = true`. `opt-level = "s"` was measured and is
+larger (stable release: linux x64 2650 → 2766 KiB, win x64 2404 → 2596 KiB;
+nightly dist linux x64 1764 → 1966 KiB), so `z` stays.
 
-## Nightly `dist` build (recommended for CI, ~35–45 % smaller)
+The three Linux musl targets additionally get (`.cargo/config.toml`,
+`target.<triple>.rustflags`, stable flags, used by both builds):
+
+- `-Crelocation-model=static`: a plain static executable instead of static-pie;
+  drops the runtime relocation table (`.rela.dyn`) and most of `.data.rel.ro`
+  (−178 KiB on linux x64 dist).
+- `-Cforce-unwind-tables=no`: with `panic = "abort"` nothing unwinds, so
+  `.eh_frame` is dead weight (−269 KiB on linux x64 dist). Windows x64 and macOS
+  require unwind tables, so these targets keep them.
+
+## Nightly `dist` build (recommended for CI, ~20–35 % smaller)
 
 ```sh
 cargo +nightly dist --target <triple>
@@ -62,7 +74,7 @@ cargo +nightly dist --target <triple>
 cargo +nightly build --profile dist --target <triple> \
   -Zbuild-std=std,panic_abort \
   -Zbuild-std-features=optimize_for_size \
-  --config "build.rustflags=['-Zunstable-options','-Cpanic=immediate-abort']"
+  --config "target.'cfg(all())'.rustflags=['-Zunstable-options','-Cpanic=immediate-abort']"
 ```
 
 - `-Zbuild-std` rebuilds std with the release profile (opt-level z, LTO across std).
@@ -73,12 +85,24 @@ cargo +nightly build --profile dist --target <triple> \
   formatting / backtrace machinery. A panic now aborts immediately **without
   printing a message**. The server is written not to panic in normal operation;
   errors are reported through the protocol.
-- Do not set `RUSTFLAGS` in the environment for this build: it overrides
-  `build.rustflags` and silently drops `immediate-abort`.
-- `-Zlocation-detail=none` was tried and gave no further reduction (0 bytes) once
-  immediate-abort is on, so it is not used.
+- The flags go into `target.'cfg(all())'.rustflags`, not `build.rustflags`:
+  cargo ignores `build.rustflags` as soon as a `target.*.rustflags` entry
+  applies (the musl size flags above), while `target.<cfg>` and
+  `target.<triple>` entries are joined.
+- Do not set `RUSTFLAGS` in the environment for this build: it overrides all of
+  the above and silently drops `immediate-abort` and the musl size flags.
 - `profile.dist` inherits `release` unchanged; it only exists so dist artifacts
   land in a separate directory.
+
+Measured and not used (linux x64 dist, relative to the shipped configuration,
+1764 KiB / brotli 676 KiB):
+
+| flag                                          |   raw | brotli | why not                                                     |
+| --------------------------------------------- | ----: | -----: | ----------------------------------------------------------- |
+| `-Zfmt-debug=none`                            | −33 K |  −13 K | changes every `{:?}` output, including dependencies' errors |
+| `-Cllvm-args=-enable-machine-outliner=always` | −36 K |  +37 K | the shipped artifact is brotli-compressed                   |
+| `-Clink-arg=--icf=all` (rust-lld)             | −11 K |   −1 K | negligible                                                  |
+| `-Zlocation-detail=none`                      |     0 |      0 | nothing left once immediate-abort is on                     |
 
 The alias is inert on stable — plain `cargo build --release` keeps working.
 
@@ -122,64 +146,72 @@ The release package stores each binary Brotli-compressed
 
 ## Sizes
 
-Measured 2026-10-07, rustc 1.98.1 stable / 1.101.0-nightly (2026-10-05).
-"before" = binaries shipped in `bin/` prior to the slimming work (no i686 build
-existed). Compression: brotli quality 11, window 24 (node `zlib`); xz = LZMA2
-preset 9 via 7-Zip (`xz -9e` was not available on the build host); gzip -9.
+Measured 2026-10-07 with rustc 1.98.1 stable / 1.101.0-nightly (2026-10-05),
+brotli quality 11, window 24 (node `zlib`). "master" is commit `75045e5`
+(in-tree CLI parser, walker, grep, PNG/base64 code); "libraries" is the current
+build (clap, anyhow, ignore/globset/grep-\*, base64, png) with the musl size
+flags above.
 
-| target      | build          |         raw |   brotli-11 |    xz -9 |  gzip -9 |
-| ----------- | -------------- | ----------: | ----------: | -------: | -------: |
-| win x64     | before         |    5517 KiB |    1501 KiB | 1479 KiB | 2159 KiB |
-| win x64     | stable release |     792 KiB |     322 KiB |  317 KiB |  390 KiB |
-| win x64     | nightly dist   | **523 KiB** | **227 KiB** |  223 KiB |  271 KiB |
-| linux x64   | before         |    7219 KiB |    1707 KiB | 1685 KiB | 2398 KiB |
-| linux x64   | stable release |    1077 KiB |     428 KiB |  421 KiB |  526 KiB |
-| linux x64   | nightly dist   | **608 KiB** | **253 KiB** |  248 KiB |  305 KiB |
-| linux i686  | stable release |    1039 KiB |     445 KiB |  439 KiB |  539 KiB |
-| linux i686  | nightly dist   | **587 KiB** | **259 KiB** |  256 KiB |  311 KiB |
-| linux arm64 | before         |    7030 KiB |    1640 KiB | 1549 KiB | 2381 KiB |
-| linux arm64 | stable release |     944 KiB |     399 KiB |  376 KiB |  515 KiB |
-| linux arm64 | nightly dist   | **544 KiB** | **242 KiB** |  228 KiB |  311 KiB |
+| target      | build          | master raw | libraries raw | master brotli | libraries brotli |
+| ----------- | -------------- | ---------: | ------------: | ------------: | ---------------: |
+| win x64     | stable release |    946 KiB |      2404 KiB |       384 KiB |          884 KiB |
+| win x64     | nightly dist   |    650 KiB |  **1938 KiB** |       281 KiB |      **731 KiB** |
+| linux x64   | stable release |   1190 KiB |      2650 KiB |       473 KiB |          964 KiB |
+| linux x64   | nightly dist   |    702 KiB |  **1764 KiB** |       292 KiB |      **676 KiB** |
+| linux i686  | stable release |   1144 KiB |      2357 KiB |       491 KiB |          946 KiB |
+| linux i686  | nightly dist   |    678 KiB |  **1579 KiB** |       301 KiB |      **671 KiB** |
+| linux arm64 | stable release |   1028 KiB |      2346 KiB |       437 KiB |          927 KiB |
+| linux arm64 | nightly dist   |    616 KiB |  **1513 KiB** |       276 KiB |      **669 KiB** |
+
+For reference, master with the musl size flags would be 554 KiB (brotli 254 KiB)
+on linux x64 dist; without them the libraries build is 2210 KiB (brotli 765 KiB).
 
 macOS arm64 is only type-checked from Windows (`cargo check --target
 aarch64-apple-darwin`, stable and nightly build-std); linking needs the Apple
 SDK, so build it on a macOS runner.
 
-The network transports (secure channel, WebSocket, `connect`, lifeline) added
-on top of the numbers above (nightly dist, measured 2026-10-07):
+Where the bytes go (linux x64, `cargo bloat --crates`, `.text` of the stable
+release build): std 411 KiB, `regex-automata` 303 KiB, tokio 153 KiB, the server
+itself 144 KiB, `aho-corasick` 123 KiB, `clap_builder` 107 KiB, `regex-syntax`
+104 KiB, `globset` + `ignore` + `walkdir` 68 KiB, `encoding_rs` 26 KiB (+ ~115 KiB
+of CJK tables in `.rodata`; `grep-searcher` always links it, we only need its
+UTF-16 BOM transcoding), plus ~360 KiB of Unicode tables in `.rodata`.
 
-| target      |  before |   after | brotli-11 before → after |
-| ----------- | ------: | ------: | -----------------------: |
-| linux x64   | 608 KiB | 697 KiB |        253 KiB → 290 KiB |
-| win x64     | 523 KiB | 601 KiB |        226 KiB → 261 KiB |
-| linux arm64 | 544 KiB | 604 KiB |        242 KiB → 270 KiB |
+The regex stack cannot be trimmed through our own `Cargo.toml`: `grep-regex`
+depends on `regex-automata` / `regex-syntax` with their default features (full
+DFA compiler and every Unicode table), and cargo features are additive. Measured
+with a locally patched `grep-regex` (not used, would need a fork or an upstream
+change): without the full DFA (`dfa-build`) linux x64 dist is 1696 KiB / brotli
+649 KiB (−68 / −27 KiB); additionally limiting Unicode data to
+`unicode-case` + `unicode-perl` (still Unicode-correct `ignoreCase`, `\w`, `\d`,
+`\s`, but no `\p{Script}` classes) gives 1465 KiB / brotli 624 KiB.
 
-Of that, the RustCrypto crates are ~25 KiB of `.text`; the rest is the
-transport code and the extra tokio pieces it uses.
+## Dependencies
 
-## Why it is small (keep it that way)
+Established crates, feature-trimmed where the crate allows it:
 
-Dependencies are deliberately minimal: `tokio` (current-thread runtime, trimmed
-features), `serde_json` (no default features), `regex-lite`, `miniz_oxide`
-(PNG/zlib encoding for screenshots), `getrandom`, the RustCrypto
-`aes-gcm` / `hkdf` / `hmac` / `sha2` / `sha1` (secure channel and the
-WebSocket handshake), plus `libc` / `windows-sys`. WebSocket framing and the
-secure channel are in-tree (`src/ws.rs`, `src/secure.rs`); there is no TLS
-(`rustls`/`tungstenite` would cost several hundred KiB).
-The following were replaced by small in-tree code:
+| purpose                             | crates                                                                                               |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| async runtime                       | `tokio` (current-thread runtime; `rt net io-util io-std process time sync fs macros`)                |
+| protocol                            | `serde_json` (no default features)                                                                   |
+| CLI                                 | `clap` derive (`std help usage error-context`; no colour, suggestions or help wrapping)              |
+| errors                              | `anyhow` (no default features, so no backtrace capture) for CLI / setup paths; `OpError` on the wire |
+| `fs.glob` / `fs.grep`               | `ignore` (WalkBuilder), `globset`, `grep-regex`, `grep-searcher`, `grep-matcher` (ripgrep)           |
+| secure channel, WebSocket handshake | `aes-gcm`, `hkdf`, `hmac`, `sha2`, `sha1` (RustCrypto), `getrandom`, `base64`                        |
+| screenshots (Windows only)          | `png`                                                                                                |
+| OS APIs                             | `libc`, `windows-sys`                                                                                |
 
-| removed crate(s)              | replacement                                                                                    |
-| ----------------------------- | ---------------------------------------------------------------------------------------------- |
-| `clap`                        | `src/cli.rs` hand-written argument parser and help text                                        |
-| `portable-pty`                | `src/pty.rs` (openpty on Unix, ConPTY on Windows)                                              |
-| `ignore`, `globset`, `grep-*` | `src/walk.rs` (gitignore-aware walker, glob matcher) + `src/search.rs` (regex-lite based grep) |
-| `base64`, `png`               | `src/util.rs` (base64 codec, minimal PNG writer over `miniz_oxide`)                            |
-| `rand`, `anyhow`              | `getrandom`, plain `io::Error` / `String` errors                                               |
+Errors: anything that ends up in a `res` / `close` frame is a typed
+`protocol::OpError` with a protocol code (`ENOENT`, `EACCES`, `EINVAL`, ...;
+`From<io::Error>` maps the kinds). Everything else — CLI commands, listener /
+secret setup, `winuser` — uses `anyhow::Result` with `.context(...)` and is printed
+with `{:#}` (the whole context chain).
 
-Before adding a dependency, check the size impact of a stable release build for
-at least one Linux target (`cargo bloat` or simply the raw size) and justify it.
+WebSocket framing and the secure channel stay in-tree (`src/ws.rs`,
+`src/secure.rs`); there is no TLS (`rustls`/`tungstenite` would cost several
+hundred KiB). The PTY layer is also in-tree, see below.
 
-## PTY implementation notes
+## PTY
 
 `src/pty.rs` exposes the same small interface on both platforms (spawn with
 rows/cols, read/write master, resize, kill, wait).
@@ -194,17 +226,46 @@ passes `&raw mut ws`, which satisfies both.
 
 **Windows**: ConPTY (`CreatePseudoConsole`) with pipes, child started via
 `STARTUPINFOEX` + `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`, created suspended so it
-is assigned to a job object before it runs (`kill` terminates the whole tree). Resize is `ResizePseudoConsole`.
+is assigned to a job object before it runs (`kill` terminates the whole tree).
+Resize is `ResizePseudoConsole`; `ClosePseudoConsole` runs on its own thread
+because it can block until the output pipe drains.
 
-Behaviour differences vs. the previous `portable-pty` version:
+Protocol-visible behaviour:
 
 - `proc.kill` on a PTY process: `TERM`/`INT`/`HUP`/`QUIT` send that signal to the
   process group; the default (`KILL`) sends `SIGHUP` (like a closing terminal)
   and escalates to `SIGKILL` after 250 ms if the process is still alive.
 - Exit of a signal-terminated PTY child is reported as `{code: 1, signal: "SIG<n>"}`
-  (numeric, e.g. `SIG1` for SIGHUP), consistent with non-PTY processes
-  (`proc.rs`), rather than a signal name.
-- No other protocol-visible differences; see `docs/protocol.md`.
+  (numeric, e.g. `SIG1` for SIGHUP), consistent with non-PTY processes (`proc.rs`).
+
+### Why not `portable-pty`
+
+It was evaluated again (an adapter over `portable-pty` 0.9 behind the same
+interface) and rejected:
+
+- **Windows job objects**: it starts the child immediately (no `CREATE_SUSPENDED`),
+  so the job can only be assigned after the child already runs; processes it
+  starts in that window escape the kill-on-close job.
+- **Windows robustness**: ConPTY is resolved in a `lazy_static` with `.expect()`;
+  where it is missing the panic is, in the immediate-abort build, a silent abort
+  of the whole server instead of a failed `proc.spawn`. It also prefers a
+  `conpty.dll` found on the DLL search path over the system one, and closes the
+  pseudo console synchronously in `Drop` (blocking the runtime thread on older
+  builds).
+- **Unix `fork`/`exec` safety**: its `pre_exec` calls `close_random_fds()`, which
+  reads `/dev/fd` and allocates between `fork` and `exec` — not async-signal-safe
+  in our multi-threaded process (blocking pool, reader threads; musl's allocator
+  lock can deadlock the child).
+- **Kill semantics**: its killers send `SIGHUP` to the child pid only (no process
+  group, no `TERM`/`INT`/`QUIT`), and the SIGHUP→SIGKILL escalation lives in a
+  blocking `Child::kill` that sleeps; the adapter had to re-implement the
+  process-group signalling with libc anyway. Exit signals come back as
+  `strsignal` text ("Hangup"), not the protocol's `SIG<n>`.
+- **Size**: it brings `winapi`, `shared_library`, `lazy_static`, `nix`, `serial2`,
+  `filedescriptor`, `downcast-rs`, `shell-words`, and turns on `anyhow`'s `std`
+  feature (backtrace capture). Nightly dist with the adapter: linux x64
+  1880 KiB (+116 KiB, brotli +43 KiB), win x64 1992 KiB (+54 KiB, brotli
+  +23 KiB) — while still missing the behaviour above.
 
 ## Testing
 

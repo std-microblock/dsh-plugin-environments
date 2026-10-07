@@ -217,7 +217,7 @@ pnpm build:client              # packages/plugin/client.js
 pnpm run package               # 发布包 out/dsh-plugin-environments-<版本>.tgz + SHA256SUMS（本地缺少 macOS 二进制时加 --allow-missing）
 ```
 
-`crates/dsh-env-server` 是 Rust 写的 `dsh-env-server`，子命令有 `serve`、`connect`、`stdio`、`winuser create|delete|list|launch|grant`。WebSocket 和安全通道是手写的小实现，加密只依赖 RustCrypto 的 `aes-gcm`、`hkdf`、`hmac`、`sha2` / `sha1`。Linux 静态二进制通过 `rust-lld` 交叉编译，不需要额外的工具链。
+`crates/dsh-env-server` 是 Rust 写的 `dsh-env-server`，子命令有 `serve`、`connect`、`stdio`、`winuser create|delete|list|launch|grant`。命令行用 clap，glob/grep 基于 ripgrep 的 `ignore` / `globset` / `grep-*` 库；WebSocket 和安全通道是手写的小实现，加密只依赖 RustCrypto 的 `aes-gcm`、`hkdf`、`hmac`、`sha2` / `sha1`。Linux 静态二进制通过 `rust-lld` 交叉编译，不需要额外的工具链。
 
 ## 已知限制
 

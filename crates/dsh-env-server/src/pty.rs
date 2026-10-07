@@ -1,10 +1,19 @@
-//! Minimal pseudo-terminal support (replaces `portable-pty`).
+//! Pseudo-terminal support.
 //!
 //! * Unix: `openpty(3)` + fork/exec through `std::process::Command` with a
 //!   `pre_exec` hook that makes the child a session leader owning the slave as its
 //!   controlling terminal.
 //! * Windows: ConPTY (`CreatePseudoConsole`) with the child created suspended so it
 //!   can be put into a job object before it runs.
+//!
+//! This is deliberately not `portable-pty` (evaluated again; see
+//! docs/building-server.md "PTY"): it cannot create the Windows child suspended (so a
+//! job object can only be assigned after the child already runs), loads ConPTY with
+//! an `expect()` (a panic, i.e. a silent abort of the whole server in the
+//! immediate-abort build, where ConPTY is missing) and prefers a `conpty.dll` found on
+//! the DLL search path, allocates between `fork` and `exec` on Unix (its
+//! `close_random_fds` reads `/dev/fd`, unsafe in our multi-threaded process), and
+//! only offers SIGHUP to the child pid, not signals to the process group.
 
 use std::ffi::OsString;
 use std::io;
