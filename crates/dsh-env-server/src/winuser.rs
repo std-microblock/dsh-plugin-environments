@@ -752,7 +752,6 @@ mod tests {
         assert!(imp::profile_path("S-1-5-21-1-2-3-4").is_none());
     }
 
-
     #[test]
     fn launch_reports_missing_secret() {
         let e = imp::launch(

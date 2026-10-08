@@ -189,7 +189,10 @@ mod install {
     /// `SECURITY_DESCRIPTOR`). Windows keeps it on the `RDP-Tcp` key and falls back to the
     /// `WinStations` default when that key has none.
     fn listener_descriptor() -> Result<Vec<u8>, String> {
-        for (key, value) in [(RDP_TCP_KEY, "Security"), (WINSTATIONS_KEY, "DefaultSecurity")] {
+        for (key, value) in [
+            (RDP_TCP_KEY, "Security"),
+            (WINSTATIONS_KEY, "DefaultSecurity"),
+        ] {
             if let Some(bytes) = reg_binary(key, value) {
                 return Ok(bytes);
             }
@@ -330,7 +333,12 @@ mod install {
                 let mut size = 0u32;
                 MakeSelfRelativeSD(absolute, null_mut(), &mut size);
                 let mut out = vec![0u8; size as usize];
-                if MakeSelfRelativeSD(absolute, out.as_mut_ptr() as PSECURITY_DESCRIPTOR, &mut size) == 0 {
+                if MakeSelfRelativeSD(
+                    absolute,
+                    out.as_mut_ptr() as PSECURITY_DESCRIPTOR,
+                    &mut size,
+                ) == 0
+                {
                     Vec::new()
                 } else {
                     out.truncate(size as usize);

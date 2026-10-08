@@ -241,7 +241,7 @@ mod imp {
                 }
             }
             let mut sd = Sd::new(sids)?;
-            let mut attrs = sd.attrs();
+            let attrs = sd.attrs();
             let h = unsafe {
                 CreateDesktopW(
                     w.as_ptr(),
@@ -249,7 +249,7 @@ mod imp {
                     null_mut(),
                     0,
                     DESKTOP_ALL_ACCESS,
-                    &mut attrs,
+                    &attrs,
                 )
             };
             // `sd` must outlive the call above; keep it alive until here.

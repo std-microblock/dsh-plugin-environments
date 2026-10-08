@@ -16,7 +16,7 @@ static VIRTUAL_CURSOR: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI
 #[cfg(windows)]
 pub fn virtual_cursor() -> Option<(i32, i32)> {
     let v = VIRTUAL_CURSOR.load(std::sync::atomic::Ordering::Relaxed);
-    (v != i64::MIN).then(|| ((v >> 32) as i32, v as u32 as i32))
+    (v != i64::MIN).then_some(((v >> 32) as i32, v as u32 as i32))
 }
 
 #[cfg(windows)]

@@ -156,7 +156,9 @@ pub fn run(opts: &Options) -> anyhow::Result<Value> {
                 ActiveStageOutput::ResponseFrame(frame) => framed.write_all(&frame)?,
                 ActiveStageOutput::GraphicsUpdate(_) => frames += 1,
                 ActiveStageOutput::Terminate(reason) => {
-                    return Ok(json!({"ok": true, "reason": format!("{reason:?}"), "frames": frames}));
+                    return Ok(
+                        json!({"ok": true, "reason": format!("{reason:?}"), "frames": frames}),
+                    );
                 }
                 _ => {}
             }
@@ -201,7 +203,8 @@ fn connect(
 
     let mut framed = ironrdp_blocking::Framed::new(tcp);
     let mut connector = connector::ClientConnector::new(config, client_addr);
-    let should_upgrade = ironrdp_blocking::connect_begin(&mut framed, &mut connector).context("RDP negotiation")?;
+    let should_upgrade =
+        ironrdp_blocking::connect_begin(&mut framed, &mut connector).context("RDP negotiation")?;
 
     // CredSSP does not support TLS resumption, so the stream must be fresh.
     let (tls, public_key) = tls_upgrade(framed.into_inner_no_leftover()).context("TLS")?;
@@ -222,7 +225,10 @@ fn connect(
 
 fn tls_upgrade(
     tcp: TcpStream,
-) -> anyhow::Result<(rustls::StreamOwned<rustls::ClientConnection, TcpStream>, Vec<u8>)> {
+) -> anyhow::Result<(
+    rustls::StreamOwned<rustls::ClientConnection, TcpStream>,
+    Vec<u8>,
+)> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut config = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?
