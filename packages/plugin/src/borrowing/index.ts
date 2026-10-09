@@ -14,8 +14,8 @@ import type { EventEmitter } from 'node:events'
 import type { HarnessDeps, HarnessScope } from '../deps.ts'
 import type { Environment } from '../env/environment.ts'
 import { HostEnvironment } from '../env/host-env.ts'
-import { agentOf, sessionIdOf, type Agent, type PluginContext } from '../host-api.ts'
-import { aliasFor, type EnvironmentDefinition } from '../manager/definitions.ts'
+import { agentOf, promptSectionOrder, sessionIdOf, type Agent, type PluginContext } from '../host-api.ts'
+import { aliasFor, definitionLabel, type EnvironmentDefinition } from '../manager/definitions.ts'
 import type { Lease } from '../manager/lease.ts'
 import type { EnvironmentManager } from '../manager/manager.ts'
 import type { MountingEvents, MountRecord } from '../mount/index.ts'
@@ -351,6 +351,44 @@ export function installBorrowing(
 
   const modeText = (e: HeldEntry) => (e.gui ? 'GUI' : 'headless')
 
+  /**
+   * The environments this session may borrow, as a prompt section: the list and its descriptions
+   * only. Live status (holders, GUI, queues) stays in `env_list`, so this text changes rarely and
+   * does not invalidate the prompt prefix on every lease. Empty text contributes no section.
+   */
+  const borrowablePrompt = (agent: Agent): string => {
+    try {
+      const { defs } = allowedFor(sessionIdOf(agent), agent.session.header.cwd)
+      if (defs.length === 0) return ''
+      return [
+        'Environments this session may borrow (env_list shows their live status; borrow one with env_borrow, give it back with env_return):',
+        ...defs.map(d => `- ${definitionLabel(d)}`),
+      ].join('\n')
+    } catch (e) {
+      warn(`could not list the borrowable environments for the prompt: ${errorMessage(e)}`)
+      return ''
+    }
+  }
+
+  // Registered per agent, in a scope of its own: the list follows the session's (or its
+  // workspace's) allow-list, and the provider is re-evaluated at every assembly.
+  ctx.on('agent/created', ({ agent }) => {
+    const scope = createScope(ctx, agent)
+    try {
+      scope.ctx.systemPrompt.section({
+        name: 'environments:borrowable',
+        order: promptSectionOrder(scope.ctx) + 1,
+        interpolate: false,
+        text: () => borrowablePrompt(agent),
+      })
+    } catch (e) {
+      void scope.dispose()
+      warn(`could not add the borrowable environments to the prompt: ${errorMessage(e)}`)
+      return
+    }
+    agent.ctx.effect(() => () => void scope.dispose(), 'environments: borrowable prompt')
+  })
+
   ctx.tools.register(
     defineTool({
       name: 'env_list',
@@ -382,7 +420,7 @@ export function installBorrowing(
           const guiQueue = st.queue.filter(q => q.mode === 'gui').length
           if (guiQueue && !st.busy) parts.push(`${guiQueue} waiting for the GUI`)
           if (!st.headlessParallel && !st.busy && !holding) parts.push('exclusive')
-          return `- ${d.id}: ${d.name} [${d.kind}${d.description ? `, ${d.description}` : ''}] — ${parts.join('; ')}`
+          return `- ${definitionLabel(d)} — ${parts.join('; ')}`
         })
         const attached = mount ? [...mine.values()].find(e => e.attached && e.lease === mount.lease) : undefined
         return [

@@ -383,9 +383,10 @@ export function createActions(
     },
     /**
      * Install the TermWrap payload (elevated) so this machine can host one session per isolated
-     * account. Always needs a reboot: the wrapper DLL is loaded by the Terminal Services service
-     * at start-up. The payload travels inside our own release package (MIT, plain files), so the
-     * install needs no network access.
+     * account. The server cycles `TermService`/`UmRdpService` afterwards because the SCM re-reads
+     * the service DLL on every start, so the patch is live without a reboot; the returned
+     * `rebootRequired` is set only when that restart did not take. The payload travels inside our
+     * own release package (MIT, plain files), so the install needs no network access.
      */
     async 'session.install'() {
       if (process.platform !== 'win32') {

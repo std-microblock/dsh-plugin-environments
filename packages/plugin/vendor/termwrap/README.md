@@ -1,4 +1,4 @@
-﻿# TermWrap payload
+# TermWrap payload
 
 This directory is where the **TermWrap** binaries are staged when a release bundles them. In a
 plain source checkout it only holds this README: without a payload the plugin never offers the
@@ -47,4 +47,6 @@ installing needs no network at all.
 Microsoft Defender has a first-party detection for this family (`HackTool:Win64/RDPWrap!MTB`), so
 `dsh-env-server session install` adds `%ProgramFiles%\RDP Wrapper\` to the Defender exclusions
 **before** copying anything (skippable with `--no-exclusion`, reversible with
-`Remove-MpPreference -ExclusionPath`). See docs/session-mode.md.
+`Remove-MpPreference -ExclusionPath`). It then cycles `TermService`/`UmRdpService`: the SCM
+re-reads `ServiceDll` on every service start, so the wrapper loads without the reboot upstream
+asks for (skippable with `--no-restart`). See docs/session-mode.md.

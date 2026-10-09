@@ -1,5 +1,5 @@
 // End-to-end check of the `winuser` environment on a real Windows host (needs administrator
-// approval through gsudo or UAC for create/grant/delete):
+// approval through a UAC consent dialog for create/grant/delete):
 //   node packages/plugin/test/manual/real-winuser-flow.ts [account] [--keep] [--no-create]
 //     [--desktop shared|private|session]
 // Creates the account (default dshtest2), opens it from an inaccessible host cwd, exercises

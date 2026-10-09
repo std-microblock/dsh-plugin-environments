@@ -1,8 +1,9 @@
 // End-to-end check of the **separate-session** mode on a real Windows host.
 //
-// Needs the TermWrap install to have happened and the machine to have been rebooted
-// (Environments page → install, or `dsh-env-server session install --payload packages/plugin/vendor/termwrap`),
-// plus administrator approval through gsudo or UAC for the Remote Desktop logon right.
+// Needs the TermWrap install to have happened
+// (Environments page → install, or `dsh-env-server session install --payload packages/plugin/vendor/termwrap`;
+// the install restarts Terminal Services itself, so a reboot is only needed when that restart failed),
+// plus administrator approval through a UAC consent dialog for the Remote Desktop logon right.
 //
 //   node packages/plugin/test/manual/real-session-mode.ts [account] [--keep] [--install]
 //

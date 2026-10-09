@@ -123,6 +123,14 @@ export function aliasFor(id: string): string {
   return a
 }
 
+/**
+ * `id: name [kind, description]` — the stable label of a definition, shared by the `env_list`
+ * output and the session's system-prompt list so the two cannot drift apart.
+ */
+export function definitionLabel(def: EnvironmentDefinition): string {
+  return `${def.id}: ${def.name} [${def.kind}${def.description ? `, ${def.description}` : ''}]`
+}
+
 /** Whether headless leases of different sessions may coexist (see `LeaseMode`). */
 export function isHeadlessParallel(def: EnvironmentDefinition): boolean {
   return def.headlessParallel !== false

@@ -245,6 +245,24 @@ export function IconCopy({ size }: IconProps) {
   )
 }
 
+/** A long right-pointing arrow (connection direction diagrams). */
+export function IconArrowRight({ size }: IconProps) {
+  return (
+    <Svg size={size}>
+      <path d="M3 12h17M15 7l5 5-5 5" />
+    </Svg>
+  )
+}
+
+export function IconKey({ size }: IconProps) {
+  return (
+    <Svg size={size}>
+      <circle cx="8" cy="15" r="4" />
+      <path d="m11 12 8.5-8.5M16 7l2.5 2.5M14 9l2 2" />
+    </Svg>
+  )
+}
+
 export const KIND_ICON: Record<EnvKind, (props: IconProps) => React.JSX.Element> = {
   local: IconLocal,
   server: IconServer,

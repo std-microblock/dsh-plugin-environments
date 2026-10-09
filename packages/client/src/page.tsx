@@ -455,6 +455,7 @@ export function EnvironmentsPage({ t, startSession }: { t: Translate; startSessi
       <EnvDialog
         open={dialog?.type === 'env'}
         environment={dialog?.type === 'env' ? dialog.environment : undefined}
+        environments={envs}
         platform={data?.platform}
         defaultMountMode={data?.defaults?.mountMode}
         onClose={() => setDialog(undefined)}

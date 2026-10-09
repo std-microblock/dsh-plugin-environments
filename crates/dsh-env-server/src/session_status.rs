@@ -17,6 +17,7 @@ pub fn run(cmd: SessionCmd) -> std::result::Result<Value, String> {
             payload,
             target,
             exclusion,
+            restart,
         } => {
             #[cfg(windows)]
             {
@@ -25,11 +26,11 @@ pub fn run(cmd: SessionCmd) -> std::result::Result<Value, String> {
                     Some(t) => std::path::PathBuf::from(t),
                     None => crate::termwrap::default_target(),
                 };
-                crate::termwrap::run(&payload, &target, exclusion)
+                crate::termwrap::run(&payload, &target, exclusion, restart)
             }
             #[cfg(not(windows))]
             {
-                let _ = (payload, target, exclusion);
+                let _ = (payload, target, exclusion, restart);
                 Err("TermWrap can only be installed on Windows hosts".into())
             }
         }
@@ -101,7 +102,6 @@ mod imp {
     use windows_sys::Win32::System::Services::*;
 
     const TS_KEY: &str = "SYSTEM\\CurrentControlSet\\Control\\Terminal Server";
-    const TERMSRV_DLL: &str = "C:\\Windows\\System32\\termsrv.dll";
     const RDP_PORT: u16 = 3389;
 
     fn wide(s: &str) -> Vec<u16> {

@@ -14,17 +14,6 @@ export function secretPath(dataDir: string, name: string): string {
   return path.resolve(dataDir, 'winusers', `${name}.secret`)
 }
 
-/** Locate gsudo (used instead of a UAC prompt when the user has it installed). */
-function findGsudo(): string | undefined {
-  const dirs = (process.env['PATH'] ?? '').split(path.delimiter)
-  if (process.env['USERPROFILE']) dirs.push(path.join(process.env['USERPROFILE'], 'scoop', 'apps', 'gsudo', 'current'))
-  for (const d of dirs) {
-    const p = path.join(d.replace(/^"|"$/g, ''), 'gsudo.exe')
-    if (d && fs.existsSync(p)) return p
-  }
-  return undefined
-}
-
 /** JSON line printed by `dsh-env-server winuser ...`. */
 export interface WinuserResult {
   ok: boolean
@@ -35,8 +24,12 @@ export interface WinuserResult {
 
 /**
  * Run a dsh-env-server winuser command elevated. The command and its output redirection live in a
- * temporary .cmd script, so no quoting passes through cmd /c. gsudo is used when present;
- * otherwise Windows shows a UAC prompt on the host desktop.
+ * temporary .cmd script, so no quoting passes through cmd /c; the server binary itself raises the
+ * UAC consent dialog (`dsh-env-server elevate`) and waits for the elevated process to finish.
+ *
+ * No third-party elevation tool is used: `gsudo` and friends elevate by replacing the token of the
+ * calling process, which fails on a redirected console (the harness host) with "Failed to
+ * substitute token", while the shell's `runas` verb needs nothing but an interactive session.
  */
 async function runElevated(
   args: string[],
@@ -55,13 +48,7 @@ async function runElevated(
   )
   let r: RunHostResult
   try {
-    const gsudo = findGsudo()
-    if (gsudo) {
-      r = await runHost(gsudo, ['cmd.exe', '/d', '/c', script], { timeoutMs })
-    } else {
-      const ps = `$p = Start-Process -FilePath '${script.replace(/'/g, "''")}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $p.ExitCode`
-      r = await runHost('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { timeoutMs })
-    }
+    r = await runHost(bin, ['elevate', '--', 'cmd.exe', '/d', '/c', script], { timeoutMs })
   } finally {
     fs.rmSync(script, { force: true })
   }
@@ -90,7 +77,7 @@ async function runElevated(
 }
 
 /**
- * Run any `dsh-env-server` subcommand elevated (gsudo, else a UAC prompt). Used by the account
+ * Run any `dsh-env-server` subcommand elevated (a UAC consent dialog). Used by the account
  * commands and by the TermWrap installer, which both have to touch machine-wide state.
  */
 export async function runServerElevated(args: string[], opts: { timeoutMs?: number } = {}): Promise<WinuserResult> {

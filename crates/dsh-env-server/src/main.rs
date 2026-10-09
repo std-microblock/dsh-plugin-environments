@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 mod cli;
 mod desktop;
+#[cfg(windows)]
+mod elevate;
 mod fs_ops;
 mod input;
 mod net;
@@ -189,6 +191,24 @@ fn main() {
                     })
                 }),
             )
+        }
+        Cmd::Elevate { program } => {
+            #[cfg(windows)]
+            {
+                match elevate::run(&program) {
+                    Ok(code) => code,
+                    Err(e) => {
+                        eprintln!("dsh-env-server: {e:#}");
+                        1
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = program;
+                eprintln!("dsh-env-server: elevation is only implemented on Windows");
+                1
+            }
         }
         Cmd::Stdio { cwd } => {
             let rt = runtime();

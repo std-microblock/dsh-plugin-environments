@@ -228,26 +228,39 @@ test('the exclusive flag migrates to headlessParallel; upsert keeps and clears l
 // ------------------------------------------------------------------ tools, mounts and subagents
 
 type Listener = (...args: never[]) => unknown
+type SectionText = string | (() => string)
 interface FakeTool {
   name: string
   execute(args: Record<string, unknown>, exec: { agent: Agent; signal: AbortSignal }): Promise<string>
 }
 
-/** A host that keeps the tools visible to each agent, as scopes register and dispose them. */
+/** A host that keeps the tools and prompt sections visible to each agent, as scopes register them. */
 function host(m: EnvironmentManager) {
   const hooks = new Map<string, Listener[]>()
   const global = new Map<string, FakeTool>()
   const visible = new Map<Agent, Set<string>>()
+  const sections = new Map<Agent, Map<string, SectionText>>()
   const agents = new Map<string, Agent>()
   const noop = () => () => {}
-  const makeCtx = (register: (t: FakeTool) => () => void): PluginContext => {
+  const recordSection = (owner: Agent | undefined, section: { name: string; text: SectionText }) => {
+    if (!owner) return noop()
+    const own = sections.get(owner) ?? new Map<string, SectionText>()
+    sections.set(owner, own)
+    own.set(section.name, section.text)
+    return () => own.delete(section.name)
+  }
+  const makeCtx = (register: (t: FakeTool) => () => void, owner?: Agent): PluginContext => {
     const ctx = {
       on(name: string, listener: Listener) {
         hooks.set(name, [...(hooks.get(name) ?? []), listener])
         return () => {}
       },
       tools: { register, restrict: noop, schemas: () => [] },
-      systemPrompt: { getSectionOrder: () => 900, section: noop, variable: noop },
+      systemPrompt: {
+        getSectionOrder: () => 900,
+        section: (section: { name: string; text: SectionText }) => recordSection(owner, section),
+        variable: noop,
+      },
       logger: () => ({ info() {}, warn() {} }),
       effect: () => undefined,
       isolate: () => ctx,
@@ -274,7 +287,7 @@ function host(m: EnvironmentManager) {
           own.add(t.name)
           set.add(t.name)
           return () => set.delete(t.name)
-        }),
+        }, agent),
         dispose: async () => {
           for (const n of own) set.delete(n)
         },
@@ -315,6 +328,12 @@ function host(m: EnvironmentManager) {
   }
   // Lease tools only (a mount also registers its search tools).
   const tools = (a: Agent) => [...(visible.get(a) ?? [])].filter(n => n.includes('__')).sort()
+  /** The rendered text of one prompt section registered for an agent. */
+  const promptSection = (a: Agent, name: string): string => {
+    const text = sections.get(a)?.get(name)
+    assert.ok(text !== undefined, `prompt section ${name} for ${a.session.id}`)
+    return typeof text === 'function' ? text() : text
+  }
   const preStep = (a: Agent) => {
     const [listener] = hooks.get('agent/pre-step') ?? []
     assert.ok(listener)
@@ -323,8 +342,41 @@ function host(m: EnvironmentManager) {
       async () => ({ kind: 'enter', messages: [] }),
     )
   }
-  return { mounting, borrowing, agent, created, call, tools, preStep }
+  return { mounting, borrowing, agent, created, call, tools, promptSection, preStep }
 }
+
+test('a session prompt section lists the environments it may borrow, with their descriptions', async () => {
+  const { m, cleanup } = manager()
+  m.upsert({
+    id: 'tablet',
+    name: 'Tablet',
+    kind: 'adb',
+    description: 'Android 15 tablet',
+    config: { serial: 'TABLET1' },
+  })
+  m.upsert({ id: 'hidden', name: 'Hidden', kind: 'server', borrowable: false, config: { host: 'h', port: 9 } })
+  const h = host(m)
+  const a = h.agent('a', os.tmpdir())
+  const b = h.agent('b', os.tmpdir())
+  await h.created(a)
+  await h.created(b)
+
+  const lines = h.promptSection(a, 'environments:borrowable').split('\n')
+  assert.match(lines[0] ?? '', /^Environments this session may borrow \(/)
+  assert.ok(lines.includes('- phone: Phone [server]'))
+  assert.ok(lines.includes('- solo: Solo [server]'))
+  assert.ok(lines.includes('- tablet: Tablet [adb, Android 15 tablet]'), 'the description is part of the list')
+  assert.ok(!lines.some(l => l.includes('hidden')), 'an environment that is not borrowable stays out')
+
+  // The session's own allow-list narrows the list; an empty one contributes no section at all.
+  m.setSessionSettings('b', { borrowable: ['tablet'] })
+  assert.deepEqual(h.promptSection(b, 'environments:borrowable').split('\n').slice(1), [
+    '- tablet: Tablet [adb, Android 15 tablet]',
+  ])
+  m.setSessionSettings('b', { borrowable: [] })
+  assert.equal(h.promptSection(b, 'environments:borrowable'), '')
+  await cleanup()
+})
 
 test('env_borrow: headless by default, gui:true upgrades, gui:false / env_return gui_only downgrade', async () => {
   const { m, def, cleanup } = manager()

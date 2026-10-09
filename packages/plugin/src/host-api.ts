@@ -103,7 +103,8 @@ export interface SystemPromptSection {
   name: string
   order: number
   interpolate: boolean
-  text: string
+  /** Static text, or a provider evaluated at each assembly (its scope argument is not used here). */
+  text: string | (() => string)
 }
 
 export interface SystemPrompt {
@@ -206,6 +207,19 @@ export function sessionStarted(agent: Agent): boolean {
     return agent.session.requestHeader?.() !== undefined
   } catch {
     return false
+  }
+}
+
+/**
+ * The order this plugin's prompt sections use: the deployment persona suffix slot, so they land
+ * after the first-party environment-bearing sections. Falls back to a late order without the
+ * service, and to the agent's own scope when called on one.
+ */
+export function promptSectionOrder(ctx: PluginContext): number {
+  try {
+    return ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_SUFFIX')
+  } catch {
+    return 900
   }
 }
 

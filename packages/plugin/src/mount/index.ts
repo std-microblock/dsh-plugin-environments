@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events'
 import { errorMessage } from '@dsh-environments/protocol'
 import type { HarnessDeps, HarnessScope } from '../deps.ts'
 import type { Environment } from '../env/environment.ts'
-import { parentSessionOf, sessionIdOf, type Agent, type PluginContext } from '../host-api.ts'
+import { parentSessionOf, promptSectionOrder, sessionIdOf, type Agent, type PluginContext } from '../host-api.ts'
 import type { Lease } from '../manager/lease.ts'
 import type { EnvironmentManager } from '../manager/manager.ts'
 import type { EffectiveMount } from '../manager/state.ts'
@@ -31,14 +31,6 @@ const HOST_ONLY_TOOLS = [
   'load_workspace_dependencies',
   'str_replace_editor',
 ]
-
-function sectionOrder(sctx: PluginContext): number {
-  try {
-    return sctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_SUFFIX')
-  } catch {
-    return 900
-  }
-}
 
 /** Adjust shell argv to the environment: `sh` on Android, the available PowerShell on Windows. */
 function shellArgv(env: Environment, argv: readonly string[]): string[] {
@@ -226,7 +218,7 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
       const instructionSection = (text: string) =>
         scope.ctx.systemPrompt.section({
           name: 'environments:instructions',
-          order: sectionOrder(scope.ctx) + 1,
+          order: promptSectionOrder(scope.ctx) + 1,
           interpolate: false,
           text,
         })
@@ -248,7 +240,7 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
       })
       scope.ctx.systemPrompt.section({
         name: 'environments:mount',
-        order: sectionOrder(scope.ctx),
+        order: promptSectionOrder(scope.ctx),
         interpolate: false,
         text: [
           `This session is mounted on the environment "${env.name}" (${env.info?.os}${env.info?.arch ? `/${env.info.arch}` : ''}, user ${env.info?.user ?? '?'}).`,

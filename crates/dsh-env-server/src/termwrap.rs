@@ -6,7 +6,9 @@
 //! 2. import the registry file the release ships (`Install_termwrap_umwrap.reg`, which points
 //!    `TermService`/`UmRdpService` at the wrapper DLLs);
 //! 3. enable the Remote Desktop host and make sure the accounts can log on;
-//! 4. reboot — the wrapper is only loaded by the service at start-up.
+//! 4. restart `TermService`/`UmRdpService` — the wrapper is loaded by the service at start-up, so
+//!    cycling the service loads it just as well as a reboot does (the SCM re-reads `ServiceDll` on
+//!    every start). Only when the service cannot be cycled does the result still ask for a reboot.
 //!
 //! Nothing here is hidden or obfuscated: the payload travels inside our own release package and
 //! is installed from there, so its integrity is the package's.
@@ -22,13 +24,24 @@ pub fn default_target() -> PathBuf {
 /// Payload files that describe rather than install (never copied).
 const META: [&str; 3] = ["VERSION", "LICENSE", "README.md"];
 
-/// Copy the payload into `target` and return the copied file names.
-pub fn stage_payload(payload: &Path, target: &Path) -> Result<Vec<String>, String> {
+/// What staging did: the files it wrote and the ones that already matched.
+#[derive(Debug, Default, PartialEq)]
+pub struct Staged {
+    pub copied: Vec<String>,
+    pub unchanged: Vec<String>,
+}
+
+/// Copy the payload into `target`.
+///
+/// A file whose content already matches is left untouched. That keeps a re-install from writing a
+/// DLL a running service has loaded — Windows refuses to overwrite such a file — and it means the
+/// install only has to stop the service when something really has to be replaced.
+pub fn stage_payload(payload: &Path, target: &Path) -> Result<Staged, String> {
     if !payload.join("TermWrap.dll").is_file() {
         return Err(format!("{} has no TermWrap.dll", payload.display()));
     }
     std::fs::create_dir_all(target).map_err(|e| format!("creating {}: {e}", target.display()))?;
-    let mut copied = Vec::new();
+    let mut staged = Staged::default();
     for entry in
         std::fs::read_dir(payload).map_err(|e| format!("reading {}: {e}", payload.display()))?
     {
@@ -38,11 +51,31 @@ pub fn stage_payload(payload: &Path, target: &Path) -> Result<Vec<String>, Strin
             continue;
         }
         let dst = target.join(&name);
+        if same_content(&entry.path(), &dst) {
+            staged.unchanged.push(name);
+            continue;
+        }
         std::fs::copy(entry.path(), &dst).map_err(|e| format!("copying {name}: {e}"))?;
-        copied.push(name);
+        staged.copied.push(name);
     }
-    copied.sort();
-    Ok(copied)
+    staged.copied.sort();
+    staged.unchanged.sort();
+    Ok(staged)
+}
+
+/// Whether `dst` already holds exactly the bytes of `src`.
+fn same_content(src: &Path, dst: &Path) -> bool {
+    let (Ok(a), Ok(b)) = (std::fs::metadata(src), std::fs::metadata(dst)) else {
+        return false;
+    };
+    if a.len() != b.len() {
+        return false;
+    }
+    match (std::fs::read(src), std::fs::read(dst)) {
+        (Ok(a), Ok(b)) => a == b,
+        // An unreadable destination is not "identical": let the copy report the real error.
+        _ => false,
+    }
 }
 
 /// Command line that manages a Defender exclusion for a directory.
@@ -76,7 +109,8 @@ mod install {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use std::ptr::null_mut;
-    use windows_sys::Win32::Foundation::LocalFree;
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::Foundation::{GetLastError, LocalFree};
     use windows_sys::Win32::NetworkManagement::NetManagement::*;
     use windows_sys::Win32::System::Registry::*;
     use windows_sys::Win32::System::Services::*;
@@ -452,46 +486,224 @@ mod install {
         Ok(())
     }
 
-    fn start_service(name: &str) -> Result<String, String> {
-        let w = wide(name);
-        unsafe {
-            let scm = OpenSCManagerW(null_mut(), null_mut(), SC_MANAGER_CONNECT);
-            if scm.is_null() {
-                return Err("OpenSCManager failed".into());
+    /// How long to wait for a service to reach the state we asked for.
+    const SERVICE_TIMEOUT: Duration = Duration::from_secs(20);
+    /// How often the copy may be retried with the stack stopped before the install gives up.
+    const COPY_ATTEMPTS: usize = 3;
+
+    /// `dwCurrentState` as the string the JSON reports (also used by the unit tests).
+    pub(super) fn state_name(state: u32) -> &'static str {
+        match state {
+            SERVICE_RUNNING => "running",
+            SERVICE_START_PENDING => "starting",
+            SERVICE_STOP_PENDING => "stopping",
+            SERVICE_STOPPED => "stopped",
+            SERVICE_PAUSED => "paused",
+            _ => "unknown",
+        }
+    }
+
+    /// A service handle; both the SCM and the service handle close on drop.
+    struct Service {
+        scm: SC_HANDLE,
+        svc: SC_HANDLE,
+        name: String,
+    }
+
+    impl Service {
+        fn open(name: &str, access: u32) -> Result<Self, String> {
+            let w = wide(name);
+            unsafe {
+                let scm = OpenSCManagerW(null_mut(), null_mut(), SC_MANAGER_CONNECT);
+                if scm.is_null() {
+                    return Err("OpenSCManager failed (needs administrator rights)".into());
+                }
+                let svc = OpenServiceW(scm, w.as_ptr(), access);
+                if svc.is_null() {
+                    let code = GetLastError();
+                    CloseServiceHandle(scm);
+                    return Err(format!("opening service {name} failed with code {code}"));
+                }
+                Ok(Self {
+                    scm,
+                    svc,
+                    name: name.to_string(),
+                })
             }
-            let svc = OpenServiceW(scm, w.as_ptr(), SERVICE_START | SERVICE_QUERY_STATUS);
-            if svc.is_null() {
-                CloseServiceHandle(scm);
-                return Err(format!("opening service {name} failed"));
-            }
-            let started = StartServiceW(svc, 0, null_mut()) != 0;
+        }
+
+        /// `dwCurrentState`, or `u32::MAX` when it cannot be queried.
+        fn state(&self) -> u32 {
             let mut buf = [0u8; std::mem::size_of::<SERVICE_STATUS_PROCESS>()];
             let mut needed = 0u32;
-            let state = if windows_sys::Win32::System::Services::QueryServiceStatusEx(
-                svc,
-                SC_STATUS_PROCESS_INFO,
-                buf.as_mut_ptr(),
-                buf.len() as u32,
-                &mut needed,
-            ) != 0
-            {
-                let ssp = &*(buf.as_ptr() as *const SERVICE_STATUS_PROCESS);
-                match ssp.dwCurrentState {
-                    SERVICE_RUNNING => "running",
-                    SERVICE_START_PENDING => "starting",
-                    SERVICE_STOPPED => "stopped",
-                    _ => "other",
+            unsafe {
+                if QueryServiceStatusEx(
+                    self.svc,
+                    SC_STATUS_PROCESS_INFO,
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                    &mut needed,
+                ) != 0
+                {
+                    (*(buf.as_ptr() as *const SERVICE_STATUS_PROCESS)).dwCurrentState
+                } else {
+                    u32::MAX
                 }
-            } else {
-                "unknown"
-            };
-            CloseServiceHandle(svc);
-            CloseServiceHandle(scm);
-            Ok(if !started && state != "running" {
-                format!("{state} (start request refused)")
-            } else {
-                state.to_string()
-            })
+            }
+        }
+
+        /// Wait out `START_PENDING`/`STOP_PENDING` and report the state it settled on.
+        fn settle(&self) -> u32 {
+            let deadline = Instant::now() + SERVICE_TIMEOUT;
+            loop {
+                let state = self.state();
+                if state != SERVICE_START_PENDING && state != SERVICE_STOP_PENDING {
+                    return state;
+                }
+                if Instant::now() >= deadline {
+                    return state;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+
+        /// Start the service (a no-op while it already runs) and wait for it.
+        fn start(&self) -> Result<String, String> {
+            let state = self.state();
+            if state != SERVICE_RUNNING && state != SERVICE_START_PENDING {
+                unsafe { StartServiceW(self.svc, 0, null_mut()) };
+            }
+            Ok(state_name(self.settle()).to_string())
+        }
+
+        /// Stop the service and wait until it is really down.
+        fn stop(&self) -> Result<String, String> {
+            let state = self.state();
+            if state != SERVICE_STOPPED && state != SERVICE_STOP_PENDING {
+                let mut status: SERVICE_STATUS = unsafe { std::mem::zeroed() };
+                if unsafe { ControlService(self.svc, SERVICE_CONTROL_STOP, &mut status) } == 0 {
+                    let code = unsafe { GetLastError() };
+                    return Err(format!("stopping {} failed with code {code}", self.name));
+                }
+            }
+            Ok(state_name(self.settle()).to_string())
+        }
+    }
+
+    impl Drop for Service {
+        fn drop(&mut self) {
+            unsafe {
+                CloseServiceHandle(self.svc);
+                CloseServiceHandle(self.scm);
+            }
+        }
+    }
+
+    /// Reported state of a service, or `None` when this machine does not have it.
+    pub(super) fn service_state(name: &str) -> Option<String> {
+        let svc = Service::open(name, SERVICE_QUERY_STATUS).ok()?;
+        Some(state_name(svc.state()).to_string())
+    }
+
+    /// Start `name` (a no-op when it already runs) and report the state it settled on.
+    fn start_service(name: &str) -> Result<String, String> {
+        Service::open(name, SERVICE_START | SERVICE_QUERY_STATUS)?.start()
+    }
+
+    /// Stop `name`, if this machine has it and it is running.
+    fn stop_service(name: &str) -> Result<String, String> {
+        Service::open(name, SERVICE_STOP | SERVICE_QUERY_STATUS)?.stop()
+    }
+
+    /// Stop `name` when it is present; returns whether it is down and a note for the report.
+    pub(super) fn stop_if_present(name: &str) -> (bool, String) {
+        match service_state(name) {
+            None => (false, format!("{name}: absent")),
+            Some(_) => match stop_service(name) {
+                Ok(state) => (state == "stopped", format!("{name}: {state}")),
+                Err(e) => (false, format!("{name}: {e}")),
+            },
+        }
+    }
+
+    /// One service's report: `{present, before, stopped, after}`, `{present: false}`, or `{error}`.
+    pub(super) fn describe(
+        before: Option<String>,
+        stopped: Result<String, String>,
+        started: Result<String, String>,
+    ) -> Value {
+        let Some(before) = before else {
+            return json!({ "present": false });
+        };
+        let mut report = json!({ "present": true, "before": before });
+        for (key, outcome) in [("stopped", stopped), ("after", started)] {
+            match outcome {
+                Ok(state) => report[key] = json!(state),
+                Err(e) => {
+                    report["error"] = json!(e);
+                    break;
+                }
+            }
+        }
+        report
+    }
+
+    /// Cycle the Terminal Services stack: dependents down first, then dependencies back up.
+    ///
+    /// The phases may not be interleaved per service: starting `UmRdpService` pulls `TermService`
+    /// back up as its dependency, and Windows then refuses to stop `TermService` with
+    /// `ERROR_DEPENDENT_SERVICES_RUNNING` (1051) — leaving the old DLL in the running process.
+    ///
+    /// Returns the report and whether `TermService` really went down and came back up, which is the
+    /// only thing that proves the running service loaded the files now on disk.
+    fn cycle_term_services(um: bool) -> (Value, bool) {
+        let um_before = um.then(|| service_state("UmRdpService")).flatten();
+        let term_before = service_state("TermService");
+        let um_stopped = um.then(|| stop_service("UmRdpService"));
+        let term_stopped = stop_service("TermService");
+        let down = matches!(term_stopped, Ok(ref state) if state == "stopped");
+        let term_started = start_service("TermService");
+        let um_started = um.then(|| start_service("UmRdpService"));
+        let running = matches!(term_started, Ok(ref state) if state == "running");
+
+        let mut report =
+            json!({ "termService": describe(term_before, term_stopped, term_started) });
+        if um {
+            // Both phases ran whenever `um` is true, so neither fallback can actually be reported.
+            let stopped = um_stopped.unwrap_or(Err("not cycled".into()));
+            let started = um_started.unwrap_or(Err("not cycled".into()));
+            report["umRdpService"] = describe(um_before, stopped, started);
+        }
+        (report, down && running)
+    }
+
+    /// Whether 127.0.0.1:3389 accepts connections again (the host is listening).
+    fn listener_up() -> bool {
+        use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 3389));
+        TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
+    }
+
+    /// Whether a reboot is still the only way to get the wrapper loaded.
+    ///
+    /// A service that never went down keeps the DLL it started with, and a host that is not
+    /// listening yet proves nothing either: only "reloaded *and* listening again" is a real
+    /// success, everything else keeps the conservative advice.
+    pub(super) fn reboot_required(reloaded: bool, listener: bool) -> bool {
+        !(reloaded && listener)
+    }
+
+    /// Wait for the listener to come back after a cycle; a slow machine gets 15 seconds.
+    fn wait_for_listener() -> bool {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if listener_up() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(300));
         }
     }
 
@@ -546,18 +758,106 @@ mod install {
     }
 
     /// Everything `session install` does after the payload is verified.
-    pub fn run(payload: &Path, target: &Path, exclusion: bool) -> Result<Value, String> {
+    ///
+    /// `restart` cycles `TermService`/`UmRdpService` at the end, which is what the upstream
+    /// instructions use a reboot for; with `restart` off the caller gets the old behaviour (the
+    /// services are only started), so a reboot is what makes the wrapper take effect.
+    pub fn run(
+        payload: &Path,
+        target: &Path,
+        exclusion: bool,
+        restart: bool,
+    ) -> Result<Value, String> {
         // Before anything lands on disk: keep Defender from quarantining the payload mid-install.
         let defender = if exclusion {
             add_defender_exclusion(target)
         } else {
             "skipped (--no-exclusion)".to_string()
         };
-        let copied = stage_payload(payload, target)?;
 
+        // Windows refuses to overwrite a DLL a running service has loaded, so replacing a wrapper
+        // that is already in use needs the stack down for the copy. Identical files are skipped by
+        // `stage_payload`, so the usual re-install never gets here at all. When it does, the copy is
+        // retried with the stack stopped: `TermService` is trigger-started (an RPC/WTS call such as
+        // the environments page probing its own status is enough), so one stop is not guaranteed to
+        // hold long enough.
+        let mut pre_stop: Vec<String> = Vec::new();
+        let mut stack_down = false;
+        let mut staged = None;
+        let mut last_error = String::new();
+        let attempts = if restart { COPY_ATTEMPTS } else { 1 };
+        for attempt in 0..attempts {
+            match stage_payload(payload, target) {
+                Ok(done) => {
+                    staged = Some(done);
+                    break;
+                }
+                Err(e) => {
+                    last_error = e;
+                    if attempt + 1 < attempts {
+                        let (stopped, notes) = stop_stack();
+                        stack_down |= stopped;
+                        pre_stop.extend(notes);
+                    }
+                }
+            }
+        }
+        let Some(staged) = staged else {
+            return Err(if stack_down {
+                put_stack_back(last_error, &pre_stop)
+            } else {
+                last_error
+            });
+        };
+
+        match apply(payload, target, staged, &defender, &pre_stop, restart) {
+            Ok(result) => Ok(result),
+            // A failure after the payload landed must not leave Terminal Services down: that would
+            // cost the user the Remote Desktop host itself, not just the patch.
+            Err(e) if stack_down => Err(put_stack_back(e, &pre_stop)),
+            Err(e) if pre_stop.is_empty() => Err(e),
+            Err(e) => Err(format!("{e} ({})", pre_stop.join("; "))),
+        }
+    }
+
+    /// Stop the Terminal Services stack, dependents first.
+    ///
+    /// Returns whether anything actually went down — a refused stop needs no attempt to put it
+    /// back — together with a note per service for the report.
+    fn stop_stack() -> (bool, Vec<String>) {
+        let mut down = false;
+        let mut notes = Vec::new();
+        for name in ["UmRdpService", "TermService"] {
+            let (stopped, note) = stop_if_present(name);
+            down |= stopped;
+            notes.push(note);
+        }
+        (down, notes)
+    }
+
+    /// Best effort to start the stack again after a failure, with what happened appended.
+    fn put_stack_back(error: String, pre_stop: &[String]) -> String {
+        let term = start_service("TermService").unwrap_or_else(|e| e);
+        let um = start_service("UmRdpService").unwrap_or_else(|e| e);
+        format!(
+            "{error} (Terminal Services: {}; start attempt afterwards: TermService {term}, UmRdpService {um})",
+            pre_stop.join("; ")
+        )
+    }
+
+    /// Everything after the payload is on disk: registry, host settings, and the service cycle that
+    /// loads the wrapper.
+    fn apply(
+        payload: &Path,
+        target: &Path,
+        staged: Staged,
+        defender: &str,
+        pre_stop: &[String],
+        restart: bool,
+    ) -> Result<Value, String> {
         // UmWrap is what enables the extra redirection features on Home/Server SKUs; prefer the
         // registry file that matches what the payload actually contains.
-        let wrapped = copied.iter().any(|f| f == "UmWrap.dll");
+        let wrapped = payload.join("UmWrap.dll").is_file();
         let reg = if wrapped {
             payload.join("Install_termwrap_umwrap.reg")
         } else {
@@ -613,23 +913,47 @@ mod install {
             0,
         )?;
         let group_created = ensure_remote_desktop_users()?;
-        let term = start_service("TermService")?;
-        let um = if wrapped {
-            Some(start_service("UmRdpService")?)
+
+        // The wrapper is loaded when the service starts, so the install has to (re)start Terminal
+        // Services after the files landed — restarting is also the only way to reload a service
+        // that is already running an older DLL.
+        let um = service_state("UmRdpService").is_some();
+        let (restart_report, reloaded) = if restart {
+            cycle_term_services(um)
         } else {
-            None
+            let was_running = service_state("TermService").as_deref() == Some("running");
+            let term = start_service("TermService")?;
+            let um_state = um.then(|| start_service("UmRdpService").ok()).flatten();
+            let reloaded = !was_running && term == "running";
+            (
+                json!({ "skipped": true, "termService": term, "umRdpService": um_state }),
+                reloaded,
+            )
         };
+        let term_state = service_state("TermService").unwrap_or_else(|| "unknown".into());
+        let um_state = service_state("UmRdpService");
+        let listener = term_state == "running" && wait_for_listener();
+        let needs_reboot = reboot_required(reloaded, listener);
 
         Ok(json!({
             "ok": true,
             "target": target.to_string_lossy(),
             "defenderExclusion": defender,
-            "files": copied,
+            "files": staged.copied,
+            "unchanged": staged.unchanged,
             "registry": registry,
             "rdUsersGroupCreated": group_created,
-            "services": { "TermService": term, "UmRdpService": um },
-            "rebootRequired": true,
-            "note": "the wrapper DLL is loaded by the service at start-up, so the machine has to be restarted before a second session can be created",
+            "stoppedForCopy": pre_stop,
+            "restart": restart_report,
+            "services": { "TermService": term_state, "UmRdpService": um_state },
+            "reloaded": reloaded,
+            "listener": listener,
+            "rebootRequired": needs_reboot,
+            "note": if needs_reboot {
+                "the wrapper is loaded by the service when it starts, and this run did not manage to restart Terminal Services with it, so the machine has to be rebooted before a second session can be created"
+            } else {
+                "the Terminal Services service was restarted with the wrapper DLL in place and is listening again, so the patch is active without a reboot"
+            },
         }))
     }
 }
@@ -681,17 +1005,38 @@ mod tests {
             ("VERSION", "0.6"),
         ]);
         let dst = src.join("out");
-        let copied = stage_payload(&src, &dst).unwrap();
+        let staged = stage_payload(&src, &dst).unwrap();
         assert_eq!(
-            copied,
+            staged.copied,
             vec!["TermWrap.dll".to_string(), "UmWrap.dll".to_string()]
         );
+        assert!(staged.unchanged.is_empty());
         assert_eq!(
             std::fs::read_to_string(dst.join("TermWrap.dll")).unwrap(),
             "dll"
         );
         assert!(!dst.join("LICENSE").exists());
         assert!(!dst.join("VERSION").exists());
+        std::fs::remove_dir_all(&src).ok();
+    }
+
+    /// A file that is already there with the same bytes must not be written again: that is what
+    /// keeps a re-install from touching a DLL the running service has locked.
+    #[test]
+    fn staging_leaves_an_identical_file_alone() {
+        let src = payload(&[("TermWrap.dll", "dll")]);
+        let dst = src.join("out");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("TermWrap.dll"), "dll").unwrap();
+        let staged = stage_payload(&src, &dst).unwrap();
+        assert!(staged.copied.is_empty(), "{staged:?}");
+        assert_eq!(staged.unchanged, vec!["TermWrap.dll".to_string()]);
+        // A different file is replaced, and a longer one is not mistaken for a match.
+        std::fs::write(dst.join("TermWrap.dll"), "dll-changed").unwrap();
+        assert_eq!(
+            stage_payload(&src, &dst).unwrap().copied,
+            vec!["TermWrap.dll".to_string()]
+        );
         std::fs::remove_dir_all(&src).ok();
     }
 
@@ -703,5 +1048,63 @@ mod tests {
         assert!(err.contains("TermWrap.dll"), "{err}");
         assert!(!dst.exists(), "nothing may be copied from a bad payload");
         std::fs::remove_dir_all(&src).ok();
+    }
+
+    /// The old behaviour asked for a reboot unconditionally; now only a service that did not come
+    /// back listening does.
+    #[test]
+    fn a_reboot_is_only_asked_for_when_the_service_was_not_reloaded() {
+        assert!(!install::reboot_required(true, true));
+        assert!(install::reboot_required(true, false));
+        assert!(install::reboot_required(false, true));
+        assert!(install::reboot_required(false, false));
+    }
+
+    /// A machine without `UmRdpService` must not fail the install, which is what makes the
+    /// unconditional cycle safe.
+    #[test]
+    fn a_missing_service_is_reported_not_fatal() {
+        let (down, note) = install::stop_if_present("dsh-no-such-service");
+        assert!(!down, "nothing can go down that does not exist");
+        assert!(note.contains("absent"), "{note}");
+        assert_eq!(install::service_state("dsh-no-such-service"), None);
+    }
+
+    #[test]
+    fn service_states_have_stable_names() {
+        use windows_sys::Win32::System::Services::{SERVICE_RUNNING, SERVICE_STOPPED};
+        assert_eq!(install::state_name(SERVICE_RUNNING), "running");
+        assert_eq!(install::state_name(SERVICE_STOPPED), "stopped");
+        assert_eq!(install::state_name(u32::MAX), "unknown");
+    }
+
+    #[test]
+    fn a_cycle_report_says_what_happened_to_each_service() {
+        let report = install::describe(
+            Some("running".into()),
+            Ok("stopped".into()),
+            Ok("running".into()),
+        );
+        assert_eq!(
+            report,
+            serde_json::json!({"present": true, "before": "running", "stopped": "stopped", "after": "running"})
+        );
+        assert_eq!(
+            install::describe(None, Err("x".into()), Err("x".into())),
+            serde_json::json!({"present": false})
+        );
+        // A refused stop keeps the state it failed in and never claims the service came back.
+        assert_eq!(
+            install::describe(
+                Some("running".into()),
+                Err("stopping TermService failed with code 1051".into()),
+                Ok("running".into()),
+            ),
+            serde_json::json!({
+                "present": true,
+                "before": "running",
+                "error": "stopping TermService failed with code 1051"
+            })
+        );
     }
 }

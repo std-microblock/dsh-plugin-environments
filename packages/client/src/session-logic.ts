@@ -26,7 +26,9 @@ export interface SessionStatusView {
  * - `ready`       nothing, the mode works;
  * - `install`     install the bundled TermWrap (client SKUs);
  * - `manual`      TermWrap is needed but this build does not bundle it;
- * - `reboot`      TermWrap is in place, Windows only loads it at start-up;
+ * - `reboot`      TermWrap is registered but the running service has not picked it up (the
+ *                 install restarts Terminal Services itself, so this means that restart did not
+ *                 take) — Windows has to be restarted;
  * - `enable`      a Server SKU only needs its Remote Desktop host switched on;
  * - `unsupported` not a Windows host.
  */
@@ -58,7 +60,10 @@ export function sessionPhase(status: SessionStatusView, installedThisRun = false
   if (status.ready) return 'ready'
   if (status.missing.includes('not-windows')) return 'unsupported'
   if (!needsTermWrap(status)) return 'enable'
-  // The wrapper is registered as the service DLL, but Terminal Services only loads it at boot.
+  // The wrapper is registered as the service DLL. The install cycles the service so it is loaded
+  // right away, so anything still missing here means that cycle did not take — only a boot is
+  // left. (`wrapperInstalled` is registry state, which cannot tell whether the running service
+  // actually loaded the DLL.)
   if (installedThisRun || status.termsrv?.wrapperInstalled || !status.missing.includes('termwrap-missing'))
     return 'reboot'
   return status.termwrap.present ? 'install' : 'manual'

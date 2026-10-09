@@ -1,7 +1,8 @@
 // Separate-session mode: one real Windows session per isolated account (own pointer, real input).
 //
 // A client SKU allows only one session at a time — and Home does not host Remote Desktop at all —
-// so TermWrap (MIT, bundled in the clear) has to be installed and the machine rebooted; a Server
+// so TermWrap (MIT, bundled in the clear) has to be installed; the install also cycles Terminal
+// Services so the wrapper loads right away, and only a failed cycle still needs a reboot. A Server
 // SKU only needs its Remote Desktop host switched on. The status is probed once per page and
 // shared between the Environments page panel and the account dialog, and the UI always offers
 // exactly one next step, with the full prerequisite checklist behind "Details".
@@ -18,7 +19,7 @@ interface Snapshot {
   status: SessionStatusView | undefined
   error: string | undefined
   loading: boolean
-  /** Set after a successful install in this page: a reboot is pending whatever the probe says. */
+  /** Set when an install reported that its own service restart did not take: reboot pending. */
   installed: boolean
 }
 
@@ -39,7 +40,10 @@ async function probe(): Promise<void> {
   if (snapshot.loading) return
   set({ loading: true, error: undefined })
   try {
-    set({ status: await call<SessionStatusView>('session.status'), loading: false })
+    const status = await call<SessionStatusView>('session.status')
+    // A probe that comes back ready supersedes an install that asked for a reboot, otherwise the
+    // panel would stay on "reboot pending" forever.
+    set({ status, loading: false, installed: status.ready ? false : snapshot.installed })
   } catch (e) {
     set({ error: messageOf(e), loading: false })
   }
@@ -134,9 +138,14 @@ export function SessionSetup({ t, platform, variant = 'panel', footnote }: Sessi
     setActionError(undefined)
     setNotice(undefined)
     try {
-      await call(action)
-      if (action === 'session.install') set({ installed: true })
-      else setNotice(t('session.done.enable'))
+      const result = await call<{ rebootRequired?: boolean }>(action)
+      if (action === 'session.install') {
+        // The server restarts Terminal Services itself; only a restart that did not take leaves a
+        // reboot pending.
+        const reboot = result?.rebootRequired === true
+        set({ installed: reboot })
+        setNotice(t(reboot ? 'session.done.installReboot' : 'session.done.install'))
+      } else setNotice(t('session.done.enable'))
       await probe()
     } catch (e) {
       setActionError(messageOf(e))

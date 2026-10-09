@@ -132,7 +132,8 @@
 [data-kind='local'] {
   --envx-accent: #4b83f0;
 }
-[data-kind='server'] {
+[data-kind='server'],
+[data-kind='reverse'] {
   --envx-accent: #8b6cf0;
 }
 [data-kind='ssh'] {
@@ -534,6 +535,96 @@
   font-size: 11.5px;
   line-height: 16px;
 }
+.envx-modes[data-cols='2'] {
+  grid-template-columns: repeat(2, 1fr);
+}
+.envx-mode:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.envx-mode:disabled:hover {
+  border-color: var(--dsw-alias-border-l3);
+  background: var(--dsw-alias-bg-base);
+}
+.envx-dir {
+  padding: 12px 14px 13px;
+  gap: 3px;
+}
+
+/* connection direction diagram: This PC → Target, mirrored for reverse */
+.envx-flow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin-bottom: 8px;
+  color: var(--dsw-alias-label-tertiary);
+}
+.envx-flow-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2);
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.envx-flow-arrow {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  position: relative;
+}
+.envx-flow-arrow::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 8px;
+  top: 50%;
+  border-top: 1.5px dashed currentColor;
+  opacity: 0.55;
+}
+.envx-flow-arrow svg {
+  margin-left: auto;
+  position: relative;
+}
+.envx-flow[data-dir='reverse'] .envx-flow-arrow {
+  transform: scaleX(-1);
+}
+.envx-mode[data-on] .envx-flow {
+  color: var(--dsw-alias-state-business-primary);
+}
+.envx-mode[data-on] .envx-flow-node {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, transparent);
+}
+.envx-mode[data-on] .envx-flow-arrow::before {
+  animation: envx-flow 0.9s linear infinite;
+  opacity: 0.8;
+  border-top-style: solid;
+  background: none;
+}
+@keyframes envx-flow {
+  from {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.95;
+  }
+  to {
+    opacity: 0.45;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .envx-mode[data-on] .envx-flow-arrow::before {
+    animation: none;
+  }
+}
 .envx-chip code {
   font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: 11.5px;
@@ -929,6 +1020,261 @@ select.envx-input {
 }
 .envx-footer .envx-spacer {
   flex: 1;
+}
+.envx-result[data-ok='pending'] {
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-layer-2);
+}
+.envx-form-note {
+  margin-top: -8px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 17px;
+}
+.envx-field-row[data-three] {
+  grid-template-columns: 1fr 96px 1fr;
+}
+.envx-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 28px;
+}
+.envx-field-head > label {
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  font-weight: 500;
+}
+.envx-seg {
+  align-self: flex-start;
+}
+.envx-field-head .envx-seg {
+  align-self: center;
+}
+
+/* collapsible group */
+.envx-disc {
+  border-radius: 10px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-1);
+}
+.envx-disc-head {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.envx-disc-head:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.envx-disc-head:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dsw-alias-state-business-primary) 22%, transparent);
+}
+.envx-disc-head > svg {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  transition: transform 0.15s;
+}
+.envx-disc-head[aria-expanded='true'] > svg {
+  transform: rotate(90deg);
+}
+.envx-disc[data-open] .envx-disc-head {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.envx-disc-title {
+  flex: none;
+  font-weight: 500;
+}
+.envx-disc-summary {
+  flex: 1;
+  min-width: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 17px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+.envx-disc-summary svg {
+  vertical-align: middle;
+}
+.envx-disc-summary [data-tone='warn'] {
+  color: var(--envx-warn);
+}
+.envx-disc-summary [data-tone='error'] {
+  color: var(--dsw-alias-state-error-primary);
+}
+.envx-disc-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 12px 14px;
+}
+.envx-disc-text {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12.5px;
+  line-height: 19px;
+}
+.envx-disc-body .envx-switch-row {
+  background: var(--dsw-alias-bg-layer-2);
+}
+.envx-inline-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 17px;
+}
+
+/* copyable command */
+.envx-cmd {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.envx-cmd-label {
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--dsw-alias-label-secondary);
+  font-weight: 500;
+}
+.envx-cmd-body {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 10px 9px 12px;
+  border-radius: 8px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-markdown-code-block, var(--dsw-alias-bg-base));
+}
+.envx-cmd-body code {
+  flex: 1;
+  min-width: 0;
+  padding-top: 3px;
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
+}
+.envx-cmd-copy {
+  appearance: none;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    color 0.12s,
+    background 0.12s,
+    border-color 0.12s;
+}
+.envx-cmd-copy:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.envx-cmd-copy[data-copied] {
+  color: var(--dsw-alias-state-success-primary);
+  border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 40%, transparent);
+}
+
+/* a guided step: icon, title, text, optional action */
+.envx-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--envx-accent, var(--dsw-alias-state-business-primary)) 7%, transparent);
+}
+.envx-step > div {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.envx-step strong {
+  font-size: 13px;
+  line-height: 19px;
+  font-weight: 600;
+}
+.envx-step > div > span {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12.5px;
+  line-height: 19px;
+}
+.envx-step > button {
+  flex: none;
+  align-self: center;
+}
+.envx-step-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  color: var(--envx-accent, var(--dsw-alias-state-business-primary));
+  background: color-mix(in srgb, var(--envx-accent, var(--dsw-alias-state-business-primary)) 14%, transparent);
+}
+
+/* live connection state of a reverse environment */
+.envx-live {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-layer-2);
+  overflow-wrap: anywhere;
+}
+.envx-live i {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dsw-alias-state-success-primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dsw-alias-state-success-primary) 22%, transparent);
+}
+.envx-live[data-state='ok'] {
+  color: var(--dsw-alias-state-success-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent);
 }
 
 /* remote browser */

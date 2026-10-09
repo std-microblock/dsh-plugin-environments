@@ -26,7 +26,8 @@ TermWrap 用「替换 Terminal Services 的服务 DLL + 在内存里打补丁」
 
 ## 一键安装做什么
 
-`session install`（需要管理员授权，`--no-exclusion` 可跳过排除项）严格按 TermWrap 自己的文档执行：
+`session install`（需要管理员授权；`--no-exclusion` 跳过 Defender 排除项，`--no-restart` 跳过
+最后那步服务重启）严格按 TermWrap 自己的文档执行：
 
 0. **先把 `%ProgramFiles%\RDP Wrapper\` 加入 Defender 排除项**——微软对这个家族有官方特征
    `HackTool:Win64/RDPWrap!MTB`，不先加白名单，DLL 落盘就会被隔离，安装会「看起来成功」但服务
@@ -38,7 +39,20 @@ TermWrap 用「替换 Terminal Services 的服务 DLL + 在内存里打补丁」
    Wrapper DLL；payload 里没有 `.reg` 时退化为直接写这两个 `ServiceDll` 值）；
 4. `fDenyTSConnections=0`，必要时创建本机组 `Remote Desktop Users`（家庭版没有这个组）；
 5. 启动 `TermService`（有 `UmWrap.dll` 时也启动 `UmRdpService`）；
-6. 报告结果并提示**必须重启**——Wrapper DLL 只在服务启动时被加载。
+6. **重启 `TermService`/`UmRdpService` 让补丁立即生效**——SCM 在每次服务启动时都会重新读
+   `ServiceDll`，所以「停一下再起」就等于把 Wrapper DLL 加载进来。`UmRdpService` 依赖
+   `TermService`，因此先停它、最后起它；起来后再确认 3389 已经重新在监听。上游文档写的是
+   「重启电脑」，那只是因为**服务启动**才是 DLL 的加载点，而服务重启同样是服务启动。
+   不想让它动服务时用 `--no-restart`：那样只会「启动」（不重启）服务，通常还得自己重启电脑才
+   生效。
+7. 报告结果：服务回来了并且监听恢复 → `rebootRequired: false`，无需重启电脑；**停不下来或
+   起不来**（没有管理员权限、被安全软件拦下、DLL 被占用……）才回退到「重启电脑」。
+
+重装时**内容相同的文件不会被重写**（所以常见的「同一个包再装一次」根本不碰服务）；只有真要替换
+的文件被占用（正在运行的 DLL 是锁住的）时，安装才会**先停服务再拷**，并且最多重试 3 次——
+`TermService` 是**触发启动**的：任何一次 RPC/WTS 调用（环境页面探测自己的状态就够）都会把它拉
+起来，所以停一次不一定压得住。注意第 6 步会**掐断当时正在跑的 RDP 会话**——环境正在用独立会话
+模式时不要重装，重装时也尽量别同时刷环境页面。
 
 安装后回到「环境」页面重新探测即可看到状态变化。
 
@@ -101,12 +115,18 @@ node scripts/stage-termwrap.ts --from <下载的发布包> --version <版本>
 2. 下载 TermWrap 发布包，把 DLL 复制到 `%ProgramFiles%\RDP Wrapper\`；
 3. 合并 `Install_termwrap_umwrap.reg`（家庭版/服务器版需要 UmWrap；专业版/企业版用
    `Install_termwrap_only.reg`）；
-4. 重启，然后在「环境」页面重新探测。
+4. 重启这两个服务（`UmRdpService` 依赖 `TermService`，先停它、最后起它；重启电脑当然也可以），
+   然后在「环境」页面重新探测：
+
+   ```powershell
+   Stop-Service UmRdpService -Force; Stop-Service TermService -Force
+   Start-Service TermService; Start-Service UmRdpService
+   ```
 
 ## 已知代价
 
 - 第三方、未签名补丁，微软官方不支持；Defender 会把它识别为 `HackTool`。
-- Windows 更新可能让偏移失效，需要更新 TermWrap 后重装/重启。
+- Windows 更新可能让偏移失效，需要更新 TermWrap 后重装（重装会自己把服务重启，不必重启电脑）。
 - 会话模式占内存（每会话约 100–200 MB），且必须保持会话「已连接」（断开的 RDP 会话不再
   渲染，截图会黑）。登录由 `dsh-env-server` 自带的**无界面 RDP 客户端**完成（IronRDP，见
   `crates/dsh-env-server/src/rdp.rs`），它同时负责一直把连接挂着；`mstsc` 不再参与。

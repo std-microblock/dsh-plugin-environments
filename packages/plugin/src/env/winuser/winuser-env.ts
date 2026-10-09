@@ -8,7 +8,7 @@ import { EnvError, errorCode, errorMessage } from '@dsh-environments/protocol'
 import { decodeHostText } from '../host-process.ts'
 import { openServer, serverBinary } from '../server/connect.ts'
 import type { ServerEnvironment } from '../server/server-env.ts'
-import { runServerElevated, secretPath, type WinuserResult } from './accounts.ts'
+import { listWindowsAccounts, runServerElevated, secretPath, type WinuserResult } from './accounts.ts'
 import { probeSession } from './session-mode.ts'
 
 /** Stored configuration of a Windows-account environment. */
@@ -219,10 +219,27 @@ export function windowsAccountLaunchArgs({
 }
 
 /**
- * Accounts already granted the Remote Desktop logon right in this process, so the (elevated)
- * `session allow` runs at most once per account per run.
+ * Accounts whose Remote Desktop logon right this run already granted, as name → the SID it was
+ * granted for. The grant lives on the account SID, so keying it by name alone is wrong: an account
+ * that is deleted and re-created under the same name comes back with a new SID, no group
+ * membership and no listener ACE, and the logon is then refused during CredSSP ("access denied",
+ * which reads like a wrong password).
  */
-const allowedAccounts = new Set<string>()
+const allowedAccounts = new Map<string, string>()
+
+/** The account's SID, or null when this machine has no such dsh-managed account. */
+async function accountSidOf(account: string): Promise<string | null> {
+  const accounts = await listWindowsAccounts().catch(() => [])
+  const hit = accounts.find(a => a.name.toLowerCase() === account.toLowerCase())
+  return hit?.sid ?? null
+}
+
+/** Grant (elevated) the logon right at most once per SID per run. */
+async function ensureAllowed(account: string, sid: string): Promise<void> {
+  if (allowedAccounts.get(account) === sid) return
+  await runServerElevated(['session', 'allow', '--account', account])
+  allowedAccounts.set(account, sid)
+}
 
 /**
  * Start dsh-env-server as the account and connect to it.
@@ -256,12 +273,11 @@ async function openAccountSession(
     throw new EnvError('UNSUPPORTED', `this machine cannot host a separate session yet: ${status.reasons.join('; ')}`)
   }
   const shell = sessionShellCommand(bin, port, token, cwd)
-  // The logon right is per account and needs administrator approval. Ask once per account per
-  // run: membership does not change, and a UAC prompt on every connect would be obnoxious.
-  if (!allowedAccounts.has(account)) {
-    await runServerElevated(['session', 'allow', '--account', account])
-    allowedAccounts.add(account)
-  }
+  // The logon right needs administrator approval, so ask at most once per SID per run (a UAC prompt
+  // on every connect would be obnoxious). A missing account is left to the logon itself, which
+  // reports "create the account again" instead of a pointless approval dialog.
+  const sid = await accountSidOf(account)
+  if (sid !== null) await ensureAllowed(account, sid)
   // The logon itself is a headless RDP client (see crates/dsh-env-server/src/rdp.rs): it points the
   // account's own logon shell at `shell`, so our server starts inside the new session, and then
   // holds the connection open. A disconnected session stops rendering, which would make every
@@ -309,8 +325,12 @@ async function openAccountSession(
 
   let session = startClient()
   let lastError: unknown
-  // Two attempts: the second one runs after a stale session of the account has been ended.
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // Up to three attempts: one for a stale session of the account that has to be ended, and one
+  // after re-granting the logon right (the account may have been re-created under this name since
+  // the grant, which gives it a new SID and no right at all).
+  let endedStale = false
+  let reAllowed = false
+  for (let attempt = 0; attempt < 3 && !base.signal?.aborted; attempt++) {
     const deadline = Date.now() + 90000
     while (Date.now() < deadline) {
       if (base.signal?.aborted) break
@@ -339,7 +359,8 @@ async function openAccountSession(
         await new Promise(res => setTimeout(res, 500))
       }
     }
-    if (session.busy && attempt === 0) {
+    if (session.busy && !endedStale) {
+      endedStale = true
       session.child.kill()
       // Ending another account's session needs administrator rights; this is rare (only after a
       // connection that died without ending its session), so the prompt is acceptable here.
@@ -347,15 +368,33 @@ async function openAccountSession(
       session = startClient()
       continue
     }
+    // "access denied" during CredSSP means the account was not let through. The usual cause is a
+    // re-created account (new SID, its right gone), so re-grant it once and try again.
+    if (!reAllowed && /access denied/i.test(session.log)) {
+      const fresh = await accountSidOf(account)
+      if (fresh !== null) {
+        reAllowed = true
+        allowedAccounts.delete(account)
+        session.child.kill()
+        await ensureAllowed(account, fresh)
+        session = startClient()
+        continue
+      }
+    }
     break
   }
   session.child.kill()
   const detail = session.log.trim().split('\n').filter(Boolean).at(-1)
+  // "access denied" from CredSSP says nothing about the cause: it is shown both for a missing logon
+  // right and for a password that no longer matches, so name the two things that actually help.
+  const hint = /access denied/i.test(session.log)
+    ? ' (the account refused the logon during CredSSP: create it again from the Environments page, which resets its password and re-grants the Remote Desktop logon right)'
+    : ''
   throw new EnvError(
     'ETIMEDOUT',
     `the session for ${account} did not come up${lastError === undefined ? '' : `: ${errorMessage(lastError)}`}${
       detail ? ` (${detail})` : ''
-    }`,
+    }${hint}`,
   )
 }
 export async function openWindowsAccount({

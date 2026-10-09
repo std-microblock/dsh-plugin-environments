@@ -55,10 +55,10 @@ dsh plugin --profile desktop add link:G:/dsh-plugin-remote-environments/packages
 
 `server` 和 `reverse` 两种环境的连接可能经过公网，所以总是先建立一层安全通道：双方用每个环境独立的高熵共享密钥互相认证，再派生出两个方向各自的 AES-256-GCM 密钥加密全部流量。密钥本身从不在网络上传输，也不需要证书。细节见 [docs/protocol.md](docs/protocol.md#secure-channel)。
 
-| 谁有公网地址 | 做法                                                                                                                                                                                 |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 目标机器     | 在目标机器上运行 `dsh-env-server serve --listen 0.0.0.0:7461 --token-file token.txt`（或 `--listen ws://0.0.0.0:7461/dsh-env`），然后添加“环境服务器”，填入地址和 token.txt 里的密钥 |
-| dsh 这台电脑 | 添加“反向连接”环境，在对话框里开启 TCP 和/或 WebSocket 监听。保存后会显示一次可以直接复制的命令（Linux/macOS 和 PowerShell 两种），在目标机器上运行即可                              |
+| 谁有公网地址 | 做法                                                                                                                                                                                                            |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 目标机器     | 在目标机器上运行 `dsh-env-server serve --listen 0.0.0.0:7461 --token-file token.txt`（或 `--listen ws://0.0.0.0:7461/dsh-env`），然后添加“环境服务器”并选择“直连”，填入地址和 token.txt 里的密钥                |
+| dsh 这台电脑 | 添加“环境服务器”并选择“反向连接”。没有开启任何监听时，保存会自动开启 TCP 监听（也可以在“本机监听”里改用 WebSocket）。保存后会显示一次可以直接复制的命令（Linux/macOS 和 PowerShell 两种），在目标机器上运行即可 |
 
 - 密钥通过文件（`--token-file`）或标准输入（`--token-stdin`）交给 `dsh-env-server`。`--token` 会出现在其他用户可见的进程列表里，不建议使用。
 - 需要 TLS 时，把 `ws://` 监听放在 nginx、Caddy 等反向代理之后，插件一侧直接填 `wss://` 地址；`dsh-env-server` 本身不带 TLS。
@@ -107,6 +107,8 @@ dsh plugin --profile desktop add link:G:/dsh-plugin-remote-environments/packages
 | `env_return`   | 归还环境，同时关闭通过它开启的进程和隧道；`gui_only: true` 只交回 GUI、保留无界面租约。对挂载的环境只交回 GUI，挂载保留                                                                     |
 | `env_transfer` | 在本会话工作区和已借环境之间、或两个已借环境之间复制文件或目录，位置写成 `别名:/路径`                                                                                                       |
 
+本会话可借用的环境会写进 system prompt（每个环境一行，形如 `- pixel: Pixel 8 [adb, Android 14 测试机]`，含名称、类型和描述），模型不必先调用 `env_list` 就知道有哪些可选；**实时状态**（谁在用、谁持有 GUI、排队情况）仍然只在 `env_list` 里给出，这样租约变化不会反复改写 system prompt。会话自己的可借用列表变化时（在工作区里改默认值或调整本会话的勾选）这段文字随之更新；没有可借用环境时不出现。
+
 借到之后的工具（无界面和 GUI 都有）：`<别名>__exec`、`read_file`、`read_image`、`write_file`、`edit_file`、`list_dir`、`glob`、`grep`、`process_start` / `process_io` / `process_kill`（可交互的长时间进程）、`tunnel`（`to_env` / `from_env`，TCP 或 UDP）。
 
 其他工具按环境能力出现；标为 GUI 的只在持有 GUI 时出现，升级后出现、交回 GUI 后消失：
@@ -152,7 +154,7 @@ Android 上 ASCII 文本走 `input text`；非 ASCII（中文、emoji 等）走�
 
 在**环境**页面创建账户后，插件会：
 
-1. **创建**（需要管理员确认，装了 gsudo 时用 gsudo，否则弹出 UAC）：用 `NetUserAdd` 建一个注释为 `dsh-env managed` 的本地标准用户，随机密码用当前用户的 DPAPI 加密后存到插件数据目录的 `winusers/<账户>.secret`。可选地给若干目录授予该账户“修改”权限（`icacls /grant <账户>:(OI)(CI)M`，继承到已有的子文件）。
+1. **创建**（需要管理员确认，弹出 UAC 授权）：用 `NetUserAdd` 建一个注释为 `dsh-env managed` 的本地标准用户，随机密码用当前用户的 DPAPI 加密后存到插件数据目录的 `winusers/<账户>.secret`。可选地给若干目录授予该账户“修改”权限（`icacls /grant <账户>:(OI)(CI)M`，继承到已有的子文件）。
 2. **连接**：把服务端二进制复制到 `%ProgramData%\dsh-env\dsh-env-server-<内容哈希>.exe`（插件自带的二进制通常在当前用户的配置目录里，其他账户进不去；`ProgramData` 下的文件继承 “Users：读取和执行”）。然后以当前用户身份运行 `dsh-env-server winuser launch --supervise`，它用 `CreateProcessWithLogonW(LOGON_WITH_PROFILE)` 以该账户身份启动 `serve --listen 127.0.0.1:<随机端口> --token <随机令牌> --once --cwd ~`：
    - 首次登录时 Windows 会创建账户的配置文件（`C:\Users\<账户>`，如果同名目录已存在则是 `C:\Users\<账户>.<计算机名>`）；`USERPROFILE`、`APPDATA`、`TEMP`、HKCU 都是该账户自己的。
    - 默认工作目录是该账户的主目录；环境配置里的 `cwd` 必须是该账户能进入的目录（例如授予过权限的工作区），否则启动会报“目录名称无效”。
@@ -164,18 +166,19 @@ Android 上 ASCII 文本走 `input text`；非 ASCII（中文、emoji 等）走�
 
 环境设置里的“独立桌面 / 独立会话”决定该账户的窗口在哪里：
 
-| 模式             | 窗口在哪                          | 鼠标指针       | 输入方式    | 需要什么        |
-| ---------------- | --------------------------------- | -------------- | ----------- | --------------- |
-| **共用**（默认） | 你的桌面                          | 你的指针       | `SendInput` | —               |
-| **独立桌面**     | 同一会话内的 `WinSta0\dsh-<账户>` | 合成指针       | 窗口消息    | —               |
-| **独立会话**     | 该账户自己的 Windows 会话         | **真正的指针** | 真实键鼠    | TermWrap + 重启 |
+| 模式             | 窗口在哪                          | 鼠标指针       | 输入方式    | 需要什么 |
+| ---------------- | --------------------------------- | -------------- | ----------- | -------- |
+| **共用**（默认） | 你的桌面                          | 你的指针       | `SendInput` | —        |
+| **独立桌面**     | 同一会话内的 `WinSta0\dsh-<账户>` | 合成指针       | 窗口消息    | —        |
+| **独立会话**     | 该账户自己的 Windows 会话         | **真正的指针** | 真实键鼠    | TermWrap |
 
 - **独立桌面**：`winuser launch --desktop dsh-<账户>` 由启动器创建并持有该桌面（桌面对象是引用计数的，最后一个句柄关闭就销毁），账户的一切进程都落在上面，窗口不会出现在你的屏幕里。因为非活动桌面没有屏幕表面（`GetDC(NULL)`+`BitBlt` 会是黑的），截图改成枚举该桌面的窗口、逐个 `PrintWindow(PW_RENDERFULLCONTENT)` 再按 z 序合成；输入走窗口消息（`SendInput` 在非输入桌面上被拒绝），指针位置由服务端记录并画进截图。
-- **独立会话**：真正独立的桌面必须是一个独立的 Terminal Services 会话，而客户端 SKU 只允许一个会话、家庭版还不开放 RDP 主机。环境页面会探测这台机器能不能用，并列出缺什么；缺 TermWrap 时提供**一键安装**（明文 MIT 二进制随包分发，安装前先把 `%ProgramFiles%\RDP Wrapper\` 加入 Defender 排除项——微软对这个家族有官方特征 `HackTool:Win64/RDPWrap!MTB`）。装完必须重启。之后连接时由服务端自带的**无界面 RDP 客户端**（IronRDP，`crates/dsh-env-server/src/rdp.rs`）把该账户登进自己的会话，并把连接一直挂着（断开的会话不再渲染，截图会变黑）；登录前会把该账户自己的 `Winlogon\Shell` 指向 `<服务端> serve … --no-console`，于是**服务端本身充当那个会话的 shell**，账户里不需要注册任何自启动，也不会在账户桌面上留下控制台窗口。不用 `mstsc`：它常常无视 `.rdp` 里的密码弹凭据框，窗口还会出现在你的桌面上，失败时也没有任何可读的错误。
+- **独立会话**：真正独立的桌面必须是一个独立的 Terminal Services 会话，而客户端 SKU 只允许一个会话、家庭版还不开放 RDP 主机。环境页面会探测这台机器能不能用，并列出缺什么；缺 TermWrap 时提供**一键安装**（明文 MIT 二进制随包分发，安装前先把 `%ProgramFiles%\RDP Wrapper\` 加入 Defender 排除项——微软对这个家族有官方特征 `HackTool:Win64/RDPWrap!MTB`）。装完不需要重启电脑：安装会自己重启 `TermService`/`UmRdpService`，服务启动时 SCM 会重新读 `ServiceDll`，补丁随即生效（只有服务停不下来/起不来时才回退到提示重启）。之后连接时由服务端自带的**无界面 RDP 客户端**（IronRDP，`crates/dsh-env-server/src/rdp.rs`）把该账户登进自己的会话，并把连接一直挂着（断开的会话不再渲染，截图会变黑）；登录前会把该账户自己的 `Winlogon\Shell` 指向 `<服务端> serve … --no-console`，于是**服务端本身充当那个会话的 shell**，账户里不需要注册任何自启动，也不会在账户桌面上留下控制台窗口。不用 `mstsc`：它常常无视 `.rdp` 里的密码弹凭据框，窗口还会出现在你的桌面上，失败时也没有任何可读的错误。
 - **实时预览**：两种模式都可以在环境卡片上点**查看桌面**，看到该桌面的实时画面（约 4 fps）。有活动会话时预览复用那条连接；独立会话模式下没有活动会话时不会为了截图而新开一个会话，而是提示先去启动会话。
 
 限制：
 
+- 提权由插件自带的 `dsh-env-server elevate` 完成：它用 ShellExecuteEx 的 `runas` 动词让 Windows 弹出 UAC 授权，再等被提权的进程结束。不用 gsudo 之类的第三方工具——它们靠替换调用进程的令牌来提权，而宿主机给子进程的是重定向控制台（没有自己的控制台），会以 “Failed to substitute token” 失败；需要管理员权限的每一步（建账户、授权目录、装 TermWrap）都会各自弹一次 UAC。
 - 该账户是标准用户，环境里的程序不能提权：直接启动要求管理员权限的程序会失败（错误 740 “请求的操作需要提升”）；通过 ShellExecute 提权（例如 `Start-Process -Verb RunAs`）会在当前桌面弹出索要管理员凭据的 UAC 窗口，需要坐在电脑前的人处理。
 - 同一时间只有一个交互桌面，该账户的窗口和当前用户的窗口在同一个桌面上，互相可见、可操作；锁屏时截图和输入可能失败。
 - 端口只监听 `127.0.0.1`，但同一台机器上的其他本地用户也能连接这个端口，靠随机令牌认证；令牌出现在服务端的命令行里（只有该账户本身和管理员能读到）。
@@ -217,7 +220,7 @@ pnpm build:client              # packages/plugin/client.js
 pnpm run package               # 发布包 out/dsh-plugin-environments-<版本>.tgz + SHA256SUMS（本地缺少 macOS 二进制时加 --allow-missing）
 ```
 
-`crates/dsh-env-server` 是 Rust 写的 `dsh-env-server`，子命令有 `serve`、`connect`、`stdio`、`winuser create|delete|list|launch|grant`。命令行用 clap，glob/grep 基于 ripgrep 的 `ignore` / `globset` / `grep-*` 库；WebSocket 和安全通道是手写的小实现，加密只依赖 RustCrypto 的 `aes-gcm`、`hkdf`、`hmac`、`sha2` / `sha1`。Linux 静态二进制通过 `rust-lld` 交叉编译，不需要额外的工具链。
+`crates/dsh-env-server` 是 Rust 写的 `dsh-env-server`，子命令有 `serve`、`connect`、`stdio`、`elevate`、`session …`、`winuser create|delete|list|launch|grant|session`。命令行用 clap，glob/grep 基于 ripgrep 的 `ignore` / `globset` / `grep-*` 库；WebSocket 和安全通道是手写的小实现，加密只依赖 RustCrypto 的 `aes-gcm`、`hkdf`、`hmac`、`sha2` / `sha1`。Linux 静态二进制通过 `rust-lld` 交叉编译，不需要额外的工具链。
 
 ## 已知限制
 

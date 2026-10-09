@@ -1,7 +1,7 @@
 //! Command-line interface (clap derive).
 //!
 //! The plugin builds these argument lists itself (`packages/plugin/src`: `serve`,
-//! `connect`, `stdio`, `winuser ...`), so flag names are part of its contract. The
+//! `connect`, `stdio`, `elevate`, `winuser ...`), so flag names are part of its contract. The
 //! hidden `__utf8-console` trampoline is handled in `main` before clap runs.
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
@@ -89,6 +89,15 @@ pub enum Cmd {
         #[arg(long, value_name = "PATH")]
         cwd: Option<PathBuf>,
     },
+    /// Run a program elevated, through the UAC consent dialog
+    ///
+    /// The elevated program gets a console of its own and cannot inherit the caller's
+    /// standard handles: pass a command line that writes its output to a file.
+    Elevate {
+        /// Program and arguments (after `--`)
+        #[arg(last = true, required = true, value_name = "PROGRAM")]
+        program: Vec<String>,
+    },
     /// Manage dsh-managed local Windows accounts
     #[command(subcommand)]
     Winuser(WinUserCmd),
@@ -111,6 +120,9 @@ pub enum SessionCmd {
         /// Add a Defender exclusion for the install directory first (default on)
         #[arg(long = "no-exclusion", action = clap::ArgAction::SetFalse)]
         exclusion: bool,
+        /// Restart Terminal Services afterwards so the wrapper loads without a reboot (default on)
+        #[arg(long = "no-restart", action = clap::ArgAction::SetFalse)]
+        restart: bool,
     },
     /// Let an account log on through Remote Desktop (elevated)
     Allow {
@@ -439,6 +451,35 @@ mod tests {
     }
 
     #[test]
+    fn elevate_args() {
+        assert_eq!(
+            p(&["elevate", "--", "cmd.exe", "/d", "/c", "x.cmd"]).unwrap(),
+            Cmd::Elevate {
+                program: ["cmd.exe", "/d", "/c", "x.cmd"].map(String::from).to_vec()
+            }
+        );
+        // The plugin's elevation line (accounts.ts): the program's own flags follow `--`.
+        assert_eq!(
+            p(&[
+                "elevate",
+                "--",
+                "cmd.exe",
+                "/d",
+                "/c",
+                "C:\\Temp\\dsh-env-elev-1.cmd"
+            ])
+            .unwrap(),
+            Cmd::Elevate {
+                program: ["cmd.exe", "/d", "/c", "C:\\Temp\\dsh-env-elev-1.cmd"]
+                    .map(String::from)
+                    .to_vec()
+            }
+        );
+        assert!(p(&["elevate"]).is_err());
+        assert!(p(&["elevate", "cmd.exe"]).is_err());
+    }
+
+    #[test]
     fn help_and_version() {
         use clap::error::ErrorKind;
         assert_eq!(
@@ -452,7 +493,7 @@ mod tests {
             ErrorKind::DisplayHelp
         );
         let help = Cli::command().render_long_help().to_string();
-        for sub in ["serve", "connect", "stdio", "winuser", "session"] {
+        for sub in ["serve", "connect", "stdio", "elevate", "winuser", "session"] {
             assert!(help.contains(sub), "{help}");
         }
         assert!(p(&[]).is_err());

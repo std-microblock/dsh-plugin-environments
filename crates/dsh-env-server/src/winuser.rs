@@ -24,6 +24,12 @@ mod imp {
             .collect()
     }
 
+    /// `<system root>\System32\<name>` — the system drive is not always `C:`.
+    pub(super) fn system32(name: &str) -> String {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        format!("{root}\\System32\\{name}")
+    }
+
     unsafe fn from_wide(p: *const u16) -> String {
         if p.is_null() {
             return String::new();
@@ -230,19 +236,75 @@ mod imp {
         };
         let mut parm_err = 0u32;
         let rc = unsafe { NetUserAdd(null(), 1, &info as *const _ as *const u8, &mut parm_err) };
-        if rc != 0 {
+        let reused = if rc == NERR_UserExists {
+            // The name of an account this plugin created earlier is the normal "create it again"
+            // repair: give it a fresh password so the secret we are about to store matches, and
+            // carry on. Only our own accounts are touched — the comment is the marker.
+            if !is_managed(name)? {
+                bail!("a user named `{name}` already exists");
+            }
+            set_password(name, &password)?;
+            true
+        } else if rc != 0 {
             if rc == 5 {
                 bail!("NetUserAdd failed: access denied (administrator rights are required)");
             }
-            if rc == NERR_UserExists {
-                bail!("a user named `{name}` already exists");
-            }
             bail!("NetUserAdd failed with code {rc} (parameter {parm_err})");
-        }
+        } else {
+            false
+        };
         let protected = dpapi_protect(password.as_bytes())?;
         let encoded = BASE64.encode(&protected);
         std::fs::write(secret_out, encoded).with_context(|| format!("writing {secret_out}"))?;
-        Ok(json!({"ok": true, "name": name}))
+        // Grant the Remote Desktop logon right here as well as in `session allow`. The right is
+        // per *account SID*, and the plugin only asks for it once per name: an account that is
+        // deleted and re-created (same name, new SID) comes back without group membership and
+        // without its listener ACE, and the caller's "already allowed" memory then skips the grant
+        // — the logon is refused during CredSSP with a bare "access denied" that looks like a
+        // wrong password. Granting at creation makes a fresh account usable on its own.
+        let rdp_logon = crate::termwrap::allow_account(name);
+        Ok(json!({
+            "ok": true,
+            "name": name,
+            "reused": reused,
+            "rdpLogon": match &rdp_logon {
+                Ok(v) => v.clone(),
+                Err(e) => json!({"ok": false, "error": e}),
+            },
+        }))
+    }
+
+    /// Whether `name` is an account this plugin created (its comment is the marker).
+    fn is_managed(name: &str) -> Result<bool> {
+        let accounts = list()?;
+        Ok(accounts
+            .as_array()
+            .is_some_and(|a| a.iter().any(|u| u["name"].as_str() == Some(name))))
+    }
+
+    /// Force a new password on an existing account (its flags and rights stay as they are).
+    fn set_password(name: &str, password: &str) -> Result<()> {
+        let mut wname = wide(name);
+        let mut wpass = wide(password);
+        let mut info = USER_INFO_1003 {
+            usri1003_password: wpass.as_mut_ptr(),
+        };
+        let mut parm_err = 0u32;
+        let rc = unsafe {
+            NetUserSetInfo(
+                null(),
+                wname.as_mut_ptr(),
+                1003,
+                &mut info as *mut _ as *mut u8,
+                &mut parm_err,
+            )
+        };
+        if rc != 0 {
+            bail!(
+                "resetting the password of `{name}` failed with code {rc} (parameter {parm_err})"
+            );
+        }
+        Ok(())
     }
 
     pub fn list() -> Result<serde_json::Value> {
@@ -597,8 +659,11 @@ mod imp {
     /// through the secondary logon service gives us; a fresh profile is created on the way.
     pub fn set_shell(name: &str, secret_file: &str, command: &str) -> Result<serde_json::Value> {
         let key = "HKCU\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon";
+        // `reg.exe` must be addressed through the real system root: the system drive is not always
+        // `C:`, and a wrong path only surfaces here as `CreateProcessWithLogonW failed: The system
+        // cannot find the file specified` (os error 2) from a step the user cannot see.
         let program = [
-            "C:\\Windows\\System32\\reg.exe".to_string(),
+            system32("reg.exe"),
             "add".to_string(),
             key.to_string(),
             "/v".to_string(),
@@ -750,6 +815,18 @@ mod tests {
         assert!(p.ends_with("\\config\\systemprofile"), "{p:?}");
         assert!(imp::account_sid("dsh-no-such-account-xyz").is_none());
         assert!(imp::profile_path("S-1-5-21-1-2-3-4").is_none());
+    }
+
+    /// `reg.exe` is launched as the account through the secondary logon service; pointing at a
+    /// literal `C:\Windows\...` breaks every logon on a machine whose system drive is not `C:`
+    /// (this one runs Windows from `Y:`), with an error the user cannot act on.
+    #[test]
+    fn system32_follows_the_system_root() {
+        let reg = imp::system32("reg.exe");
+        assert!(reg.ends_with("\\System32\\reg.exe"), "{reg}");
+        let root = std::env::var("SystemRoot").unwrap();
+        assert_eq!(reg, format!("{root}\\System32\\reg.exe"), "{reg}");
+        assert!(std::path::Path::new(&reg).is_file(), "{reg} is missing");
     }
 
     #[test]
