@@ -4,6 +4,7 @@ import path from 'node:path'
 import { installApi } from './api/index.ts'
 import { installBorrowing } from './borrowing/index.ts'
 import { loadDeps } from './deps.ts'
+import { installExecEnv } from './env/exec-env.ts'
 import type { Logger, PluginContext } from './host-api.ts'
 import type { ReverseListenerSettings } from './env/server/reverse.ts'
 import type { LeaseMode } from './manager/definitions.ts'
@@ -63,7 +64,8 @@ export async function apply(ctx: PluginContext, config: Config = {}): Promise<vo
   ctx.effect(() => () => manager.dispose(), 'environments: manager')
 
   const titleOf = (sessionId: string) => sessionId.slice(0, 8)
-  const mounting = installMounting(ctx, manager, deps)
+  const execEnv = installExecEnv(ctx)
+  const mounting = installMounting(ctx, manager, deps, execEnv)
   const borrowing = installBorrowing(ctx, manager, deps, {
     mountOf: agent => mounting.mountOf(agent),
     mountEvents: mounting.events,

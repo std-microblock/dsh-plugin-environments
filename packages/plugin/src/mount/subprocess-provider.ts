@@ -15,8 +15,9 @@ import type {
   SubprocessTerminalSpawnSpec,
 } from '@deepseek-ai/dsh-subprocess'
 import type { Environment } from '../env/environment.ts'
+import type { ExecEnvRegistry } from '../env/exec-env.ts'
 import type { EnvProcess, SpawnSpec } from '../env/types.ts'
-import { asPluginContext } from '../host-api.ts'
+import { asPluginContext, type Agent } from '../host-api.ts'
 import type { MountMap } from './map.ts'
 
 /** Number of trailing bytes of `buf` that form an incomplete UTF-8 sequence. */
@@ -73,6 +74,10 @@ export class Collector {
 
 export interface EnvSubprocessConfig {
   map: MountMap
+  /** The mounted agent, whose plugin-contributed variables every command receives. */
+  agent?: Agent | undefined
+  /** Registry of plugin-supplied command variables. */
+  execEnv?: ExecEnvRegistry | undefined
 }
 
 export interface SubprocessDeps {
@@ -92,12 +97,16 @@ export function createEnvSubprocessRuntime({ SubprocessRuntime, SubprocessExecut
     static inject = []
     readonly map: MountMap
     readonly env: Environment
+    readonly agent: Agent | undefined
+    readonly execEnv: ExecEnvRegistry | undefined
     readonly live = new Set<EnvProcess>()
 
     constructor(ctx: Context, config: EnvSubprocessConfig) {
       super(ctx)
       this.map = config.map
       this.env = config.map.env
+      this.agent = config.agent
+      this.execEnv = config.execEnv
       asPluginContext(ctx).effect(
         () => () => {
           for (const p of this.live) p.kill().catch(() => {})
@@ -145,9 +154,17 @@ export function createEnvSubprocessRuntime({ SubprocessRuntime, SubprocessExecut
 
     /** Map a harness spawn spec into the environment (argv, remote cwd, env with tombstones). */
     spawnSpec(spec: { argv: readonly string[]; cwd: string; env?: NodeJS.ProcessEnv | undefined }): EnvSpawnSpec {
-      const env: Record<string, string | null> = {}
+      const env: Record<string, string | null> = this.commandEnv()
       for (const [k, v] of Object.entries(spec.env ?? {})) env[k] = v === undefined ? null : String(v)
       return { argv: [...spec.argv], cwd: this.map.toRemote(spec.cwd), env }
+    }
+
+    /**
+     * The plugin-contributed variables for one command of this mount. The harness spawn spec
+     * merges after them, so an explicit managed fact or tombstone still wins.
+     */
+    commandEnv(): Record<string, string> {
+      return { ...(this.execEnv?.collect(this.agent) ?? {}) }
     }
 
     spawn(spec: SubprocessSpawnSpec): SubprocessHandle {
@@ -259,8 +276,12 @@ export function createEnvSubprocessRuntime({ SubprocessRuntime, SubprocessExecut
     }
 
     async spawnTerminal(spec: SubprocessTerminalSpawnSpec): Promise<SubprocessTerminalHandle> {
-      const env: Record<string, string> = {}
-      for (const [k, v] of Object.entries(spec.env ?? {})) env[k] = String(v)
+      const env: Record<string, string> = this.commandEnv()
+      for (const [k, v] of Object.entries(spec.env ?? {})) {
+        // A terminal cannot unset an inherited variable, so a tombstone is skipped, not sent.
+        if (v === undefined) continue
+        env[k] = String(v)
+      }
       env['TERM'] = spec.terminalType
       const p = await this.env.spawn(
         { argv: [...spec.argv], cwd: this.map.toRemote(spec.cwd), env, pty: { rows: spec.rows, cols: spec.cols } },

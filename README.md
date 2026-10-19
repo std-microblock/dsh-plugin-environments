@@ -79,6 +79,25 @@ dsh plugin --profile desktop add link:G:/dsh-plugin-remote-environments/packages
 
 也可以不建工作区，在普通会话开始前通过输入框里的“环境”按钮选择一个环境和目录。会话一旦开始，运行环境就不能再更改。
 
+### 插件提供的命令环境变量
+
+别的插件可以给环境里启动的每条命令附加环境变量，例如把当前会话所在的 IM 群、话题标识注入 `exec`。插件在 `apply` 里用 `ctx.get('execEnv')` 拿到注册表，声明它能提供的变量名并实现按智能体取值：
+
+```ts
+const execEnv = ctx.get('execEnv')
+execEnv.register({
+  name: 'toc-agent',
+  variables: {
+    FORGE_AGENT_CHAT_ID: { description: '当前会话所在的 IM 会话 ID' },
+  },
+  resolve: agent => ({ FORGE_AGENT_CHAT_ID: chatOf(agent) }),
+})
+```
+
+`resolve` 返回 `undefined` 表示这次不给值，环境自己的值保持不变；只有声明过的变量名可以返回，重名、非法变量名和空描述在注册时直接报错。注册随注册方插件的卸载一起失效。
+
+挂载会话的 shell 工具与终端里的每条命令都带这些变量：它们先进入命令环境，再由 harness 自己的 `DSH_*` 事实覆盖同名项，所以额外变量不会遮住 harness 传入的值。变量走的是环境协议里已有的 `env` 覆盖（`null` 表示删除），`local`、`server`、`reverse`、SSH 提供和 `winuser` 这些由 `dsh-env-server` 执行的环境都会生效；借用环境里的工具目前不带插件变量。
+
 **挂载失败时对话不会继续。** 远程工作区的会话、单独挂载了环境的会话以及它们的子智能体，如果挂载失败（环境不可用、目录不存在、独占环境被占用等），或挂载中途断开，插件不会让它退回宿主机上运行：
 
 - 每一步请求模型之前，插件先重新尝试挂载；仍然失败时，这一轮直接以错误结束（“环境 X 挂载失败：<原因>”），模型不会被调用，这条消息需要在环境恢复后重新发送。

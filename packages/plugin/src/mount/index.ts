@@ -7,6 +7,7 @@ import { EventEmitter } from 'node:events'
 import { errorMessage } from '@dsh-environments/protocol'
 import type { HarnessDeps, HarnessScope } from '../deps.ts'
 import type { Environment } from '../env/environment.ts'
+import type { ExecEnvRegistry } from '../env/exec-env.ts'
 import { parentSessionOf, promptSectionOrder, sessionIdOf, type Agent, type PluginContext } from '../host-api.ts'
 import type { Lease } from '../manager/lease.ts'
 import type { EnvironmentManager } from '../manager/manager.ts'
@@ -101,7 +102,12 @@ function satisfies(have: MountRecord, want: WantedMount, parentRecord: MountReco
   )
 }
 
-export function installMounting(ctx: PluginContext, manager: EnvironmentManager, deps: HarnessDeps): Mounting {
+export function installMounting(
+  ctx: PluginContext,
+  manager: EnvironmentManager,
+  deps: HarnessDeps,
+  execEnv?: ExecEnvRegistry,
+): Mounting {
   const EnvFileSystem = createEnvFileSystem(deps)
   const BaseRuntime = createEnvSubprocessRuntime(deps)
   class EnvSubprocessRuntime extends BaseRuntime {
@@ -199,7 +205,7 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
     live.add(agent)
     try {
       realm.plugin(EnvFileSystem, { map })
-      realm.plugin(EnvSubprocessRuntime, { map })
+      realm.plugin(EnvSubprocessRuntime, { map, agent, execEnv })
       if (env.family === 'windows') {
         realm.plugin(deps.PwshLocal, { pwshPath: /pwsh/i.test(env.info?.shell ?? '') ? 'pwsh.exe' : 'powershell.exe' })
         realm.plugin(deps.ToolPwsh, {})

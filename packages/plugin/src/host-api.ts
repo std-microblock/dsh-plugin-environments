@@ -168,7 +168,7 @@ export interface PluginContext {
   tools: ToolRuntime
   systemPrompt: SystemPrompt
   logger(name: string): Logger
-  effect(fn: () => () => unknown, label?: string): unknown
+  effect(fn: () => () => unknown, label?: string): Dispose
   on(event: 'agent/created', listener: (event: AgentCreatedEvent) => unknown): Dispose
   on(event: 'tools/result', listener: (exec: ToolResultExecution, result: ToolResultOutcome) => unknown): Dispose
   on(
@@ -180,6 +180,8 @@ export interface PluginContext {
     listener: (event: PreStepEvent, next: () => Promise<PreStepDecision>) => Promise<PreStepDecision>,
   ): Dispose
   get<K extends keyof OptionalServices>(name: K): OptionalServices[K] | undefined
+  /** Publish a service this plugin owns; other plugins read it with `ctx.get(name)`. */
+  provide(name: string, value: unknown): Dispose
   inject(deps: ['connection'], fn: (scope: PluginContext & { connection: HostConnection }) => unknown): unknown
   isolate(name: string): PluginContext
   plugin(plugin: PluginLike, config?: unknown): unknown
