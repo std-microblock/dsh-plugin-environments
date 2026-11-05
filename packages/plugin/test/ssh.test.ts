@@ -7,6 +7,7 @@ import path from 'node:path'
 import test from 'node:test'
 import ssh2 from 'ssh2'
 import { openSsh } from '../src/env/ssh/open.ts'
+import type { SshConfig } from '../src/env/ssh/connection.ts'
 import { remoteCommand } from '../src/env/ssh/provision.ts'
 import { ServerEnvironment } from '../src/env/server/server-env.ts'
 import { openServer, serverBinary } from '../src/env/server/connect.ts'
@@ -253,7 +254,14 @@ test('ssh: bundled server is uploaded once and reached through port forwarding',
     sshd.close()
     await removeHome(home)
   })
-  const config = { host: '127.0.0.1', port: portOf(sshd), username: 'tester', password: 'secret', cwd: home }
+  const config: SshConfig = {
+    host: '127.0.0.1',
+    sshConfig: 'off',
+    port: portOf(sshd),
+    username: 'tester',
+    password: 'secret',
+    cwd: home,
+  }
   const env = await openSsh({ id: 'fake', name: 'fake', config })
   assert.ok(env instanceof ServerEnvironment && env.viaServer)
   assert.equal(env.transportMode, 'ssh-forward')
@@ -306,7 +314,14 @@ test('ssh: a dropped network connection takes the server down', needsServer, asy
   })
   const env = await openSsh({
     id: 'drop',
-    config: { host: '127.0.0.1', port: proxy.port, username: 'tester', password: 'secret', cwd: home },
+    config: {
+      host: '127.0.0.1',
+      sshConfig: 'off',
+      port: proxy.port,
+      username: 'tester',
+      password: 'secret',
+      cwd: home,
+    },
   })
   assert.ok(env instanceof ServerEnvironment)
   const sleeper = await env.spawn(sleepSpec)
@@ -328,7 +343,14 @@ test('ssh: falls back to stdio over exec when forwarding is refused', needsServe
   })
   const env = await openSsh({
     id: 'noforward',
-    config: { host: '127.0.0.1', port: portOf(sshd), username: 'tester', password: 'secret', cwd: home },
+    config: {
+      host: '127.0.0.1',
+      sshConfig: 'off',
+      port: portOf(sshd),
+      username: 'tester',
+      password: 'secret',
+      cwd: home,
+    },
   })
   try {
     assert.ok(env instanceof ServerEnvironment)
@@ -351,6 +373,7 @@ test('ssh: explicit serverPath and transport stdio', needsServer, async t => {
     id: 'fixed',
     config: {
       host: '127.0.0.1',
+      sshConfig: 'off',
       port: portOf(sshd),
       username: 'tester',
       password: 'secret',
@@ -378,7 +401,14 @@ test('ssh authentication failure is reported', async () => {
       openSsh({
         id: 'x',
         name: 'x',
-        config: { host: '127.0.0.1', port: portOf(sshd), username: 'tester', password: 'wrong', install: 'off' },
+        config: {
+          host: '127.0.0.1',
+          sshConfig: 'off',
+          port: portOf(sshd),
+          username: 'tester',
+          password: 'wrong',
+          install: 'off',
+        },
       }),
       { code: 'AUTH' },
     )

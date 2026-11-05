@@ -51,6 +51,15 @@ dsh plugin --profile desktop add link:G:/dsh-plugin-remote-environments/packages
 | Android `adb`          | 调用 adb CLI。`adb devices` 发现的设备会自动列出，可以一键加入列表                                                                                                                                                                                                                                                                                      | 文件（push/pull/exec-out）、shell（含 PTY）、TCP forward/reverse、截图、输入，以及 `install_apk`、`app`、`ui_dump`、`logcat` |
 | Windows 账户 `winuser` | 创建一个本地标准账户（需要管理员确认），密码用 DPAPI 加密保存。连接时用 `CreateProcessWithLogonW` 以该账户身份在当前交互桌面上启动 `dsh-env-server`                                                                                                                                                                                                     | 全部能力。该账户启动的图形界面程序会显示在当前桌面，智能体可以截图并操作                                                     |
 
+### SSH 配置
+
+`host` 按运行 dsh 的这台机器上的 `~/.ssh/config` 解析，和终端里 `ssh <host>` 一致：连接前运行 `ssh -G <host>`，取其中的 `HostName`、`Port`、`User`、`IdentityFile`、`ProxyJump` 和 `ProxyCommand`。
+
+- 环境里显式填写的端口、用户名、密码或私钥优先于配置。
+- `ProxyJump` 和 `ProxyCommand` 作为子进程运行，它的 stdio 就是 SSH 连接的传输层。
+- `ssh -G` 失败时（例如没有 OpenSSH 客户端，或配置有语法错误），按字面地址连接。
+- 设置 `sshConfig: "off"` 可以完全不读配置。
+
 ## 网络连接
 
 `server` 和 `reverse` 两种环境的连接可能经过公网，所以总是先建立一层安全通道：双方用每个环境独立的高熵共享密钥互相认证，再派生出两个方向各自的 AES-256-GCM 密钥加密全部流量。密钥本身从不在网络上传输，也不需要证书。细节见 [docs/protocol.md](docs/protocol.md#secure-channel)。
