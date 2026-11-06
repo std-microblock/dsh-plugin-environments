@@ -36,7 +36,8 @@ test('ssh -G output is parsed', () => {
     host: '10.0.0.5',
     port: 2222,
     user: 'alice',
-    identityFiles: [path.join(os.homedir(), '.ssh', 'id_rsa'), path.join(os.homedir(), '.ssh', 'id_ed25519')],
+    // Only `~` is replaced; the separators stay as ssh printed them.
+    identityFiles: [`${os.homedir()}/.ssh/id_rsa`, `${os.homedir()}/.ssh/id_ed25519`],
     proxyJump: 'jump',
   })
   assert.equal(parseSshG('hostname h\nproxycommand ssh -W %h:%p jump\n')?.proxyCommand, 'ssh -W %h:%p jump')
