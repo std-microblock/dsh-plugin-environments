@@ -55,6 +55,8 @@ test('the environment overrides the resolved config', t => {
   assert.equal(filled.username, 'alice')
   assert.equal(String(filled.privateKey), 'key')
 
+  assert.equal(sshConnectConfig({ host: 'buildbox', port: 0 }, resolved).port, 2222)
+
   const explicit = sshConnectConfig({ host: 'buildbox', port: 22, username: 'bob', password: 'secret' }, resolved)
   assert.equal(explicit.port, 22)
   assert.equal(explicit.username, 'bob')

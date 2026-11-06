@@ -133,7 +133,7 @@ function CommandBlock({ label, text, t }: { label?: string | undefined; text: st
 
 const DEFAULTS: Record<AddableKind, EnvConfigView> = {
   server: { port: 7461 },
-  ssh: { port: 22 },
+  ssh: {},
   adb: {},
   winuser: {},
   reverse: {},
@@ -459,6 +459,7 @@ export function EnvDialog({ open, environment, environments, platform, defaultMo
                     value={config.port}
                     onChange={v => set('port', v.replace(/\D/g, ''))}
                     inputMode="numeric"
+                    placeholder="22"
                     mono
                   />
                 </Field>

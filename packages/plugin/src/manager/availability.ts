@@ -4,6 +4,7 @@
 import net from 'node:net'
 import { errorMessage } from '@dsh-environments/protocol'
 import { listAdbDevices, type AdbDevice } from '../env/adb/devices.ts'
+import { resolveSshTarget } from '../env/ssh/ssh-config.ts'
 import type { EnvironmentDefinition } from './definitions.ts'
 import type { EnvironmentManager } from './manager.ts'
 
@@ -148,8 +149,17 @@ export class AvailabilityChecker {
         return { state: 'available', checkedAt: at() }
       case 'server':
       case 'ssh': {
-        const host = c.host ?? ''
-        const port = Number(c.port ?? (def.kind === 'ssh' ? 22 : NaN))
+        let host = c.host ?? ''
+        let port = Number(c.port || (def.kind === 'ssh' ? 22 : NaN))
+        if (def.kind === 'ssh' && host && c.sshConfig !== 'off') {
+          const target = await resolveSshTarget(host)
+          // Behind a proxy the address is not reachable from here; only a connection can tell.
+          if (target?.proxyJump || target?.proxyCommand) return { state: 'unknown', reason: 'proxied', checkedAt: at() }
+          if (target) {
+            host = target.host
+            port = c.port || target.port
+          }
+        }
         if (!host || !Number.isFinite(port)) return { state: 'error', reason: 'host or port missing', checkedAt: at() }
         try {
           await this.tcp(host, port, this.probeTimeoutMs)

@@ -29,6 +29,8 @@ export interface EnvironmentConfig {
   /** ssh: `auto` (port forwarding, else stdio over exec) or `stdio` */
   transport?: 'auto' | 'stdio'
   readyTimeoutMs?: number
+  /** ssh: `auto` resolves `host` through `~/.ssh/config`, `off` uses it literally */
+  sshConfig?: 'auto' | 'off'
   /** local, ssh, winuser, reverse (passed to the generated connect command) */
   cwd?: string
   /** adb */

@@ -45,7 +45,8 @@ const DEFAULT_KEY_FILES = ['id_ed25519', 'id_ecdsa', 'id_rsa'].map(name => path.
 export function sshConnectConfig(cfg: SshConfig, target?: SshTarget): SshConnectOptions {
   const out: SshConnectOptions = {
     host: target?.host ?? cfg.host,
-    port: cfg.port ?? target?.port ?? 22,
+    // 0 is what an emptied port field stores: unset, not a port.
+    port: cfg.port || target?.port || 22,
     username: cfg.username ?? target?.user ?? os.userInfo().username,
     readyTimeout: cfg.readyTimeoutMs ?? 20000,
     keepaliveInterval: 15000,
