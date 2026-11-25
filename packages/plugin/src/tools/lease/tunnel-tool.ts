@@ -1,7 +1,7 @@
-// Network tunnels of a borrowed environment.
+// Network tunnels of borrowed environments.
 import type { TunnelInfo } from '../../env/types.ts'
 import { TEXT_OUTPUT } from '../common.ts'
-import type { LeaseToolContext } from './context.ts'
+import { ENV_PARAM, type EnvToolContext } from './context.ts'
 
 function describeTunnel(t: TunnelInfo): string {
   const route =
@@ -11,11 +11,14 @@ function describeTunnel(t: TunnelInfo): string {
   return `${t.id}: ${route} (${t.proto})`
 }
 
-export function addTunnelTool({ env, label: name, add }: LeaseToolContext): void {
+export function addTunnelTool({ add, use }: EnvToolContext): void {
+  const target = use({ name: 'tunnel', gui: false })
   add({
     name: 'tunnel',
-    description: `Manage network tunnels for ${name}. direction "to_env" makes a port of the environment reachable at 127.0.0.1:<local_port> on the harness host (like ssh -L); "from_env" makes a host port reachable inside the environment at <env_host>:<env_port> (like ssh -R; e.g. let a phone reach a dev server). UDP needs a dsh-env-server based environment.`,
+    description:
+      'Manage network tunnels of a borrowed environment. direction "to_env" makes a port of the environment reachable at 127.0.0.1:<local_port> on the harness host (like ssh -L); "from_env" makes a host port reachable inside the environment at <env_host>:<env_port> (like ssh -R; e.g. let a phone reach a dev server). UDP needs a dsh-env-server based environment. Tunnels close when the environment is returned or its connection is lost.',
     parameters: {
+      ...ENV_PARAM,
       action: { type: 'string', enum: ['open', 'close', 'list'], required: true, description: 'What to do.' },
       direction: { type: 'string', enum: ['to_env', 'from_env'], description: 'Tunnel direction (for open).' },
       env_port: { type: 'integer', description: 'Port inside the environment (0 = pick one, for from_env).' },
@@ -25,7 +28,8 @@ export function addTunnelTool({ env, label: name, add }: LeaseToolContext): void
       id: { type: 'string', description: 'Tunnel id (for close).' },
     },
     output: TEXT_OUTPUT,
-    async execute(args) {
+    async execute(args, exec) {
+      const { env } = await target(exec, args.environment)
       if (args.action === 'list') return env.listTunnels().map(describeTunnel).join('\n') || 'No tunnels'
       if (args.action === 'close') {
         const t = env.tunnels.get(args.id ?? '')

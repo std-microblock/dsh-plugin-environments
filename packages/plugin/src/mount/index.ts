@@ -50,7 +50,8 @@ function shellArgv(env: Environment, argv: readonly string[]): string[] {
 
 /** An active mount of one agent. */
 export interface MountRecord {
-  env: Environment
+  /** The mount's current connection (the lease's; replaced after a reconnect). */
+  readonly env: Environment
   map: MountMap
   /** The mount's lease; for a subagent, its parent's (shared, not released by this mount). */
   lease: Lease
@@ -85,6 +86,8 @@ export interface Mounting {
   uninstall(agent: Agent): Promise<void>
   /** Why the agent must not run: it should be mounted but is not (see `gate.ts`). */
   blockReason(agent: Agent): string | undefined
+  /** Wait (briefly) for a mount whose connection is being re-established. */
+  settle(agent: Agent, signal?: AbortSignal): Promise<void>
   /** The mount the agent should have (subagents: their parent's). */
   wantedOf(agent: Agent): WantedMount | undefined
   liveMounts(): { agent: Agent; record: MountRecord }[]
@@ -101,7 +104,17 @@ function satisfies(have: MountRecord, want: WantedMount, parentRecord: MountReco
   )
 }
 
-export function installMounting(ctx: PluginContext, manager: EnvironmentManager, deps: HarnessDeps): Mounting {
+export interface MountingOptions {
+  /** How long a turn or tool call waits for a lost mount connection to come back (default 20 s). */
+  reconnectWaitMs?: number | undefined
+}
+
+export function installMounting(
+  ctx: PluginContext,
+  manager: EnvironmentManager,
+  deps: HarnessDeps,
+  { reconnectWaitMs = 20_000 }: MountingOptions = {},
+): Mounting {
   const EnvFileSystem = createEnvFileSystem(deps)
   const BaseRuntime = createEnvSubprocessRuntime(deps)
   class EnvSubprocessRuntime extends BaseRuntime {
@@ -178,14 +191,16 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
       }
     }
     const map = new MountMap({
-      env,
+      env: () => lease.env,
       hostRoot: parentRecord?.map.hostRoot ?? mount.hostRoot ?? agent.session.header.cwd,
       remoteRoot,
     })
     const scope = deps.createScope(ctx, agent)
     const realm = scope.ctx.isolate('fs').isolate('subprocess').isolate('shell').isolate('sandbox')
     const record: MountRecord = {
-      env,
+      get env() {
+        return lease.env
+      },
       map,
       lease,
       scope,
@@ -228,7 +243,7 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
         const filePath = exec.arguments?.['file_path']
         const p = typeof filePath === 'string' ? filePath : ''
         if (!INSTRUCTION_FILES.includes(p.replace(/\\/g, '/').split('/').pop() ?? '')) return
-        loadInstructions(env, remoteRoot).then(
+        loadInstructions(lease.env, remoteRoot).then(
           text => {
             if (text === instructions.text || mounts.get(agent) !== record) return
             instructions.text = text
@@ -249,10 +264,10 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
           ...(record.parent ? ['This mount is shared with the parent session that delegated to you.'] : []),
           ...(env.hasCap('screenshot') || env.kind === 'adb'
             ? [
-                `The mount is headless unless this session holds the environment's GUI: screen tools (${lease.alias}__screenshot, ${lease.alias}__input, ...) exist only then. Take the GUI with env_borrow { environment: "${mount.envId}", gui: true } and give it back with env_return; the mount itself stays.`,
+                `The mount is headless unless this session holds the environment's GUI: the screen tools (env_screenshot, env_input, ...) act on it only then. Take the GUI with env_borrow { environment: "${mount.envId}", gui: true } and give it back with env_return; the mount itself stays.`,
               ]
             : []),
-          'Use env_list / env_borrow to access additional devices.',
+          'Use env_list / env_borrow to access additional devices. A lost connection is re-established automatically; the mount stays.',
         ].join('\n'),
       })
       const visible = new Set(ctx.tools.schemas(agent).map(t => t.name))
@@ -344,11 +359,22 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
     const want = wantedOf(agent)
     if (!want) return undefined
     const have = mounts.get(agent)
-    if (have && satisfies(have, want, want.parent ? mounts.get(want.parent) : undefined)) return undefined
+    if (have && satisfies(have, want, want.parent ? mounts.get(want.parent) : undefined)) {
+      if (have.lease.connection === 'reconnecting') {
+        return `环境 ${have.lease.def.name} 连接已断开，正在自动重连（${have.lease.connectionError ?? 'connection lost'}）`
+      }
+      return undefined
+    }
     const name = manager.get(want.envId)?.name ?? want.envId
     const error = manager.sessionSettings(sessionId).mountError
     if (error !== undefined) return `环境 ${name} 挂载失败：${error}`
     return pending.has(agent) ? `环境 ${name} 正在挂载，请稍后再试` : `环境 ${name} 挂载失败：未挂载`
+  }
+
+  async function settle(agent: Agent, signal?: AbortSignal): Promise<void> {
+    const lease = mounts.get(agent)?.lease
+    if (lease?.connection === 'reconnecting')
+      await lease.ready({ timeoutMs: reconnectWaitMs, signal }).catch(() => undefined)
   }
 
   ctx.on('agent/created', async ({ agent }) => {
@@ -359,13 +385,14 @@ export function installMounting(ctx: PluginContext, manager: EnvironmentManager,
       log('mount failed for %s: %s', sessionIdOf(agent), errorMessage(e))
     }
   })
-  installMountGate(ctx, { ensure, blockReason })
+  installMountGate(ctx, { ensure, blockReason, settle })
 
   return {
     mountOf: agent => mounts.get(agent),
     ensure,
     uninstall,
     blockReason,
+    settle,
     wantedOf,
     events,
     liveMounts: () =>

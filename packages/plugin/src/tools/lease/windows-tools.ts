@@ -1,16 +1,18 @@
-// Window management of a Windows environment: list, focus, minimize, maximize, restore, close, move.
+// Window management of Windows environments: list, focus, minimize, maximize, restore, close, move.
 import { EnvError } from '@dsh-environments/protocol'
 import { TEXT_OUTPUT } from '../common.ts'
-import { rectToPhysical, type ScreenSession } from '../screen/session.ts'
+import { rectToPhysical } from '../screen/session.ts'
 import { formatWindow, resolveWindow } from '../screen/windows.ts'
-import type { LeaseToolContext } from './context.ts'
+import { GUI_ENV_PARAM, type EnvToolContext } from './context.ts'
 
-export function addWindowTools({ env, alias: a, label: name, add }: LeaseToolContext, session: ScreenSession): void {
-  if (!env.hasCap('windows')) return
+export function addWindowTools({ add, use }: EnvToolContext): void {
+  const target = use({ name: 'windows', gui: true, supports: env => env.hasCap('windows') })
   add({
     name: 'windows',
-    description: `List the top-level windows of ${name} (z-order, topmost first, with handle, title, process and position in the latest screenshot's pixels) or focus / minimize / maximize / restore / close / move one. Select the window by title substring, process name (e.g. "notepad") or hwnd. close asks the window to close (like clicking X; it may show a save prompt). Use ${a}__screenshot window=... to capture a single window.`,
+    description:
+      'Windows desktops only. List the top-level windows of an environment (z-order, topmost first, with handle, title, process and position in the latest screenshot\'s pixels) or focus / minimize / maximize / restore / close / move one. Select the window by title substring, process name (e.g. "notepad") or hwnd. close asks the window to close (like clicking X; it may show a save prompt). Use env_screenshot window=... to capture a single window.',
     parameters: {
+      ...GUI_ENV_PARAM,
       action: {
         type: 'string',
         enum: ['list', 'focus', 'minimize', 'maximize', 'restore', 'close', 'move'],
@@ -25,6 +27,7 @@ export function addWindowTools({ env, alias: a, label: name, add }: LeaseToolCon
     },
     output: TEXT_OUTPUT,
     async execute(args, exec) {
+      const { env, screen: session } = await target(exec, args.environment)
       const signal = exec.signal
       const action = args.action ?? 'list'
       if (action === 'list') {

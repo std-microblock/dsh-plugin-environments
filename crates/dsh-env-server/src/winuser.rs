@@ -719,8 +719,9 @@ mod imp {
         }
         // A session of this account that is still logged on would swallow the connection: Remote
         // Desktop reconnects to it instead of creating a session, so this logon shell never runs and
-        // nothing ever listens on our port. The caller ends it (that needs administrator rights) and
-        // tries again.
+        // nothing ever listens on our port. The caller joins a running session through its record
+        // first; this is what it gets when no server of ours answers there, and it then ends the
+        // session (that needs administrator rights) and tries again.
         let busy = crate::session_status::sessions_of(name);
         if !busy.is_empty() {
             return Ok(json!({

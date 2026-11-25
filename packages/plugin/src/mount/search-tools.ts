@@ -5,7 +5,6 @@ import { TEXT_OUTPUT } from '../tools/common.ts'
 import type { MountMap } from './map.ts'
 
 export function registerSearchTools(sctx: PluginContext, defineTool: DefineToolFn, map: MountMap): void {
-  const env = map.env
   sctx.tools.register(
     defineTool({
       name: 'glob',
@@ -19,7 +18,7 @@ export function registerSearchTools(sctx: PluginContext, defineTool: DefineToolF
       isConcurrencySafe: () => true,
       async execute(args, exec) {
         const base = map.resolve(args.path ?? '.', agentOf(exec)?.session.header.cwd)
-        const r = await env.glob(args.pattern, { cwd: base, limit: 200, signal: exec.signal })
+        const r = await map.env.glob(args.pattern, { cwd: base, limit: 200, signal: exec.signal })
         if (r.paths.length === 0) return 'No files found'
         return `${r.paths.join('\n')}${r.truncated ? '\n(Results are truncated. Use a more specific path or pattern.)' : ''}`
       },
@@ -45,7 +44,7 @@ export function registerSearchTools(sctx: PluginContext, defineTool: DefineToolF
       async execute(args, exec) {
         const sessionCwd = agentOf(exec)?.session.header.cwd
         const cwd = map.resolve('.', sessionCwd)
-        const r = await env.grep(args.pattern, {
+        const r = await map.env.grep(args.pattern, {
           cwd,
           path: args.path ? map.resolve(args.path, sessionCwd) : undefined,
           glob: args.include,

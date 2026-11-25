@@ -368,6 +368,11 @@ mod imp {
     }
 
     /// End every session of the account, so the next logon gets a fresh one.
+    ///
+    /// This is the recovery path, not the normal one: borrowers share the session that is running by
+    /// connecting to the server inside it (`winuser session` refuses with `session-busy` when there
+    /// is no such server to join), so reaching this means the session is a leftover — from a
+    /// connection that died, or from a login someone did by hand.
     pub fn logoff(account: &str) -> Result<Value, String> {
         let ids = sessions_of(account);
         let mut ended = Vec::new();

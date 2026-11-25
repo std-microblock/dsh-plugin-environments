@@ -10,6 +10,14 @@ import { openServer, serverBinary } from '../server/connect.ts'
 import type { ServerEnvironment } from '../server/server-env.ts'
 import { listWindowsAccounts, runServerElevated, secretPath, type WinuserResult } from './accounts.ts'
 import { probeSession } from './session-mode.ts'
+import {
+  accountSessions,
+  attachSharedSession,
+  dropSessionRecord,
+  readSessionRecord,
+  writeSessionRecord,
+  type SessionRecord,
+} from './session-share.ts'
 
 /** Stored configuration of a Windows-account environment. */
 export interface WinuserConfig {
@@ -26,6 +34,12 @@ export type DesktopMode = 'shared' | 'private' | 'session'
  * Command the session's shell runs: the environment server, started inside the account's own
  * session. It is written to the account's `Winlogon\Shell` for the logon, so nothing has to be
  * registered in the account's profile.
+ *
+ * The server is the shared thing: Windows gives the account one session at a time, so every
+ * borrower of this environment connects to *this* server instead of logging in again. `--exit-idle`
+ * (rather than `--once`) is what makes that work: the server serves any number of clients and exits
+ * when the last of them leaves, which together with `--end-session` ends the session — a session
+ * left behind would swallow the next logon.
  */
 export function sessionShellCommand(binary: string, port: number, token: string, cwd?: string): string {
   const quote = (s: string) => (/\s/.test(s) ? `"${s}"` : s)
@@ -36,10 +50,13 @@ export function sessionShellCommand(binary: string, port: number, token: string,
     `127.0.0.1:${port}`,
     '--token',
     token,
-    '--once',
+    '--exit-idle',
     // Windows gives a console application started as the session's shell a console window: without
     // this it would sit on the account's desktop, in the way of everything the agent does.
     '--no-console',
+    // Winlogon starts the shell on a desktop of its own, and every session desktop is called
+    // `Default`, so a capture would otherwise read that empty one instead of the session's windows.
+    '--input-desktop',
     // Windows does not reliably end the session when its shell exits (it can sit at the logon
     // screen instead). A session left behind is worse than useless: the next logon reconnects to it
     // and the shell never runs again.
@@ -242,47 +259,67 @@ async function ensureAllowed(account: string, sid: string): Promise<void> {
 }
 
 /**
- * Start dsh-env-server as the account and connect to it.
+ * Run one open of an account after the previous one finished.
  *
- * `dsh-env-server winuser launch --supervise` (running as the harness user) starts the server with
- * CreateProcessWithLogonW and holds it in a kill-on-close job; it stays alive as our child until
- * the environment closes or the harness exits (its stdin closes), so nothing started as the
- * account outlives the connection.
+ * Borrowers arriving together are what this protects: the first writes the session record just
+ * before it logs in, and the second then finds it and joins that session. Without it, both would
+ * log in at once — and Windows gives the account one session, so the second logon would only push
+ * the first one's session out.
+ */
+const pendingOpens = new Map<string, Promise<unknown>>()
+function serializeByAccount<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const previous = pendingOpens.get(key) ?? Promise.resolve()
+  const run = previous.then(fn, fn)
+  const tracked = run.then(
+    () => undefined,
+    () => undefined,
+  )
+  pendingOpens.set(key, tracked)
+  void tracked.then(() => {
+    if (pendingOpens.get(key) === tracked) pendingOpens.delete(key)
+  })
+  return run
+}
+
+/**
+ * Open (or join) the account's own Windows session.
  *
- * With `desktop: 'private'` the launcher also creates `WinSta0\dsh-<account>`, grants the account
- * access to it and holds it open: a desktop object dies with its last handle, and every process
- * the account starts inherits it, so its windows never mix with the human's.
+ * With `desktop: 'session'` the account gets a session of its own: a headless RDP client logs it in
+ * over loopback, the account's own logon shell starts the server inside that session, and the client
+ * stays connected to keep it rendering. This is the only mode where the account has a real pointer
+ * and real input, and it needs the TermWrap install first (`session.status` reports whether it is
+ * available).
  *
- * With `desktop: 'session'` the account gets a session of its own instead: a headless RDP client
- * logs it in over loopback, the account's own logon shell starts the server inside that session,
- * and the client stays connected to keep it rendering. This is the only mode where the account has
- * a real pointer and real input, and it needs the TermWrap install first (`session.status` reports
- * whether it is available).
+ * Windows gives the account **one** session at a time, so this is shared rather than exclusive: a
+ * session that is already up is joined through its record (`session-share.ts`) and nothing is logged
+ * in — let alone logged off. Only when no session server answers does this log the account in, and
+ * the logon path is what recovers a session left behind by a connection that died.
  */
 async function openAccountSession(
   base: { id: string; name?: string | undefined; signal?: AbortSignal | undefined },
-  account: string,
-  secret: string,
-  bin: string,
-  port: number,
-  token: string,
-  cwd?: string,
+  {
+    dataDir,
+    account,
+    secret,
+    bin,
+    cwd,
+  }: { dataDir: string; account: string; secret: string; bin: string; cwd?: string },
 ): Promise<ServerEnvironment> {
-  const status = await probeSession(base.signal)
-  if (!status.ready) {
-    throw new EnvError('UNSUPPORTED', `this machine cannot host a separate session yet: ${status.reasons.join('; ')}`)
-  }
-  const shell = sessionShellCommand(bin, port, token, cwd)
-  // The logon right needs administrator approval, so ask at most once per SID per run (a UAC prompt
-  // on every connect would be obnoxious). A missing account is left to the logon itself, which
-  // reports "create the account again" instead of a pointless approval dialog.
-  const sid = await accountSidOf(account)
-  if (sid !== null) await ensureAllowed(account, sid)
-  // The logon itself is a headless RDP client (see crates/dsh-env-server/src/rdp.rs): it points the
-  // account's own logon shell at `shell`, so our server starts inside the new session, and then
-  // holds the connection open. A disconnected session stops rendering, which would make every
-  // screenshot black, so killing this process is what ends the session.
-  const startClient = () => {
+  const signal = base.signal
+  // Note: no `onClose` — the RDP client that holds the session must outlive this connection, because
+  // other borrowers may be attached to the same session server.
+  const sessionOfRecord = (record: { port: number; token: string }): Promise<ServerEnvironment> =>
+    openServer({
+      id: base.id,
+      name: base.name,
+      kind: 'winuser',
+      host: '127.0.0.1',
+      port: record.port,
+      token: record.token,
+      signal,
+      timeoutMs: 3000,
+    })
+  const startClient = (shell: string) => {
     const state = {
       child: spawn(
         serverBinary(),
@@ -322,8 +359,97 @@ async function openAccountSession(
     })
     return state
   }
+  // A logon client that dies leaves the session behind as a disconnected one, and a disconnected
+  // session stops drawing, which turns every screenshot black. RDP rejoins the same session, so a
+  // fresh client brings the windows and the rendering back. Bounded, because a session whose client
+  // keeps dying must not be restarted forever.
+  let restarts = 0
+  let supervising = false
+  const superviseLogonClient = (forRecord: SessionRecord) => {
+    if (supervising) return
+    supervising = true
+    const tick = async () => {
+      if (base.signal?.aborted || restarts >= 5) return
+      const current = readSessionRecord(dataDir, account)
+      if (!current || current.port !== forRecord.port || current.token !== forRecord.token) return
+      if (!fs.existsSync(secret)) return
+      let sessions: { id: number; state: string }[]
+      try {
+        const probe = await probeSession(signal)
+        const want = account.toLowerCase()
+        sessions = (probe?.sessions ?? [])
+          .filter(s => String(s.name ?? '').toLowerCase() !== 'rdp-tcp')
+          .filter(s => String(s.user ?? '').toLowerCase() === want)
+      } catch {
+        return
+      }
+      // No session left means the server ended it cleanly; anything other than `active` means the
+      // session is still there but has stopped drawing, which is the state that turns screenshots
+      // black even when the client process is technically still alive.
+      if (sessions.length === 0) return
+      const drawing = sessions.every(s => String(s.state ?? '').toLowerCase() === 'active')
+      if (drawing && current.pid && alive(current.pid)) return
+      restarts++
+      forRecord.pid = startClient(sessionShellCommand(bin, forRecord.port, forRecord.token, cwd)).child.pid
+      try {
+        writeSessionRecord(dataDir, forRecord)
+      } catch {
+        // the record only decides whether a borrower waits or logs in itself
+      }
+    }
+    const timer = setInterval(() => void tick(), 5000)
+    if (typeof timer.unref === 'function') timer.unref()
+  }
+  const shared = await attachSharedSession({
+    dataDir,
+    account,
+    signal,
+    connect: async record => {
+      const env = await sessionOfRecord(record)
+      env.account = account
+      env.desktopName = `session:${account}`
+      return env
+    },
+    hasSession: async () => accountSessions(await probeSession(signal), account).length > 0,
+  })
+  if (shared) {
+    // Joining a session whose logon client is already gone would share a session that never repaints.
+    const attached = readSessionRecord(dataDir, account)
+    if (attached) superviseLogonClient(attached)
+    return shared
+  }
 
-  let session = startClient()
+  const status = await probeSession(signal)
+  if (!status.ready) {
+    throw new EnvError('UNSUPPORTED', `this machine cannot host a separate session yet: ${status.reasons.join('; ')}`)
+  }
+  const port = await freePort()
+  const token = crypto.randomBytes(24).toString('hex')
+  const shell = sessionShellCommand(bin, port, token, cwd)
+  const record: SessionRecord = { account, port, token, startedAt: Date.now(), verifiedAt: Date.now() }
+  // The record goes down before the logon: a borrower arriving while this one is still logging in
+  // finds it, waits for the server instead of logging in itself, and so never ends this session.
+  writeSessionRecord(dataDir, record)
+  // The logon right needs administrator approval, so ask at most once per SID per run (a UAC prompt
+  // on every connect would be obnoxious). A missing account is left to the logon itself, which
+  // reports "create the account again" instead of a pointless approval dialog.
+  const sid = await accountSidOf(account)
+  if (sid !== null) await ensureAllowed(account, sid)
+  // The logon itself is a headless RDP client (see crates/dsh-env-server/src/rdp.rs): it points the
+  // account's own logon shell at `shell`, so our server starts inside the new session, and then
+  // holds the connection open. A disconnected session stops rendering, which would make every
+  // screenshot black. The client is left alone once the session is up: it is what keeps the session
+  // alive for the other borrowers, and the server ends the session (and the client with it) when the
+  // last connection is gone.
+  let session = startClient(shell)
+  if (session.child.pid) {
+    record.pid = session.child.pid
+    try {
+      writeSessionRecord(dataDir, record)
+    } catch {
+      // the record only decides whether a borrower waits or logs in itself
+    }
+  }
   let lastError: unknown
   // Up to three attempts: one for a stale session of the account that has to be ended, and one
   // after re-granting the logon right (the account may have been re-created under this name since
@@ -344,12 +470,12 @@ async function openAccountSession(
           token,
           signal: base.signal,
           timeoutMs: 3000,
-          onClose: () => {
-            session.child.kill()
-          },
+          // No `onClose`: the client keeps the session alive for anyone else who joins it, and the
+          // server ends the session by itself once its last connection is gone.
         })
         env.account = account
         env.desktopName = `session:${account}`
+        superviseLogonClient(record)
         return env
       } catch (e) {
         lastError = e
@@ -362,10 +488,13 @@ async function openAccountSession(
     if (session.busy && !endedStale) {
       endedStale = true
       session.child.kill()
-      // Ending another account's session needs administrator rights; this is rare (only after a
-      // connection that died without ending its session), so the prompt is acceptable here.
+      // Reaching this means the account is logged on in a session that has no server of ours to join
+      // (every running session is tried first, see `attachSharedSession`): a session left behind by a
+      // connection that died, or a login someone did by hand. Either way it swallows this logon — RDP
+      // reconnects to it and the shell we need never runs — so it has to go. That needs administrator
+      // rights, so the prompt is acceptable here.
       await runServerElevated(['session', 'logoff', '--account', account])
-      session = startClient()
+      session = startClient(shell)
       continue
     }
     // "access denied" during CredSSP means the account was not let through. The usual cause is a
@@ -377,13 +506,16 @@ async function openAccountSession(
         allowedAccounts.delete(account)
         session.child.kill()
         await ensureAllowed(account, fresh)
-        session = startClient()
+        session = startClient(shell)
         continue
       }
     }
     break
   }
   session.child.kill()
+  // No session came up: the record would only make the next borrower wait for something that is not
+  // coming, so it goes (unless another logon already replaced it with its own).
+  dropSessionRecord(dataDir, account, record)
   const detail = session.log.trim().split('\n').filter(Boolean).at(-1)
   // "access denied" from CredSSP says nothing about the cause: it is shown both for a missing logon
   // right and for a password that no longer matches, so name the two things that actually help.
@@ -397,6 +529,29 @@ async function openAccountSession(
     }${hint}`,
   )
 }
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Open an environment that runs as a dsh-managed local account.
+ *
+ * `desktop: 'shared'` (the default) and `'private'`: `dsh-env-server winuser launch --supervise`
+ * (running as the harness user) starts the server with CreateProcessWithLogonW and holds it in a
+ * kill-on-close job; it stays alive as our child until the environment closes or the harness exits
+ * (its stdin closes), so nothing started as the account outlives the connection. With `'private'`
+ * the launcher also creates `WinSta0\dsh-<account>`, grants the account access to it and holds it
+ * open: a desktop object dies with its last handle, and every process the account starts inherits
+ * it, so its windows never mix with the human's.
+ *
+ * `desktop: 'session'`: a session of the account's own (`openAccountSession`), shared by everyone
+ * who borrows it.
+ */
 export async function openWindowsAccount({
   id,
   name,
@@ -412,11 +567,15 @@ export async function openWindowsAccount({
     throw new EnvError('ENOENT', `no stored credentials for account ${account}; recreate it from the Environments page`)
   }
   const bin = sharedBinary()
+  if (desktop === 'session') {
+    // One open per account at a time: the second borrower must find the record the first has just
+    // written and join that session instead of logging in (and ending it) on its own.
+    return await serializeByAccount(`${dataDir}:${account.toLowerCase()}`, () =>
+      openAccountSession({ id, name, signal }, { dataDir, account, secret, bin, cwd }),
+    )
+  }
   const port = await freePort()
   const token = crypto.randomBytes(24).toString('hex')
-  if (desktop === 'session') {
-    return await openAccountSession({ id, name, signal }, account, secret, bin, port, token, cwd)
-  }
   const desktopName = desktop === 'private' ? privateDesktopName(account) : undefined
   const args = windowsAccountLaunchArgs({
     account,

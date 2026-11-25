@@ -120,6 +120,62 @@ pub struct CaptureSpec {
     pub rect: Option<Rect>,
     pub window: Option<u64>,
     pub cursor: bool,
+    /// Return a blank picture instead of an error. See [`uniform_rgb`].
+    pub allow_blank: bool,
+}
+
+/// Whether every pixel has the same colour. A desktop nobody is looking at keeps the last frame it
+/// was asked to draw, and a session that has stopped drawing captures as one flat colour — which,
+/// returned as a picture, looks like a successful black screenshot and hides the real problem.
+fn uniform_rgb(rgb: &[u8]) -> bool {
+    let Some(first) = rgb.get(..3) else {
+        return true;
+    };
+    rgb.chunks_exact(3).all(|px| px == first)
+}
+
+/// Capture the desktop this process is on and write it as a PNG, returning its size.
+///
+/// The server reaches this through a child process: a child started the way `exec` is runs on the
+/// desktop the session's windows are on, while the server's own threads do not.
+pub fn capture_to_png(path: &std::path::Path, allow_blank: bool) -> Result<(u32, u32), String> {
+    #[cfg(windows)]
+    {
+        let desk = crate::desktop::capture_desktop()?;
+        let spec = CaptureSpec {
+            allow_blank,
+            ..CaptureSpec::default()
+        };
+        let captured =
+            win::capture(&spec, &desk).map_err(|e| format!("{}: {}", e.code, e.message))?;
+        let (width, height) = (captured.rect.w as u32, captured.rect.h as u32);
+        let png = crate::util::png_rgb(width, height, &captured.rgb);
+        std::fs::write(path, png).map_err(|e| e.to_string())?;
+        Ok((width, height))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, allow_blank);
+        Err("captures are only supported on Windows".into())
+    }
+}
+
+#[cfg(test)]
+mod uniform_tests {
+    use super::uniform_rgb;
+
+    #[test]
+    fn a_flat_capture_is_detected() {
+        assert!(uniform_rgb(&[]));
+        assert!(uniform_rgb(&[20, 20, 20]));
+        assert!(uniform_rgb(&[20, 20, 20, 20, 20, 20, 20, 20, 20]));
+    }
+
+    #[test]
+    fn a_picture_is_not_flat() {
+        assert!(!uniform_rgb(&[1, 2, 3, 4, 5, 6]));
+        assert!(!uniform_rgb(&[1, 2, 3, 1, 2, 3, 1, 2, 4]));
+    }
 }
 
 /// A captured RGB image and the physical rectangle it covers.
@@ -486,7 +542,9 @@ pub mod win {
                 draw_cursor(mem, (full.x, full.y));
             }
             let rgb = if ok {
-                read_rgb(mem, bmp, full.w, full.h)
+                // `PrintWindow` succeeds but returns nothing for content the compositor owns (OpenGL
+                // and Windows.UI.Composition surfaces); the visible pixels on screen do have it.
+                read_rgb(mem, bmp, full.w, full.h).filter(|rgb| !uniform_rgb(rgb))
             } else {
                 None
             };
@@ -510,6 +568,25 @@ pub mod win {
         Ok((frame, out))
     }
 
+    /// A blank picture is what a desktop with nothing on it looks like; report it instead of letting
+    /// the caller mistake it for a screenshot of something.
+    fn reject_blank(rgb: &[u8], spec: &CaptureSpec, input: bool) -> Result<(), OpError> {
+        if spec.allow_blank || !uniform_rgb(rgb) {
+            return Ok(());
+        }
+        Err(OpError::new(
+            "EIO",
+            format!(
+                "the capture is blank: nothing is drawing on {}, so it holds a single colour. A remote session that is not being displayed captures this way; pass allowBlank to accept it",
+                if input {
+                    "the input desktop"
+                } else {
+                    "the desktop of this process"
+                },
+            ),
+        ))
+    }
+
     pub fn capture(spec: &CaptureSpec, desk: &Desktop) -> Result<Captured, OpError> {
         let _guard = Attached::enter(desk).map_err(|e| OpError::new("EIO", e))?;
         let input = desk.is_input();
@@ -517,6 +594,7 @@ pub mod win {
         let cursor = (spec.cursor && input).then(cursor_pos).flatten();
         if let Some(h) = spec.window {
             let (rect, rgb) = capture_window(hwnd(h), spec.cursor)?;
+            reject_blank(&rgb, spec, input)?;
             return Ok(Captured { rect, rgb, cursor });
         }
         let virt = virtual_screen();
@@ -548,6 +626,7 @@ pub mod win {
         } else {
             capture_composite(rect, desk, spec.cursor)?
         };
+        reject_blank(&rgb, spec, input)?;
         Ok(Captured { rect, rgb, cursor })
     }
 

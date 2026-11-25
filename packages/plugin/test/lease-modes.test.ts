@@ -259,6 +259,8 @@ function host(m: EnvironmentManager) {
       systemPrompt: {
         getSectionOrder: () => 900,
         section: (section: { name: string; text: SectionText }) => recordSection(owner, section),
+        context: (context: { name: string; text: SectionText }) => recordSection(owner, context),
+        getContextOrder: () => 220,
         variable: noop,
       },
       logger: () => ({ info() {}, warn() {} }),
@@ -304,7 +306,7 @@ function host(m: EnvironmentManager) {
     ToolFs: {},
     SkillFilesystem: undefined,
   } as unknown as HarnessDeps
-  const mounting = installMounting(ctx, m, deps)
+  const mounting = installMounting(ctx, m, deps, { reconnectWaitMs: 50 })
   const borrowing = installBorrowing(ctx, m, deps, { mountOf: a => mounting.mountOf(a), mountEvents: mounting.events })
   const agent = (id: string, cwd: string, parent?: string): Agent => {
     const a: Agent = {
@@ -326,8 +328,10 @@ function host(m: EnvironmentManager) {
     assert.ok(t, tool)
     return t.execute(args, { agent: a, signal: new AbortController().signal })
   }
-  // Lease tools only (a mount also registers its search tools).
-  const tools = (a: Agent) => [...(visible.get(a) ?? [])].filter(n => n.includes('__')).sort()
+  /** Environment tools usable on what the agent holds (they are never registered per agent). */
+  const tools = (a: Agent) => [...new Set(borrowing.heldOf(a).flatMap(e => e.tools))].sort()
+  /** Tools registered in the agent's own scopes (a mount registers its search tools). */
+  const scoped = (a: Agent) => [...(visible.get(a) ?? [])].sort()
   /** The rendered text of one prompt section registered for an agent. */
   const promptSection = (a: Agent, name: string): string => {
     const text = sections.get(a)?.get(name)
@@ -342,10 +346,10 @@ function host(m: EnvironmentManager) {
       async () => ({ kind: 'enter', messages: [] }),
     )
   }
-  return { mounting, borrowing, agent, created, call, tools, promptSection, preStep }
+  return { mounting, borrowing, agent, created, call, tools, scoped, global, promptSection, preStep }
 }
 
-test('a session prompt section lists the environments it may borrow, with their descriptions', async () => {
+test('a session runtime context lists the environments it may borrow, with their descriptions', async () => {
   const { m, cleanup } = manager()
   m.upsert({
     id: 'tablet',
@@ -361,20 +365,20 @@ test('a session prompt section lists the environments it may borrow, with their 
   await h.created(a)
   await h.created(b)
 
-  const lines = h.promptSection(a, 'environments:borrowable').split('\n')
+  const lines = h.promptSection(a, 'environments:state').split('\n')
   assert.match(lines[0] ?? '', /^Environments this session may borrow \(/)
   assert.ok(lines.includes('- phone: Phone [server]'))
   assert.ok(lines.includes('- solo: Solo [server]'))
   assert.ok(lines.includes('- tablet: Tablet [adb, Android 15 tablet]'), 'the description is part of the list')
   assert.ok(!lines.some(l => l.includes('hidden')), 'an environment that is not borrowable stays out')
 
-  // The session's own allow-list narrows the list; an empty one contributes no section at all.
+  // The session's own allow-list narrows the list; an empty one contributes no context at all.
   m.setSessionSettings('b', { borrowable: ['tablet'] })
-  assert.deepEqual(h.promptSection(b, 'environments:borrowable').split('\n').slice(1), [
+  assert.deepEqual(h.promptSection(b, 'environments:state').split('\n').slice(1), [
     '- tablet: Tablet [adb, Android 15 tablet]',
   ])
   m.setSessionSettings('b', { borrowable: [] })
-  assert.equal(h.promptSection(b, 'environments:borrowable'), '')
+  assert.equal(h.promptSection(b, 'environments:state'), '')
   await cleanup()
 })
 
@@ -387,12 +391,12 @@ test('env_borrow: headless by default, gui:true upgrades, gui:false / env_return
   await h.created(b)
 
   assert.match(await h.call(a, 'env_borrow', { environment: 'phone' }), /Borrowed Phone as "phone" \(headless/)
-  assert.ok(h.tools(a).includes('phone__exec'))
-  assert.ok(!h.tools(a).includes('phone__screenshot'), 'no GUI tools on a headless lease')
+  assert.ok(h.tools(a).includes('env_exec'))
+  assert.ok(!h.tools(a).includes('env_screenshot'), 'no GUI tools on a headless lease')
 
   assert.match(await h.call(a, 'env_borrow', { environment: 'phone', gui: true }), /Took the GUI/)
-  assert.ok(h.tools(a).includes('phone__screenshot'))
-  assert.ok(h.tools(a).includes('phone__input'))
+  assert.ok(h.tools(a).includes('env_screenshot'))
+  assert.ok(h.tools(a).includes('env_input'))
   assert.deepEqual(m.sessionSettings('a').held, [{ envId: 'phone', alias: 'phone', gui: true }])
 
   // b borrows in parallel, but cannot take the GUI.
@@ -402,8 +406,8 @@ test('env_borrow: headless by default, gui:true upgrades, gui:false / env_return
 
   // a gives the GUI back: its screen tools go, b can take it.
   assert.match(await h.call(a, 'env_return', { environment: 'phone', gui_only: true }), /stays headless/)
-  assert.ok(!h.tools(a).includes('phone__screenshot'))
-  assert.ok(h.tools(a).includes('phone__exec'))
+  assert.ok(!h.tools(a).includes('env_screenshot'))
+  assert.ok(h.tools(a).includes('env_exec'))
   await h.call(b, 'env_borrow', { environment: 'phone', gui: true })
   assert.equal(m.status(def('phone')).gui?.sessionId, 'b')
   assert.match(await h.call(b, 'env_borrow', { environment: 'phone', gui: false }), /Gave back the GUI/)
@@ -429,8 +433,8 @@ test('mounts are headless by default; taking and returning the GUI keeps the mou
   assert.match(await h.call(a, 'env_borrow', { environment: 'phone' }), /mounted on Phone/)
   assert.match(await h.call(a, 'env_borrow', { environment: 'phone', gui: true }), /GUI of your mounted environment/)
   assert.equal(record.lease.mode, 'gui')
-  assert.ok(h.tools(a).includes('phone__screenshot'))
-  assert.ok(!h.tools(a).includes('phone__exec'), 'the mount covers files and the shell')
+  assert.ok(h.tools(a).includes('env_screenshot'))
+  assert.ok(!h.tools(a).includes('env_exec'), 'the mount covers files and the shell')
   assert.equal(m.sessionSettings('a').mountGui, true)
   assert.equal(m.leases.size, 1, 'no second lease')
 
@@ -453,7 +457,7 @@ test('mountMode gui takes the GUI when it is free and falls back to headless whe
   m.setSessionSettings('a', { mount: { envId: 'phone', remoteRoot: '/srv/app' } })
   await h.created(a)
   assert.equal(h.mounting.mountOf(a)?.lease.mode, 'gui')
-  assert.ok(h.tools(a).includes('phone__screenshot'))
+  assert.ok(h.tools(a).includes('env_screenshot'))
 
   const b = h.agent('b', os.tmpdir())
   m.setSessionSettings('b', { mount: { envId: 'phone', remoteRoot: '/srv/app' } })
@@ -474,7 +478,7 @@ test('session resume re-acquires borrowed leases in their mode, headless when th
   await h.created(b)
   assert.equal(h.borrowing.heldOf(a)[0]?.gui, true)
   assert.equal(h.borrowing.heldOf(b)[0]?.gui, false)
-  assert.ok(h.tools(b).includes('phone__exec'))
+  assert.ok(h.tools(b).includes('env_exec'))
   assert.deepEqual(m.sessionSettings('b').held, [{ envId: 'phone', alias: 'phone' }])
   await cleanup()
 })
@@ -507,14 +511,127 @@ test('subagents share the mount and lease of their parent, and are gated when it
   assert.equal(parentRecord.lease.released, false)
   assert.equal(parentRecord.lease.mode, 'headless')
 
-  // Re-mounted on its next step; then the parent's mount is lost and the child is blocked.
+  // Re-mounted on its next step. The connection of the parent's mount drops: the mount stays
+  // (no remount, same lease), the child is held back while it reconnects, and runs again after.
   assert.deepEqual(await h.preStep(child), { kind: 'enter', messages: [] })
+  const open = m.open
   m.open = () => Promise.reject(new Error('host unreachable'))
-  parentRecord.env.emit('close', undefined)
+  const lostEnv = parentRecord.env
+  lostEnv.markClosed(new Error('network down'))
+  await tick()
+  assert.equal(h.mounting.mountOf(parent), parentRecord, 'the mount survives the lost connection')
+  assert.equal(parentRecord.lease.released, false)
+  assert.equal(parentRecord.lease.connection, 'reconnecting')
+  assert.match(h.mounting.blockReason(child) ?? '', /环境 Solo 连接已断开，正在自动重连/)
+  await assert.rejects(h.preStep(child), (e: unknown) => e instanceof MountBlockedError)
+  m.open = open
+  assert.deepEqual(await h.preStep(child), { kind: 'enter', messages: [] })
+  assert.equal(parentRecord.lease.connection, 'connected')
+  assert.notEqual(parentRecord.env, lostEnv, 'the mount uses the new connection')
+  assert.equal(parentRecord.map.env, parentRecord.env)
+  assert.equal(h.mounting.mountOf(child)?.lease, parentRecord.lease)
+  assert.equal(m.leases.size, 1)
+
+  // Released for real (by the user): the mount is lost and the child is blocked.
+  m.open = () => Promise.reject(new Error('host unreachable'))
+  await parentRecord.lease.release('released by the user')
   await tick()
   assert.equal(h.mounting.mountOf(child), undefined)
   assert.match(h.mounting.blockReason(child) ?? '', /环境 Solo 挂载失败/)
-  await assert.rejects(h.preStep(child), (e: unknown) => e instanceof MountBlockedError)
+  await cleanup()
+})
+
+test('a borrowed environment survives a lost connection: calls wait for the reconnect, nothing to re-borrow', async () => {
+  const { m, opened, cleanup } = manager()
+  const h = host(m)
+  const a = h.agent('a', os.tmpdir())
+  await h.created(a)
+  const before = [...h.global.keys()].sort()
+  assert.ok(before.includes('env_exec') && before.includes('env_screenshot'), 'the tools exist before any borrow')
+  await h.call(a, 'env_borrow', { environment: 'phone', gui: true })
+  assert.deepEqual([...h.global.keys()].sort(), before, 'borrowing does not change the tool list')
+  assert.deepEqual(h.scoped(a), [], 'nor does it register tools per agent')
+  const [entry] = h.borrowing.heldOf(a)
+  assert.ok(entry)
+  const lease = entry.lease
+  const lostEnv = lease.env
+
+  const open = m.open
+  m.open = () => Promise.reject(new Error('device offline'))
+  lostEnv.markClosed(new Error('socket reset'))
+  await tick()
+  assert.equal(lease.connection, 'reconnecting')
+  assert.equal(lease.released, false)
+  assert.equal(h.borrowing.heldOf(a)[0], entry, 'still held, still with its GUI')
+  assert.equal(entry.gui, true)
+  assert.equal(m.status(m.require('phone')).gui?.sessionId, 'a')
+  assert.match(await h.call(a, 'env_borrow', { environment: 'phone' }), /already hold Phone.*being re-established/s)
+
+  // A call waits for the connection; the device comes back meanwhile.
+  setTimeout(() => (m.open = open), 100)
+  assert.equal(await h.call(a, 'env_tunnel', { action: 'list' }), 'No tunnels')
+  assert.equal(lease.connection, 'connected')
+  assert.notEqual(lease.env, lostEnv)
+  assert.equal(m.leases.size, 1)
+  assert.equal(opened.filter(id => id === 'phone').length, 2)
+  assert.deepEqual([...h.global.keys()].sort(), before)
+  assert.deepEqual(m.sessionSettings('a').held, [{ envId: 'phone', alias: 'phone', gui: true }])
+  await cleanup()
+})
+
+test('the environment tools pick the held environment, or ask for one', async () => {
+  const { m, cleanup } = manager()
+  const h = host(m)
+  const a = h.agent('a', os.tmpdir())
+  await h.created(a)
+  await assert.rejects(h.call(a, 'env_tunnel', { action: 'list' }), /holds no environment/)
+  await h.call(a, 'env_borrow', { environment: 'phone' })
+  assert.equal(await h.call(a, 'env_tunnel', { action: 'list' }), 'No tunnels', 'the only one is the default')
+  await assert.rejects(h.call(a, 'env_screenshot', {}), /no GUI/)
+  await assert.rejects(h.call(a, 'env_screenshot', { environment: 'phone' }), /borrowed headless/)
+  await h.call(a, 'env_borrow', { environment: 'solo' })
+  await assert.rejects(h.call(a, 'env_tunnel', { action: 'list' }), /several held environments.*phone, solo/)
+  assert.equal(await h.call(a, 'env_tunnel', { action: 'list', environment: 'solo' }), 'No tunnels')
+  await assert.rejects(h.call(a, 'env_tunnel', { action: 'list', environment: 'tablet' }), /not held by this session/)
+  await assert.rejects(h.call(a, 'env_logcat', { environment: 'phone' }), /not available on Phone/)
+  await cleanup()
+})
+
+test('the runtime context changes only when the held state does, not on a short outage', async () => {
+  const { m, cleanup } = manager()
+  const h = host(m)
+  const a = h.agent('a', os.tmpdir())
+  await h.created(a)
+  const context = () => h.promptSection(a, 'environments:state')
+  const idle = context()
+  assert.ok(!idle.includes('holds now'))
+
+  await h.call(a, 'env_borrow', { environment: 'phone' })
+  const holding = context()
+  assert.match(holding, /holds now.*\n- phone: Phone \(headless\)$/s)
+
+  // Dropped and back before the notice delay: the text never changed, so no reminder is due.
+  const [entry] = h.borrowing.heldOf(a)
+  assert.ok(entry)
+  const open = m.open
+  m.open = () => Promise.reject(new Error('offline'))
+  entry.lease.env.markClosed(new Error('reset'))
+  await tick()
+  assert.equal(context(), holding)
+  // Down for longer: one change, however many times it is evaluated.
+  entry.lease.disconnectedAt = Date.now() - 60_000
+  const lost = context()
+  assert.match(lost, /phone: Phone \(headless\) — connection lost, reconnecting automatically/)
+  assert.equal(context(), lost)
+  m.open = open
+  await entry.lease.ready({ timeoutMs: 5000 })
+  assert.equal(context(), holding, 'back to the text the session already has')
+
+  // Upgrade and return change it; returning everything restores the idle text.
+  await h.call(a, 'env_borrow', { environment: 'phone', gui: true })
+  assert.match(context(), /phone: Phone \(GUI\)/)
+  await h.call(a, 'env_return', { environment: 'all' })
+  assert.equal(context(), idle)
   await cleanup()
 })
 

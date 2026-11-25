@@ -98,6 +98,7 @@ fn main() {
             lifeline,
             no_console,
             end_session,
+            input_desktop,
         } => {
             // Separate-session mode starts this process as the account's logon shell, and Windows
             // gives a console application a console: on Windows 11 that is a visible Windows
@@ -111,6 +112,16 @@ fn main() {
             }
             #[cfg(not(windows))]
             let _ = no_console;
+            // Capture and input work use the desktop this process is on: that is the one the session's
+            // windows are on (a child started here sees them too), while the desktop `OpenInputDesktop`
+            // reports is a different one that holds no windows at all. `--input-desktop` still asks for
+            // that one explicitly.
+            #[cfg(windows)]
+            if input_desktop {
+                desktop::prefer_input_desktop(true);
+            }
+            #[cfg(not(windows))]
+            let _ = (input_desktop, end_session);
             // Read the secret before `run` starts the lifeline watcher: both read stdin, and if the
             // watcher wins the race it swallows the secret line, leaving this read blocked forever.
             let secret = match transport::read_secret(secret.token, secret.file, secret.stdin) {
@@ -155,6 +166,19 @@ fn main() {
             let _ = end_session;
             code
         }
+        Cmd::Capture { out, allow_blank } => match screen::capture_to_png(&out, allow_blank) {
+            Ok((width, height)) => {
+                println!(
+                    "{{\"ok\":true,\"width\":{width},\"height\":{height},\"file\":\"{}\"}}",
+                    out.display()
+                );
+                0
+            }
+            Err(e) => {
+                eprintln!("dsh-env-server: {e}");
+                1
+            }
+        },
         Cmd::Connect {
             url,
             id,

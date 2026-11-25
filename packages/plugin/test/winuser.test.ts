@@ -15,6 +15,12 @@ test('the session shell command quotes paths and carries the serve arguments', (
   const plain = sessionShellCommand('C:\\bin\\dsh-env-server.exe', 7000, 'tok')
   assert.deepEqual(plain.split(' ').slice(0, 4), ['C:\\bin\\dsh-env-server.exe', 'serve', '--listen', '127.0.0.1:7000'])
   assert.ok(plain.endsWith('--cwd ~'), plain)
+  // The session server is shared by every borrower of that account, and it is what ends the session
+  // once the last of them is gone.
+  assert.ok(plain.includes('--exit-idle'), plain)
+  assert.equal(plain.includes('--once'), false, `--once would drop every borrower but the first: ${plain}`)
+  assert.ok(plain.includes('--end-session'), plain)
+  assert.ok(plain.includes('--no-console'), plain)
   const spaced = sessionShellCommand('C:\\Program Files\\dsh\\srv.exe', 1, 't', 'C:\\work dir')
   assert.ok(spaced.startsWith('"C:\\Program Files\\dsh\\srv.exe" serve'), spaced)
   assert.ok(spaced.endsWith('"C:\\work dir"'), spaced)

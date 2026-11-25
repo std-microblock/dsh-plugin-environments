@@ -162,6 +162,7 @@ fn capture_spec(a: &Args<'_>) -> Result<crate::screen::CaptureSpec, OpError> {
         rect,
         window: a.opt_u64("window"),
         cursor: a.bool("cursor", false),
+        allow_blank: a.bool("allowBlank", false),
     })
 }
 
@@ -171,10 +172,13 @@ pub async fn screenshot(a: Args<'_>) -> OpResult {
     #[cfg(windows)]
     {
         let spec = capture_spec(&a)?;
-        let desk = crate::desktop::Desktop::current().map_err(|e| OpError::new("EIO", e))?;
         let max_w = a.opt_u64("maxWidth").unwrap_or(0).min(16384) as u32;
         let max_h = a.opt_u64("maxHeight").unwrap_or(0).min(16384) as u32;
         tokio::task::spawn_blocking(move || {
+            // A desktop belongs to the thread, and this closure runs on a pool thread rather than the
+            // one that accepted the request: resolving it outside picked another thread's desktop,
+            // which is why captures showed an empty screen while the session's windows were elsewhere.
+            let desk = crate::desktop::capture_desktop().map_err(|e| OpError::new("EIO", e))?;
             let c = crate::screen::win::capture(&spec, &desk)?;
             let (sw, sh) = (c.rect.w as u32, c.rect.h as u32);
             let (w, h) = crate::screen::fit(sw, sh, max_w, max_h);
@@ -217,7 +221,7 @@ pub async fn input(a: Args<'_>) -> OpResult {
             .collect::<Result<Vec<_>, _>>()?;
     #[cfg(windows)]
     {
-        let desk = crate::desktop::Desktop::current().map_err(|e| OpError::new("EIO", e))?;
+        let desk = crate::desktop::capture_desktop().map_err(|e| OpError::new("EIO", e))?;
         tokio::task::spawn_blocking(move || crate::input::win::run(&actions, &desk))
             .await
             .map_err(blocking_err)??;
@@ -254,7 +258,7 @@ pub async fn windows(a: Args<'_>) -> OpResult {
     #[cfg(windows)]
     {
         let all = a.bool("all", false);
-        let desk = crate::desktop::Desktop::current().map_err(|e| OpError::new("EIO", e))?;
+        let desk = crate::desktop::capture_desktop().map_err(|e| OpError::new("EIO", e))?;
         let v = tokio::task::spawn_blocking(move || crate::screen::win::windows(all, &desk))
             .await
             .map_err(blocking_err)??;
@@ -289,7 +293,7 @@ pub async fn window(a: Args<'_>) -> OpResult {
             }),
             _ => None,
         };
-        let desk = crate::desktop::Desktop::current().map_err(|e| OpError::new("EIO", e))?;
+        let desk = crate::desktop::capture_desktop().map_err(|e| OpError::new("EIO", e))?;
         let v = tokio::task::spawn_blocking(move || {
             crate::screen::win::window_action(h, &action, rect, &desk)
         })

@@ -621,6 +621,8 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
       owner,
       purpose,
       alias: alias ?? aliasFor(def.id),
+      // A lost connection is re-opened with the definition as it is then (it may have been edited).
+      reopen: signal => this.open(this.get(def.id) ?? def, { signal }),
     })
     if (mode === 'gui') lease.guiUsers.add(guiUserOf(owner, lease))
     this.leases.set(lease.id, lease)
@@ -739,6 +741,10 @@ export class EnvironmentManager extends EventEmitter<ManagerEvents> implements L
   onLeaseModeChanged(lease: Lease): void {
     this.emit('change')
     if (lease.mode === 'headless') this.wakeNext(lease.envId)
+  }
+
+  onLeaseConnectionChanged(_lease: Lease): void {
+    this.emit('change')
   }
 
   async releaseAll(predicate: (lease: Lease) => boolean = () => true): Promise<void> {

@@ -10,6 +10,9 @@
 //   the turn with that error, so the model is never called and the GUI shows the reason.
 // - `tools/pre-execute`: tool calls of a blocked session are denied. This closes the window in
 //   which a mount is lost in the middle of a step whose tool calls were already proposed.
+//
+// A mount whose connection dropped stays installed while its lease reconnects; both hooks first
+// wait a little for the connection (`settle`), so a short outage does not end the turn.
 import type { Agent, PluginContext } from '../host-api.ts'
 
 /** Error ending a turn of a session whose mount is missing ("环境 X 挂载失败：…"). */
@@ -22,6 +25,8 @@ export interface MountGateTarget {
   ensure(agent: Agent): Promise<unknown>
   /** Why the agent must not run now, or undefined when it may. */
   blockReason(agent: Agent): string | undefined
+  /** Wait (briefly) for a mount connection that is being re-established. */
+  settle?(agent: Agent, signal?: AbortSignal): Promise<void>
 }
 
 /** Settle with `promise`, or reject with the abort reason as soon as `signal` aborts (cancelled turn). */
@@ -38,6 +43,9 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined): 
 export function installMountGate(ctx: PluginContext, target: MountGateTarget): void {
   ctx.on('agent/pre-step', async (event, next) => {
     if (target.blockReason(event.agent) !== undefined) {
+      if (target.settle) await untilAborted(target.settle(event.agent, event.signal), event.signal)
+    }
+    if (target.blockReason(event.agent) !== undefined) {
       await untilAborted(
         target.ensure(event.agent).catch(() => undefined),
         event.signal,
@@ -48,7 +56,12 @@ export function installMountGate(ctx: PluginContext, target: MountGateTarget): v
     return next()
   })
   ctx.on('tools/pre-execute', async (exec, next) => {
-    const reason = exec.agent ? target.blockReason(exec.agent) : undefined
+    const agent = exec.agent
+    let reason = agent ? target.blockReason(agent) : undefined
+    if (agent && reason !== undefined && target.settle) {
+      await target.settle(agent).catch(() => undefined)
+      reason = target.blockReason(agent)
+    }
     if (reason !== undefined) return { kind: 'deny', reason }
     return next()
   })

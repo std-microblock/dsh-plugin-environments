@@ -91,19 +91,22 @@ export function createEnvSubprocessRuntime({ SubprocessRuntime, SubprocessExecut
   return class EnvSubprocessRuntime extends SubprocessRuntime {
     static inject = []
     readonly map: MountMap
-    readonly env: Environment
     readonly live = new Set<EnvProcess>()
 
     constructor(ctx: Context, config: EnvSubprocessConfig) {
       super(ctx)
       this.map = config.map
-      this.env = config.map.env
       asPluginContext(ctx).effect(
         () => () => {
           for (const p of this.live) p.kill().catch(() => {})
         },
         'environments: mounted processes',
       )
+    }
+
+    /** The mount's current connection. */
+    get env(): Environment {
+      return this.map.env
     }
 
     async resolveExecutable(

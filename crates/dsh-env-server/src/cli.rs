@@ -65,6 +65,20 @@ pub enum Cmd {
         /// must not leave a logged-on session behind for the next logon to reconnect to)
         #[arg(long = "end-session")]
         end_session: bool,
+        /// Read the session's input desktop for screen and input work (session shell: winlogon
+        /// starts the shell on a desktop of its own, whose captures show nothing)
+        #[arg(long = "input-desktop")]
+        input_desktop: bool,
+    },
+    /// Capture the desktop this process is on into a PNG (the server runs this as a child, because a
+    /// child sees the desktop the session's windows are on while the server's own threads do not)
+    Capture {
+        /// Where to write the PNG
+        #[arg(long, value_name = "PATH")]
+        out: PathBuf,
+        /// Write a blank picture instead of failing when nothing is drawing on that desktop
+        #[arg(long = "allow-blank")]
+        allow_blank: bool,
     },
     /// Dial the plugin (reverse connection), reconnecting with backoff
     #[command(group(ArgGroup::new("secret-required").args(["token", "file", "stdin"]).required(true)))]
@@ -234,6 +248,7 @@ mod tests {
                 lifeline: false,
                 no_console: false,
                 end_session: false,
+                input_desktop: false,
             }
         );
         assert_eq!(
@@ -259,6 +274,7 @@ mod tests {
                 lifeline: false,
                 no_console: false,
                 end_session: false,
+                input_desktop: false,
             }
         );
         assert!(p(&["serve", "--bogus"]).is_err());

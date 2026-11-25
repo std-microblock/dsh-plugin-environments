@@ -92,12 +92,15 @@ export function createEnvFileSystem({ FileSystem, FsError }: FileSystemDeps) {
   return class EnvFileSystem extends FileSystem {
     static inject = []
     readonly map: MountMap
-    readonly env: Environment
 
     constructor(ctx: Context, config: EnvFileSystemConfig) {
       super(ctx)
       this.map = config.map
-      this.env = config.map.env
+    }
+
+    /** The mount's current connection. */
+    get env(): Environment {
+      return this.map.env
     }
 
     target(p: string): FsTarget {

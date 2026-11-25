@@ -1,17 +1,28 @@
-// Borrowing: env_list / env_borrow / env_return / env_transfer plus per-lease tool sets.
+// Borrowing: env_list / env_borrow / env_return / env_transfer and the environment tools.
 //
 // Every lease is headless or GUI (see `manager.ts` for the admission rules). A session holds an
 // environment through one entry per environment:
 //
-// - a borrowed entry owns its lease: the headless tools always, the GUI tools while it holds the
-//   GUI (`env_borrow` with `gui: true`, again on a held environment to upgrade; `env_return` with
-//   `gui_only: true`, or `env_borrow` with `gui: false`, to downgrade);
+// - a borrowed entry owns its lease: the headless tools always act on it, the GUI tools while it
+//   holds the GUI (`env_borrow` with `gui: true`, again on a held environment to upgrade;
+//   `env_return` with `gui_only: true`, or `env_borrow` with `gui: false`, to downgrade);
 // - a mount entry is attached to the session's mount lease and exists only while the session
-//   holds that lease's GUI. Its tools are the GUI set (the mount covers files and the shell);
+//   holds that lease's GUI. Only the GUI tools act on it (the mount covers files and the shell);
 //   returning it gives up the GUI and keeps the mount.
+//
+// The tools are one fixed set registered for every session (`env_exec`, `env_screenshot`, ...);
+// a call names its entry with the `environment` argument. Borrowing therefore never changes the
+// session's tool list or system prompt, which the provider caches. What a session holds, and
+// which environments it may borrow, is a runtime context instead: the harness re-evaluates it
+// before each model step and adds a reminder message only when it differs from what the session
+// was last told, so any number of changes while the session is idle (or a connection that drops
+// and comes back) cost at most one message, and none when the state ends where it started.
+//
+// A lease whose connection is lost stays held and reconnects by itself (see `Lease`); calls wait
+// for the connection for a while instead of failing, and the session never has to borrow again.
 import { errorMessage } from '@dsh-environments/protocol'
 import type { EventEmitter } from 'node:events'
-import type { HarnessDeps, HarnessScope } from '../deps.ts'
+import type { HarnessDeps } from '../deps.ts'
 import type { Environment } from '../env/environment.ts'
 import { HostEnvironment } from '../env/host-env.ts'
 import { agentOf, promptSectionOrder, sessionIdOf, type Agent, type PluginContext } from '../host-api.ts'
@@ -20,7 +31,14 @@ import type { Lease } from '../manager/lease.ts'
 import type { EnvironmentManager } from '../manager/manager.ts'
 import type { MountingEvents, MountRecord } from '../mount/index.ts'
 import { TEXT_OUTPUT, copyBetween, formatSize } from '../tools/common.ts'
-import { leaseTools, type WorkspaceLocation } from '../tools/lease/index.ts'
+import {
+  envTools,
+  type LeaseTarget,
+  type ManagedProcess,
+  type ToolRequirement,
+  type WorkspaceLocation,
+} from '../tools/lease/index.ts'
+import { ScreenSession } from '../tools/screen/session.ts'
 
 /** One environment held by an agent. */
 export interface HeldEntry {
@@ -28,9 +46,9 @@ export interface HeldEntry {
   alias: string
   /** Attached to the session's mount lease (GUI tools only; returning it keeps the mount). */
   attached: boolean
-  /** This entry holds the lease's GUI (its GUI tools are registered). */
+  /** This entry holds the lease's GUI (the screen tools act on it). */
   readonly gui: boolean
-  /** Names of the tools currently registered for the entry. */
+  /** Names of the environment tools usable on the entry now. */
   readonly tools: string[]
   release(reason: string): Promise<void>
 }
@@ -45,6 +63,8 @@ export interface BorrowingHooks {
 export interface Borrowing {
   heldOf(agent: Agent): HeldEntry[]
   releaseLease(leaseId: string): Promise<boolean>
+  /** The runtime context of an agent: what it may borrow and what it holds (`''` for none). */
+  contextOf(agent: Agent): string
 }
 
 interface SessionRef {
@@ -79,9 +99,19 @@ interface WaitArgs {
 /** Mutable state behind a HeldEntry. */
 interface Entry extends HeldEntry {
   gui: boolean
-  tools: string[]
   setGui(on: boolean, opts: WaitArgs): Promise<void>
+  /** Processes started with env_process_start through this entry. */
+  processes: Map<string, ManagedProcess>
+  nextProcessId(): string
+  /** Screen state per connection (a reconnect starts a fresh one). */
+  screens: WeakMap<Environment, ScreenSession>
 }
+
+/**
+ * A lost connection is reported in the runtime context only after this long, so a short outage
+ * that heals by itself never produces a reminder.
+ */
+export const DISCONNECT_NOTICE_MS = 15_000
 
 /** Install borrowing for every agent. */
 export function installBorrowing(
@@ -130,26 +160,39 @@ export function installBorrowing(
     })
   }
 
+  const matches = (d: EnvironmentDefinition, name: string) =>
+    d.id === name || d.name === name || aliasFor(d.id) === name
+
+  /** The held entry an alias (or environment id / name) refers to. */
+  const findEntry = (m: Map<string, Entry>, name: string): Entry | undefined =>
+    m.get(name) ??
+    [...m.values()].find(e => e.lease.envId === name) ??
+    [...m.values()].find(e => matches(e.lease.def, name))
+
   /** The session's own workspace as an Environment (mounted env or host files). */
   const workspaceOf = async (
-    exec: { agent?: unknown },
+    exec: { agent?: unknown; signal?: AbortSignal | undefined },
     sourceAlias?: string,
     filePath?: string,
   ): Promise<WorkspaceLocation> => {
     const { agent, cwd } = sessionOf(exec)
     if (sourceAlias && sourceAlias !== 'workspace') {
-      const entry = heldOf(agent).get(sourceAlias)
+      const entry = findEntry(heldOf(agent), sourceAlias)
       if (!entry) throw new Error(`no borrowed environment with alias "${sourceAlias}"`)
-      return { env: entry.lease.env, cwd: entry.lease.env.info?.cwd }
+      const env = await entry.lease.ready({ signal: exec.signal })
+      return { env, cwd: env.info?.cwd }
     }
     const mount = hooks.mountOf(agent)
-    if (mount) return { env: mount.env, cwd: mount.map.remoteRoot }
+    if (mount) return { env: await mount.lease.ready({ signal: exec.signal }), cwd: mount.map.remoteRoot }
     const host = new HostEnvironment(cwd)
     return { env: host, cwd, hostPath: filePath ? host.resolvePath(filePath, cwd) : undefined }
   }
 
   /** Parse "alias:path" (alias of a borrowed env, or "workspace"). Plain paths mean the workspace. */
-  const location = async (exec: { agent?: unknown }, spec: string): Promise<Location> => {
+  const location = async (
+    exec: { agent?: unknown; signal?: AbortSignal | undefined },
+    spec: string,
+  ): Promise<Location> => {
     const { agent } = sessionOf(exec)
     const m = /^([A-Za-z][A-Za-z0-9_]*):(.*)$/.exec(spec)
     const alias = m?.[1]
@@ -165,7 +208,7 @@ export function installBorrowing(
           `"${alias}" is not a borrowed environment of this session (borrowed: ${[...heldOf(agent).keys()].join(', ') || 'none'})`,
         )
       }
-      const env = entry.lease.env
+      const env = await entry.lease.ready({ signal: exec.signal })
       return { env, cwd: env.info?.cwd, path: env.resolvePath(rest, env.info?.cwd), label: alias }
     }
     const w = await workspaceOf(exec)
@@ -178,49 +221,117 @@ export function installBorrowing(
     return alias
   }
 
-  /**
-   * Create an entry for a lease: register its headless tools unless attached, and its GUI tools
-   * whenever it holds the GUI. `release` drops the entry (and the lease, unless attached).
-   */
+  const targetOf = (entry: Entry, env: Environment): LeaseTarget => {
+    let screen = entry.screens.get(env)
+    if (!screen) {
+      screen = new ScreenSession(env)
+      entry.screens.set(env, screen)
+    }
+    const cwd = env.info?.cwd
+    return {
+      lease: entry.lease,
+      env,
+      alias: entry.alias,
+      label: `${entry.lease.def.name} (${entry.alias})`,
+      cwd,
+      abs: p => env.resolvePath(p ?? '.', cwd),
+      screen,
+      processes: entry.processes,
+      nextProcessId: () => entry.nextProcessId(),
+    }
+  }
+
+  const toolName = (r: ToolRequirement) => `env_${r.name}`
+
+  /** Resolve the `environment` argument of an environment tool call. */
+  const resolve = async (
+    exec: { agent?: unknown; signal?: AbortSignal | undefined },
+    environment: string | undefined,
+    req: ToolRequirement,
+  ): Promise<LeaseTarget> => {
+    const { agent } = sessionOf(exec)
+    const m = heldOf(agent)
+    const entries = [...m.values()]
+    const offers = (e: Entry) => req.supports?.(e.lease.env) ?? true
+    const usable = (e: Entry) => (req.gui ? e.gui : !e.attached) && offers(e)
+    const heldText = () =>
+      entries.map(e => `${e.alias} (${e.attached ? 'GUI of your mount' : e.gui ? 'GUI' : 'headless'})`).join(', ') ||
+      'none'
+    let entry: Entry | undefined
+    if (environment) {
+      entry = findEntry(m, environment)
+      const mount = hooks.mountOf(agent)
+      const isMount = !!mount && (mount.envId === environment || matches(mount.lease.def, environment))
+      if (!entry || (entry.attached && !req.gui)) {
+        if (isMount && mount) {
+          throw new Error(
+            req.gui
+              ? `${mount.lease.def.name} is this session's mount; take its GUI with env_borrow { environment: "${mount.envId}", gui: true } first`
+              : `${mount.lease.def.name} is this session's mount: your own file and shell tools already act there`,
+          )
+        }
+        throw new Error(
+          `"${environment}" is not held by this session (held: ${heldText()}); borrow it with env_borrow first`,
+        )
+      }
+      if (req.gui && !entry.gui) {
+        throw new Error(
+          `${entry.alias} is borrowed headless; env_borrow { environment: "${entry.lease.envId}", gui: true } takes its GUI`,
+        )
+      }
+      if (!offers(entry))
+        throw new Error(`${toolName(req)} is not available on ${entry.lease.def.name} (${entry.lease.def.kind})`)
+    } else {
+      const candidates = entries.filter(usable)
+      if (candidates.length > 1) {
+        throw new Error(
+          `several held environments offer ${toolName(req)} (${candidates.map(e => e.alias).join(', ')}); pass environment`,
+        )
+      }
+      entry = candidates[0]
+      if (!entry) {
+        throw new Error(
+          entries.length === 0
+            ? 'this session holds no environment; borrow one with env_borrow first'
+            : req.gui
+              ? `this session holds no GUI that offers ${toolName(req)} (held: ${heldText()}); env_borrow with gui: true takes one`
+              : `none of the held environments offers ${toolName(req)} (held: ${heldText()})`,
+        )
+      }
+    }
+    const env = await entry.lease.ready({ signal: exec.signal })
+    if (m.get(entry.alias) !== entry) throw new Error(`${entry.alias} was returned meanwhile`)
+    return targetOf(entry, env)
+  }
+
+  const built = envTools({ ctx, defineTool, resolve, workspaceOf })
+
+  /** Create an entry for a lease. `release` drops it (and the lease, unless attached). */
   const makeEntry = (agent: Agent, lease: Lease, alias: string, attached: boolean): Entry => {
     const m = heldOf(agent)
     const sessionId = sessionIdOf(agent)
-    const built = leaseTools({ ctx, defineTool, lease, alias, workspaceOf })
-    let headlessScope: HarnessScope | undefined
-    let guiScope: HarnessScope | undefined
-    const register = (list: typeof built.headless): HarnessScope => {
-      const scope = createScope(ctx, agent)
-      try {
-        for (const t of list) scope.ctx.tools.register(t)
-      } catch (e) {
-        void scope.dispose()
-        throw e
-      }
-      return scope
-    }
-    const toolNames = () => [
-      ...(attached ? [] : built.headless.map(t => t.name)),
-      ...(entry.gui ? built.gui.map(t => t.name) : []),
-    ]
-    const dropGui = async () => {
-      const scope = guiScope
-      guiScope = undefined
-      entry.gui = false
-      entry.tools = toolNames()
-      await scope?.dispose().catch(() => {})
-      await manager.setGui(lease, sessionId, false)
-    }
+    let procSeq = 0
     let releasing: Promise<void> | undefined
+    const killProcesses = async () => {
+      for (const mp of entry.processes.values()) if (!mp.exit) await mp.proc.kill().catch(() => {})
+      entry.processes.clear()
+    }
     const entry: Entry = {
       lease,
       alias,
       attached,
       gui: false,
-      tools: [],
+      get tools() {
+        return built.namesFor(lease.env, { headless: !attached, gui: entry.gui })
+      },
+      processes: new Map(),
+      nextProcessId: () => `p${++procSeq}`,
+      screens: new WeakMap(),
       async setGui(on, { wait, timeoutMs, signal }) {
         if (on === entry.gui) return
         if (!on) {
-          await dropGui()
+          entry.gui = false
+          await manager.setGui(lease, sessionId, false)
           return
         }
         await manager.setGui(lease, sessionId, true, { wait, timeoutMs, signal })
@@ -228,21 +339,14 @@ export function installBorrowing(
           await manager.setGui(lease, sessionId, false)
           throw new Error(`${lease.def.name} was returned meanwhile`)
         }
-        try {
-          guiScope = register(built.gui)
-        } catch (e) {
-          await manager.setGui(lease, sessionId, false)
-          throw e
-        }
         entry.gui = true
-        entry.tools = toolNames()
       },
       release: why =>
         (releasing ??= (async () => {
           if (m.get(alias) === entry) m.delete(alias)
-          await built.dispose().catch(() => {})
-          await dropGui().catch(() => {})
-          await headlessScope?.dispose().catch(() => {})
+          await killProcesses().catch(() => {})
+          entry.gui = false
+          await manager.setGui(lease, sessionId, false).catch(() => {})
           if (!attached) await lease.release(why)
           persistHeld(sessionId, agent)
           // Only the model (or user) giving the GUI back changes the mount's mode; a lost mount or
@@ -250,17 +354,13 @@ export function installBorrowing(
           if (attached && why === 'returned') manager.setSessionSettings(sessionId, { mountGui: false })
         })()),
     }
-    if (!attached) {
-      headlessScope = register(built.headless)
-      entry.tools = toolNames()
-    }
     lease.once('release', why => {
       if (m.get(alias) === entry) void entry.release(why)
     })
     return entry
   }
 
-  /** Borrow for an agent and register the lease's tools in its own agent scope. */
+  /** Borrow for an agent. */
   const borrow = async (
     agent: Agent,
     envId: string,
@@ -346,47 +446,93 @@ export function installBorrowing(
 
   const allowedFor = (sessionId: string, cwd: string) => manager.borrowableFor(sessionId, cwd)
 
-  const matches = (d: EnvironmentDefinition, name: string) =>
-    d.id === name || d.name === name || aliasFor(d.id) === name
-
   const modeText = (e: HeldEntry) => (e.gui ? 'GUI' : 'headless')
 
+  /** Whether a lease has been disconnected long enough to tell the model. */
+  const lostLongEnough = (lease: Lease) =>
+    lease.connection === 'reconnecting' && Date.now() - (lease.disconnectedAt ?? Date.now()) >= DISCONNECT_NOTICE_MS
+
   /**
-   * The environments this session may borrow, as a prompt section: the list and its descriptions
-   * only. Live status (holders, GUI, queues) stays in `env_list`, so this text changes rarely and
-   * does not invalidate the prompt prefix on every lease. Empty text contributes no section.
+   * The session's environment context: the environments it may borrow (with their descriptions)
+   * and what it holds. Only state that matters to the model is included, and nothing that moves
+   * by itself (no timestamps, no other sessions' holds): the reminder is sent only when this text
+   * changes. Live status (holders, queues) stays in `env_list`.
    */
-  const borrowablePrompt = (agent: Agent): string => {
+  const contextOf = (agent: Agent): string => {
     try {
-      const { defs } = allowedFor(sessionIdOf(agent), agent.session.header.cwd)
-      if (defs.length === 0) return ''
-      return [
-        'Environments this session may borrow (env_list shows their live status; borrow one with env_borrow, give it back with env_return):',
-        ...defs.map(d => `- ${definitionLabel(d)}`),
-      ].join('\n')
+      const sessionId = sessionIdOf(agent)
+      const { defs } = allowedFor(sessionId, agent.session.header.cwd)
+      const entries = [...(held.get(agent)?.values() ?? [])].sort((a, b) => a.alias.localeCompare(b.alias))
+      const mount = hooks.mountOf(agent)
+      const lines: string[] = []
+      if (defs.length > 0) {
+        lines.push(
+          'Environments this session may borrow (env_list shows their live status; borrow one with env_borrow, give it back with env_return):',
+          ...defs.map(d => `- ${definitionLabel(d)}`),
+        )
+      }
+      if (entries.length > 0) {
+        if (lines.length > 0) lines.push('')
+        lines.push(
+          'Environments this session holds now; the env_* tools act on them, named by alias in their `environment` argument:',
+          ...entries.map(e => {
+            const what = e.attached ? 'GUI of your mounted environment' : modeText(e)
+            const lost = lostLongEnough(e.lease)
+              ? ' — connection lost, reconnecting automatically (it stays held; calls wait for the connection)'
+              : ''
+            return `- ${e.alias}: ${e.lease.def.name} (${what})${lost}`
+          }),
+        )
+      }
+      if (mount && lostLongEnough(mount.lease)) {
+        if (lines.length > 0) lines.push('')
+        lines.push(
+          `The mounted environment ${mount.lease.def.name} lost its connection and is reconnecting automatically; the mount stays, and file and shell tools resume once it is back.`,
+        )
+      }
+      return lines.join('\n')
     } catch (e) {
-      warn(`could not list the borrowable environments for the prompt: ${errorMessage(e)}`)
+      warn(`could not build the environments context: ${errorMessage(e)}`)
       return ''
     }
   }
 
-  // Registered per agent, in a scope of its own: the list follows the session's (or its
-  // workspace's) allow-list, and the provider is re-evaluated at every assembly.
+  // Registered per agent, in a scope of its own: the text follows the session's (or its
+  // workspace's) allow-list and holds, and the provider is re-evaluated before every step.
+  // Hosts without runtime contexts get a prompt section with the borrowable list only.
   ctx.on('agent/created', ({ agent }) => {
     const scope = createScope(ctx, agent)
     try {
-      scope.ctx.systemPrompt.section({
-        name: 'environments:borrowable',
-        order: promptSectionOrder(scope.ctx) + 1,
-        interpolate: false,
-        text: () => borrowablePrompt(agent),
-      })
+      const prompt = scope.ctx.systemPrompt
+      if (typeof prompt.context === 'function') {
+        let order = 300
+        try {
+          order = (prompt.getContextOrder?.('PLUGIN_CLIS') ?? 290) + 10
+        } catch {
+          // unknown order name: keep the default
+        }
+        prompt.context({ name: 'environments:state', order, interpolate: false, text: () => contextOf(agent) })
+      } else {
+        prompt.section({
+          name: 'environments:borrowable',
+          order: promptSectionOrder(scope.ctx) + 1,
+          interpolate: false,
+          text: () => {
+            const { defs } = allowedFor(sessionIdOf(agent), agent.session.header.cwd)
+            if (defs.length === 0) return ''
+            return [
+              'Environments this session may borrow (env_list shows their live status; borrow one with env_borrow, give it back with env_return):',
+              ...defs.map(d => `- ${definitionLabel(d)}`),
+            ].join('\n')
+          },
+        })
+      }
     } catch (e) {
       void scope.dispose()
-      warn(`could not add the borrowable environments to the prompt: ${errorMessage(e)}`)
+      warn(`could not add the environments context: ${errorMessage(e)}`)
       return
     }
-    agent.ctx.effect(() => () => void scope.dispose(), 'environments: borrowable prompt')
+    agent.ctx.effect(() => () => void scope.dispose(), 'environments: context')
   })
 
   ctx.tools.register(
@@ -415,6 +561,9 @@ export function installBorrowing(
               `busy (exclusive; ${st.holders.map(who).join(', ')}${st.queue.length ? `; ${st.queue.length} waiting` : ''})`,
             )
           else parts.push(st.holders.length ? `available headless (${st.holders.length} in use)` : 'available')
+          const lease = holding?.lease ?? (mount?.envId === d.id ? mount.lease : undefined)
+          if (lease?.connection === 'reconnecting')
+            parts.push(`connection lost, reconnecting (${lease.connectionError ?? 'connection lost'})`)
           if (st.gui && !holding?.gui)
             parts.push(`GUI held by ${st.gui.title ?? st.gui.sessionId ?? 'another session'}`)
           const guiQueue = st.queue.filter(q => q.mode === 'gui').length
@@ -425,7 +574,7 @@ export function installBorrowing(
         const attached = mount ? [...mine.values()].find(e => e.attached && e.lease === mount.lease) : undefined
         return [
           mount
-            ? `This session is mounted on ${mount.env.name} (${mount.map.remoteRoot}${mount.parent ? ', shared with the parent session' : ''}); your normal file and shell tools already act there. ${attached ? `You hold its GUI (tools "${attached.alias}__*").` : `The mount is headless; env_borrow { environment: "${mount.envId}", gui: true } takes its GUI.`}`
+            ? `This session is mounted on ${mount.lease.def.name} (${mount.map.remoteRoot}${mount.parent ? ', shared with the parent session' : ''}); your normal file and shell tools already act there. ${attached ? `You hold its GUI (screen tools with environment: "${attached.alias}").` : `The mount is headless; env_borrow { environment: "${mount.envId}", gui: true } takes its GUI.`}`
             : undefined,
           `Borrowable environments (${source === 'all' ? 'all configured' : `${source} list`}):`,
           lines.join('\n') || '(none — the user can allow environments in the Environments panel)',
@@ -443,10 +592,11 @@ export function installBorrowing(
     defineTool({
       name: 'env_borrow',
       description: [
-        'Borrow an environment (e.g. an Android device, a test machine, a Windows test account). On success a set of tools prefixed with the environment alias (e.g. "<alias>__exec", "<alias>__read_file", "<alias>__install_apk") becomes available from your next step. Return it with env_return when done.',
+        'Borrow an environment (e.g. an Android device, a test machine, a Windows test account). It is then used through the env_* tools (env_exec, env_read_file, env_write_file, env_process_start, env_tunnel, env_install_apk, ...), passing the alias this returns as their `environment` argument. Return it with env_return when done.',
         'A lease is headless by default: files, commands, processes, tunnels and non-screen tools (install_apk, app, logcat). Headless leases of other sessions may run at the same time, unless the environment is exclusive.',
-        'Pass gui: true only when you need to see or drive the screen: it adds "<alias>__screenshot", "<alias>__input", "<alias>__ui", "<alias>__windows" / "<alias>__device" (as the environment supports). Only one session at a time holds the GUI of an environment; with wait: true you queue for it.',
+        'Pass gui: true only when you need to see or drive the screen: env_screenshot, env_input, env_ui, env_windows and env_device (as the environment supports) then act on it. Only one session at a time holds the GUI of an environment; with wait: true you queue for it.',
         'Calling env_borrow again on an environment you hold (or your mounted environment) with gui: true upgrades it to GUI; gui: false gives the GUI back but keeps the lease.',
+        'A borrowed environment whose connection drops stays borrowed and reconnects by itself; do not borrow it again.',
       ].join(' '),
       parameters: {
         environment: { type: 'string', required: true, description: 'Environment id from env_list.' },
@@ -489,29 +639,34 @@ export function installBorrowing(
           )
         }
         const gui = args.gui
+        const toolsText = (e: HeldEntry) => e.tools.join(', ') || '(none)'
         // Already held (borrowed): change the mode, or report it.
         const existing = [...m.values()].find(e => e.lease.envId === def.id && !e.attached)
         if (existing) {
           if (gui === true && !existing.gui) {
             await existing.setGui(true, waitArgs)
             persistHeld(sessionId, agent)
-            return `Took the GUI of ${def.name} ("${existing.alias}"). Tools now: ${existing.tools.join(', ')}.`
+            return `Took the GUI of ${def.name} ("${existing.alias}"). Tools usable on it now: ${toolsText(existing)}.`
           }
           if (gui === false && existing.gui) {
             await existing.setGui(false, waitArgs)
             persistHeld(sessionId, agent)
-            return `Gave back the GUI of ${def.name}; "${existing.alias}" stays borrowed headless. Tools now: ${existing.tools.join(', ')}.`
+            return `Gave back the GUI of ${def.name}; "${existing.alias}" stays borrowed headless. Tools usable on it now: ${toolsText(existing)}.`
           }
-          return `You already hold ${def.name} as "${existing.alias}" (${modeText(existing)}). Tools: ${existing.tools.join(', ')}.`
+          const lost =
+            existing.lease.connection === 'reconnecting'
+              ? ' Its connection was lost and is being re-established automatically; calls wait for it.'
+              : ''
+          return `You already hold ${def.name} as "${existing.alias}" (${modeText(existing)}).${lost} Tools usable on it: ${toolsText(existing)}.`
         }
         // The mounted environment: its GUI attaches to the mount's lease.
         if (mount && mount.envId === def.id) {
           const attached = [...m.values()].find(e => e.attached && e.lease === mount.lease)
           if (gui === true) {
             if (attached)
-              return `You already hold the GUI of your mount ${def.name}. Tools: ${attached.tools.join(', ')}.`
+              return `You already hold the GUI of your mount ${def.name} ("${attached.alias}"). Tools usable on it: ${toolsText(attached)}.`
             const entry = await attachMount(agent, mount.lease, waitArgs)
-            return `Took the GUI of your mounted environment ${def.name}. New tools: ${entry.tools.join(', ') || '(none: the environment has no screen tools)'}. env_return "${entry.alias}" gives the GUI back; the mount stays.`
+            return `Took the GUI of your mounted environment ${def.name} as "${entry.alias}". Screen tools usable on it: ${toolsText(entry)}. env_return "${entry.alias}" gives the GUI back; the mount stays.`
           }
           if (gui === false && attached) {
             await attached.release('returned')
@@ -524,7 +679,7 @@ export function installBorrowing(
         return [
           `Borrowed ${def.name} as "${entry.alias}" (${modeText(entry)}; ${describeEnv(env)}).`,
           guiError ? `The GUI could not be taken: ${guiError}` : undefined,
-          `New tools: ${entry.tools.join(', ')}.`,
+          `Use it with the env_* tools and environment: "${entry.alias}": ${toolsText(entry)}.`,
           !entry.gui && (env.hasCap('screenshot') || env.kind === 'adb')
             ? 'Screen tools need the GUI: env_borrow again with gui: true.'
             : undefined,
@@ -541,7 +696,7 @@ export function installBorrowing(
     defineTool({
       name: 'env_return',
       description:
-        'Return a borrowed environment. Its tools disappear and every process and tunnel opened through it is closed. With gui_only: true only the GUI is given back (the screen tools disappear, the lease stays headless). For your mounted environment this gives back its GUI; the mount itself stays.',
+        'Return a borrowed environment. Every process and tunnel opened through it is closed. With gui_only: true only the GUI is given back (the screen tools stop acting on it, the lease stays headless). For your mounted environment this gives back its GUI; the mount itself stays.',
       parameters: {
         environment: {
           type: 'string',
@@ -565,7 +720,7 @@ export function installBorrowing(
           const mount = hooks.mountOf(agent)
           if (mount && (mount.envId === args.environment || mount.lease.alias === args.environment)) {
             throw new Error(
-              `${mount.env.name} is this session's mount and cannot be returned; you do not hold its GUI either`,
+              `${mount.lease.def.name} is this session's mount and cannot be returned; you do not hold its GUI either`,
             )
           }
           throw new Error(`nothing borrowed as "${args.environment}" (borrowed: ${[...m.keys()].join(', ') || 'none'})`)
@@ -630,6 +785,9 @@ export function installBorrowing(
     }),
   )
 
+  // The environment tools: one fixed set for every session, whatever it holds.
+  for (const tool of built.tools) ctx.tools.register(tool)
+
   // Restore borrowed environments when a session resumes, in the mode they had. A GUI that is
   // taken by then is not waited for: the lease comes back headless.
   ctx.on('agent/created', ({ agent }) => {
@@ -651,6 +809,7 @@ export function installBorrowing(
 
   return {
     heldOf: agent => [...(held.get(agent)?.values() ?? [])],
+    contextOf,
     async releaseLease(leaseId) {
       for (const agent of liveAgents) {
         for (const e of held.get(agent)?.values() ?? []) {

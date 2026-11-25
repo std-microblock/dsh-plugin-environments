@@ -316,6 +316,22 @@ mod imp {
             name
         }
 
+        /// Open the desktop that receives input in this session, for capturing it.
+        ///
+        /// Unlike `input_name`, this needs the access a capture uses, which only succeeds when the
+        /// input desktop belongs to this session (nobody else has logged this account in).
+        pub fn open_input() -> Option<Desktop> {
+            let h = unsafe { OpenInputDesktop(0, 0, DESKTOP_ALL_ACCESS) };
+            if h.is_null() {
+                return None;
+            }
+            Some(Desktop {
+                name: unsafe { name_of(h) }.unwrap_or_else(|| "Default".into()),
+                handle: h,
+                owned: true,
+            })
+        }
+
         /// Whether this desktop is the one that receives user input (BitBlt/SendInput work).
         pub fn is_input(&self) -> bool {
             Self::input_name().is_some_and(|n| n.eq_ignore_ascii_case(&self.name))
@@ -387,6 +403,37 @@ mod imp {
 #[cfg(windows)]
 #[allow(unused_imports)]
 pub use imp::{Attached, DESKTOP_ALL_ACCESS, Desktop};
+
+#[cfg(windows)]
+static PREFER_INPUT_DESKTOP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether screen captures read the input desktop instead of the caller's own one.
+///
+/// The session's shell is started by winlogon on a desktop of its own, so its captures would show
+/// that empty desktop rather than the session's windows. Set from `--input-desktop`, which the
+/// session launcher passes.
+#[cfg(windows)]
+pub fn prefer_input_desktop(value: bool) {
+    PREFER_INPUT_DESKTOP.store(value, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether captures were told to read the input desktop (diagnostics).
+#[cfg(windows)]
+pub fn prefers_input_desktop() -> bool {
+    PREFER_INPUT_DESKTOP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The desktop a screen capture should read.
+#[cfg(windows)]
+pub fn capture_desktop() -> Result<Desktop, String> {
+    if PREFER_INPUT_DESKTOP.load(std::sync::atomic::Ordering::Relaxed)
+        && let Some(desktop) = Desktop::open_input()
+    {
+        return Ok(desktop);
+    }
+    Desktop::current()
+}
 
 #[cfg(not(windows))]
 mod imp {

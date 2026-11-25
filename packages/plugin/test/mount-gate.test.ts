@@ -122,7 +122,7 @@ function setup() {
     return env
   }
   const host = fakeContext()
-  const mounting = installMounting(host.ctx, m, fakeDeps)
+  const mounting = installMounting(host.ctx, m, fakeDeps, { reconnectWaitMs: 50 })
   const agent = (id: string, cwd: string): Agent => ({
     ctx: host.ctx,
     session: { id, header: { id, cwd } },
@@ -185,20 +185,53 @@ test('the next step mounts once the environment is back, and runs', async () => 
   await cleanup()
 })
 
-test('a lost mount blocks the session until it is remounted', async () => {
-  const { m, ws, host, mounting, agent, env, setFailure, cleanup } = setup()
+test('a lost mount connection keeps the mount and holds the session until it reconnects', async () => {
+  const { m, ws, host, mounting, agent, env, opens, setFailure, cleanup } = setup()
   setFailure(undefined)
   const a = agent('s1', ws.hostPath)
   await host.created(a)
-  assert.ok(mounting.mountOf(a))
+  const record = mounting.mountOf(a)
+  assert.ok(record)
+  const lost = env()
 
-  env().emit('close')
+  setFailure('host unreachable')
+  lost.emit('close')
   await settle()
-  assert.equal(mounting.mountOf(a), undefined)
-  assert.match(m.sessionSettings('s1').mountError ?? '', /connection lost/)
+  assert.equal(mounting.mountOf(a), record, 'no unmount, no remount')
+  assert.equal(m.sessionSettings('s1').mountError, undefined)
   assert.deepEqual(await host.preTool(a), {
     kind: 'deny',
-    reason: '环境 Box 挂载失败：挂载已断开（connection lost）',
+    reason: '环境 Box 连接已断开，正在自动重连（host unreachable）',
+  })
+  await assert.rejects(host.preStep(a).run, /环境 Box 连接已断开，正在自动重连/)
+
+  setFailure(undefined)
+  const step = host.preStep(a)
+  assert.deepEqual(await step.run, { kind: 'enter', messages: [] })
+  assert.equal(mounting.mountOf(a), record)
+  assert.notEqual(record.env, lost, 'the mount uses the new connection')
+  assert.equal(record.map.env, record.env)
+  assert.equal(m.leases.size, 1)
+  assert.ok(opens.length >= 3)
+  assert.deepEqual(await host.preTool(a), { kind: 'allow' })
+  await cleanup()
+})
+
+test('a mount whose lease is released blocks the session until it is remounted', async () => {
+  const { m, ws, host, mounting, agent, setFailure, cleanup } = setup()
+  setFailure(undefined)
+  const a = agent('s1', ws.hostPath)
+  await host.created(a)
+  const record = mounting.mountOf(a)
+  assert.ok(record)
+
+  await record.lease.release('released by the user')
+  await settle()
+  assert.equal(mounting.mountOf(a), undefined)
+  assert.match(m.sessionSettings('s1').mountError ?? '', /released by the user/)
+  assert.deepEqual(await host.preTool(a), {
+    kind: 'deny',
+    reason: '环境 Box 挂载失败：挂载已断开（released by the user）',
   })
 
   setFailure('host unreachable')

@@ -1,19 +1,29 @@
-// Android-only tools of a borrowed adb environment.
+// Android-only tools of borrowed adb environments.
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { describeState, formatForeground, type AdbEnvironment } from '../../env/adb/adb-env.ts'
+import { AdbEnvironment, describeState, formatForeground } from '../../env/adb/adb-env.ts'
 import { shq } from '../../env/adb/input.ts'
+import type { Environment } from '../../env/environment.ts'
 import { TEXT_OUTPUT, baseName, clip } from '../common.ts'
-import type { LeaseToolContext } from './context.ts'
+import { ENV_PARAM, GUI_ENV_PARAM, type EnvToolContext, type LeaseTarget } from './context.ts'
 
-export function addAndroidTools(t: LeaseToolContext, env: AdbEnvironment): void {
-  const { label: name, add, workspaceOf } = t
+const isAdb = (env: Environment) => env instanceof AdbEnvironment
+
+function adbOf(t: LeaseTarget): AdbEnvironment {
+  if (!(t.env instanceof AdbEnvironment)) throw new Error(`${t.alias} is not an Android device`)
+  return t.env
+}
+
+export function addAndroidTools({ add, use, workspaceOf }: EnvToolContext): void {
+  const apkTarget = use({ name: 'install_apk', gui: false, supports: isAdb })
 
   add({
     name: 'install_apk',
-    description: `Install an APK on ${name}. apk_path is read from this session's workspace unless "source" names another borrowed environment alias.`,
+    description:
+      'Android devices only. Install an APK on a borrowed device. apk_path is read from this session\'s workspace unless "source" names another borrowed environment alias.',
     parameters: {
+      ...ENV_PARAM,
       apk_path: { type: 'string', required: true, description: 'Path of the .apk file.' },
       source: {
         type: 'string',
@@ -25,6 +35,8 @@ export function addAndroidTools(t: LeaseToolContext, env: AdbEnvironment): void 
     output: TEXT_OUTPUT,
     timeoutMs: 20 * 60 * 1000,
     async execute(args, exec) {
+      const t = await apkTarget(exec, args.environment)
+      const env = adbOf(t)
       const { env: srcEnv, cwd: srcCwd, hostPath } = await workspaceOf(exec, args.source, args.apk_path)
       let local = hostPath
       let temp: string | undefined
@@ -37,17 +49,20 @@ export function addAndroidTools(t: LeaseToolContext, env: AdbEnvironment): void 
       }
       try {
         const text = await env.installApk(local, { replace: args.replace ?? true, downgrade: !!args.downgrade })
-        return `Installed ${baseName(args.apk_path)} on ${name}: ${text.split('\n').pop()}`
+        return `Installed ${baseName(args.apk_path)} on ${t.label}: ${text.split('\n').pop()}`
       } finally {
         if (temp) fs.rmSync(temp, { force: true })
       }
     },
   })
 
+  const appTarget = use({ name: 'app', gui: false, supports: isAdb })
   add({
     name: 'app',
-    description: `Manage Android apps on ${name}: launch (by package), stop, clear data, uninstall, info, list installed packages, current (foreground app/activity), open_url (open a link or deep link with the default handler), start (am start with an explicit intent).`,
+    description:
+      'Android devices only. Manage apps on a borrowed device: launch (by package), stop, clear data, uninstall, info, list installed packages, current (foreground app/activity), open_url (open a link or deep link with the default handler), start (am start with an explicit intent).',
     parameters: {
+      ...ENV_PARAM,
       action: {
         type: 'string',
         enum: ['launch', 'stop', 'clear', 'uninstall', 'info', 'list', 'current', 'open_url', 'start'],
@@ -72,6 +87,7 @@ export function addAndroidTools(t: LeaseToolContext, env: AdbEnvironment): void 
     },
     output: TEXT_OUTPUT,
     async execute(args, exec) {
+      const env = adbOf(await appTarget(exec, args.environment))
       const pkg = args.package
       const need = () => {
         if (!pkg) throw new Error('package is required')
@@ -141,10 +157,12 @@ export function addAndroidTools(t: LeaseToolContext, env: AdbEnvironment): void 
     },
   })
 
+  const logTarget = use({ name: 'logcat', gui: false, supports: isAdb })
   add({
     name: 'logcat',
-    description: `Read recent Android log lines from ${name}.`,
+    description: 'Android devices only. Read recent log lines from a borrowed device.',
     parameters: {
+      ...ENV_PARAM,
       lines: { type: 'integer', description: 'Number of recent lines (default 200).' },
       filter: { type: 'string', description: 'Only keep lines containing this text (case-insensitive).' },
       level: { type: 'string', enum: ['V', 'D', 'I', 'W', 'E', 'F'], description: 'Minimum priority (default V).' },
@@ -152,6 +170,7 @@ export function addAndroidTools(t: LeaseToolContext, env: AdbEnvironment): void 
     },
     output: TEXT_OUTPUT,
     async execute(args, exec) {
+      const env = adbOf(await logTarget(exec, args.environment))
       const n = Math.min(5000, args.lines ?? 200)
       const r = await env.exec(
         { command: `logcat -d -v time -t ${args.filter ? 20000 : n} *:${args.level ?? 'V'}` },
@@ -167,13 +186,14 @@ export function addAndroidTools(t: LeaseToolContext, env: AdbEnvironment): void 
 }
 
 /** Android tools that drive the device screen (GUI leases only). */
-export function addAndroidGuiTools(t: LeaseToolContext, env: AdbEnvironment): void {
-  const { label: name, add } = t
-
+export function addAndroidGuiTools({ add, use }: EnvToolContext): void {
+  const target = use({ name: 'device', gui: true, supports: isAdb })
   add({
     name: 'device',
-    description: `Device state and controls of ${name}: info (model, Android version, screen size/density/rotation, foreground app, keyboard, screen on/locked, battery), wake, sleep, unlock (wake and dismiss a lock screen that has no PIN/pattern/password; reports when a secure lock needs the user), notifications / quick_settings (open the shade), collapse (close it). Navigation keys (back, home, recents) are ${t.alias}__input key actions.`,
+    description:
+      'Android devices only (needs the GUI). Device state and controls: info (model, Android version, screen size/density/rotation, foreground app, keyboard, screen on/locked, battery), wake, sleep, unlock (wake and dismiss a lock screen that has no PIN/pattern/password; reports when a secure lock needs the user), notifications / quick_settings (open the shade), collapse (close it). Navigation keys (back, home, recents) are env_input key actions.',
     parameters: {
+      ...GUI_ENV_PARAM,
       action: {
         type: 'string',
         enum: ['info', 'wake', 'sleep', 'unlock', 'notifications', 'quick_settings', 'collapse'],
@@ -182,6 +202,7 @@ export function addAndroidGuiTools(t: LeaseToolContext, env: AdbEnvironment): vo
     },
     output: TEXT_OUTPUT,
     async execute(args, exec) {
+      const env = adbOf(await target(exec, args.environment))
       const signal = exec.signal
       switch (args.action ?? 'info') {
         case 'wake':

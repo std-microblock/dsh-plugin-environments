@@ -5,16 +5,31 @@ import type { Environment } from '../env/environment.ts'
 /**
  * Translates between the session's host-side working directory (a placeholder directory or
  * a real local workspace) and the environment's root directory.
+ *
+ * `env` may be given as a getter: a mount's lease replaces its connection after a reconnect, and
+ * every operation reads the current one.
  */
 export class MountMap {
-  readonly env: Environment
+  private readonly envOf: () => Environment
   readonly hostRoot: string | undefined
   readonly remoteRoot: string
 
-  constructor({ env, hostRoot, remoteRoot }: { env: Environment; hostRoot?: string | undefined; remoteRoot: string }) {
-    this.env = env
+  constructor({
+    env,
+    hostRoot,
+    remoteRoot,
+  }: {
+    env: Environment | (() => Environment)
+    hostRoot?: string | undefined
+    remoteRoot: string
+  }) {
+    this.envOf = typeof env === 'function' ? env : () => env
     this.hostRoot = hostRoot ? path.resolve(hostRoot) : undefined
     this.remoteRoot = remoteRoot
+  }
+
+  get env(): Environment {
+    return this.envOf()
   }
 
   /** Path of `p` relative to the host root ('' for the root itself), or undefined when outside it. */

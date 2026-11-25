@@ -3,6 +3,7 @@
 import { EnvError } from '@dsh-environments/protocol'
 import { AdbEnvironment } from '../../env/adb/adb-env.ts'
 import { keyCommand } from '../../env/adb/input.ts'
+import type { Environment } from '../../env/environment.ts'
 import type { InputActionFields, WindowInfo } from '../../env/types.ts'
 import { clip } from '../common.ts'
 import { IMAGE_OUTPUT, type ImageValue } from '../image.ts'
@@ -10,7 +11,7 @@ import { dumpPackage, parseUiautomator, type UiFilter } from '../screen/android-
 import { center, formatElement, type ScreenSession, type UiElement } from '../screen/session.ts'
 import { actUia, listUia, type UiaAction } from '../screen/uia.ts'
 import { resolveWindow } from '../screen/windows.ts'
-import type { LeaseToolContext } from './context.ts'
+import { GUI_ENV_PARAM, type EnvToolContext } from './context.ts'
 import { followUpShot, screenshotValue } from './screen-tools.ts'
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
@@ -31,11 +32,11 @@ const WINDOWS_ACTIONS = [
   'scroll',
 ] as const
 
-export function addUiTools({ ctx, env, alias: a, label: name, add }: LeaseToolContext, session: ScreenSession): void {
-  const android = env instanceof AdbEnvironment ? env : undefined
-  const uia = !android && env.hasCap('uia') && env.hasCap('windows')
-  if (!android && !uia) return
+const hasUia = (env: Environment) => env.hasCap('uia') && env.hasCap('windows')
 
+/** Listing and targeting on one environment's accessibility tree. */
+function uiOf(env: Environment, session: ScreenSession) {
+  const android = env instanceof AdbEnvironment ? env : undefined
   /** Fresh listing; stores the elements in the session. */
   const list = async (
     o: {
@@ -84,15 +85,25 @@ export function addUiTools({ ctx, env, alias: a, label: name, add }: LeaseToolCo
   }
 
   const run = (acts: InputActionFields[], signal?: AbortSignal) => env.input(acts, { signal })
+  return { android, list, target, run }
+}
 
-  const actions = android ? ANDROID_ACTIONS : WINDOWS_ACTIONS
+export function addUiTools({ ctx, add, use }: EnvToolContext): void {
+  const uiTarget = use({ name: 'ui', gui: true, supports: env => env instanceof AdbEnvironment || hasUia(env) })
   add({
     name: 'ui',
-    description: android
-      ? `List the on-screen UI elements of ${name} (Android accessibility tree via uiautomator) or act on one. "list" returns lines like '[3] Button "OK" #ok_button @(540,1200) 200x96 [clickable]': index, class, text/description, resource id, centre and size in the latest screenshot's pixels, and flags. Act with action click / long_press / set_text (focus, clear and type text) / scroll (direction) on element: N, or match: "text" to find the element by text, description or resource id. Prefer this over guessing coordinates from screenshots; element indexes are also accepted by ${a}__input.`
-      : `List the UI Automation elements of a window on ${name} (default: the foreground window) or act on one. "list" returns lines like '[3] Button "Save" #saveBtn @(512,300) 90x32 [invoke]': index, control type, name, automation id, centre and size in the latest screenshot's pixels, and supported patterns/states. click uses the Invoke/Toggle/Select pattern when available (works even if covered) and otherwise clicks the centre; set_text sets the value directly (or focuses and types); also double_click, right_click, focus, toggle, expand, collapse, select, scroll_into_view, scroll (direction). Target with element: N from the latest listing or match: "text". Apps without UI Automation support (some games, custom-drawn or old Win32/WinForms apps) show few elements; use screenshots there.`,
+    description: [
+      'List the on-screen UI elements of an environment whose GUI this session holds, or act on one; prefer this over guessing coordinates from screenshots. Element indexes are also accepted by env_input. Target with element: N from the latest listing or match: "text" (text, description or id).',
+      `Android (uiautomator): "list" returns lines like '[3] Button "OK" #ok_button @(540,1200) 200x96 [clickable]': index, class, text/description, resource id, centre and size in the latest screenshot's pixels, and flags. Actions: click, long_press, set_text (focus, clear and type), scroll (direction).`,
+      `Windows (UI Automation, one window: default the foreground one): lines like '[3] Button "Save" #saveBtn @(512,300) 90x32 [invoke]' with patterns/states. click uses the Invoke/Toggle/Select pattern when available (works even if covered) and otherwise clicks the centre; set_text sets the value directly (or focuses and types); also double_click, right_click, focus, toggle, expand, collapse, select, scroll_into_view, scroll. Apps without UI Automation support (some games, custom-drawn or old Win32 apps) show few elements; use screenshots there.`,
+    ].join(' '),
     parameters: {
-      action: { type: 'string', enum: actions, description: 'Default list.' },
+      ...GUI_ENV_PARAM,
+      action: {
+        type: 'string',
+        enum: [...new Set<string>([...WINDOWS_ACTIONS, ...ANDROID_ACTIONS])],
+        description: 'Default list. Android supports list, click, long_press, set_text and scroll.',
+      },
       element: { type: 'integer', description: 'Element index from the latest listing.' },
       match: {
         type: 'string',
@@ -115,25 +126,25 @@ export function addUiTools({ ctx, env, alias: a, label: name, add }: LeaseToolCo
           'list: default = interactive or labelled elements; interactive = actionable only; all = every node (indented by depth).',
       },
       query: { type: 'string', description: 'list: only elements whose text/description/id contains this.' },
-      ...(uia
-        ? {
-            window: {
-              type: 'string',
-              description: 'Window title substring, process name or hwnd (default foreground).',
-            },
-          }
-        : {}),
-      ...(android ? { raw: { type: 'boolean', description: 'list: return the raw uiautomator XML.' } } : {}),
+      window: {
+        type: 'string',
+        description: 'Windows: window title substring, process name or hwnd (default foreground).',
+      },
+      raw: { type: 'boolean', description: 'Android list: return the raw uiautomator XML.' },
       screenshot: { type: 'boolean', description: 'After an action, return a fresh screenshot.' },
     },
     output: IMAGE_OUTPUT,
     timeoutMs: 120000,
     async execute(args, exec): Promise<ImageValue> {
+      const { env, alias: a, screen: session } = await uiTarget(exec, args.environment)
+      const { android, list, target, run } = uiOf(env, session)
       const signal = exec.signal
       const action = args.action ?? 'list'
-      const windowSel = 'window' in args && typeof args.window === 'string' ? args.window : undefined
+      if (android && !(ANDROID_ACTIONS as readonly string[]).includes(action))
+        throw new EnvError('EINVAL', `${a} is an Android device; ui supports ${ANDROID_ACTIONS.join(', ')}`)
+      const windowSel = android ? undefined : args.window
       if (action === 'list') {
-        const raw = 'raw' in args && args.raw === true
+        const raw = !!android && args.raw === true
         const res = await list({ filter: args.filter, query: args.query, window: windowSel, raw }, signal)
         if (res.raw !== undefined) return { text: clip(res.raw) }
         const frame = await session.ensureFrame(signal)

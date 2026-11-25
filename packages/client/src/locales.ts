@@ -132,7 +132,7 @@ const zh = {
   'field.name': '名称',
   'field.name.ph': '例如：测试机 Pixel 8',
   'field.id': '标识',
-  'field.id.hint': '智能体借用后，工具名以它为前缀，例如 {alias}__screenshot',
+  'field.id.hint': '智能体借用后用它指定在哪台机器上执行，例如 environment: "{alias}"',
   'field.description': '备注',
   'field.host': '主机',
   'field.port': '端口',
@@ -407,7 +407,8 @@ const en = {
   'field.name': 'Name',
   'field.name.ph': 'e.g. Test phone Pixel 8',
   'field.id': 'Identifier',
-  'field.id.hint': 'Prefix of the tools an agent gets after borrowing, e.g. {alias}__screenshot',
+  'field.id.hint':
+    'How an agent names this environment after borrowing it, as environment: "{alias}" in its env_* tool calls',
   'field.description': 'Notes',
   'field.host': 'Host',
   'field.port': 'Port',

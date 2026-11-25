@@ -111,6 +111,21 @@ export interface SystemPrompt {
   getSectionOrder(name: string): number
   section(section: SystemPromptSection): Dispose
   variable(name: string, value: () => string): Dispose
+  /**
+   * Dynamic runtime context (DSH ≥ 0.2): evaluated before every model step and delivered as a
+   * reminder message only when the joined snapshot differs from the one the session last got, so
+   * changes never touch the cached system prompt. Absent on older hosts.
+   */
+  context?(context: SystemPromptContext): Dispose
+  getContextOrder?(name: string): number
+}
+
+export interface SystemPromptContext {
+  name: string
+  order: number
+  interpolate?: boolean
+  /** Provider evaluated at each assembly; empty text contributes nothing. */
+  text: string | (() => string)
 }
 
 export interface FetchRoute {
