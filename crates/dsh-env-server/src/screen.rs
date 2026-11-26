@@ -128,10 +128,11 @@ pub struct CaptureSpec {
 /// was asked to draw, and a session that has stopped drawing captures as one flat colour — which,
 /// returned as a picture, looks like a successful black screenshot and hides the real problem.
 fn uniform_rgb(rgb: &[u8]) -> bool {
-    let Some(first) = rgb.get(..3) else {
+    let Some(first) = rgb.first_chunk::<3>() else {
         return true;
     };
-    rgb.chunks_exact(3).all(|px| px == first)
+    // Whole pixels only: the tail of a frame is always complete (three bytes per pixel).
+    rgb.as_chunks::<3>().0.iter().all(|px| px == first)
 }
 
 /// Capture the desktop this process is on and write it as a PNG, returning its size.
