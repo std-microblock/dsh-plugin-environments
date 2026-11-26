@@ -162,6 +162,31 @@ Android 上 ASCII 文本走 `input text`；非 ASCII（中文、emoji 等）走�
 
 **从旧版本升级**：旧版本的“独占使用”（`exclusive`）设置在加载时自动迁移。Android 和 Windows 账户环境以前默认独占，是为了保护屏幕，现在由 GUI 的独占来保证，所以它们迁移为“无界面可并行”；其他类型上手动开启过“独占使用”的环境迁移为“不可并行”。
 
+## 作为 MCP 服务器（给别的智能体用）
+
+`packages/plugin/dist/mcp.js`（安装后也叫 `dsh-env-mcp`）把这套环境能力做成一个 MCP 服务器：Antigravity、Claude Code、Codex、Gemini CLI 等任何支持 MCP 的客户端都能借用**环境**页面里配置好的设备，不需要 dsh 参与对话。
+
+- **传输**：stdio。客户端以子进程方式启动 `node dist/mcp.js`，stdout 只有 MCP 消息，日志全部走 stderr。
+- **同一份配置**：读取插件数据目录里的 `environments.json`（默认 `$DSH_HOME/storages/environments`），环境类型、独占设置、密钥都和界面里一致。定义在启动时读取，之后在界面里新增的环境需要重启这个服务器进程。
+- **同一套工具**：除 `env_list` / `env_borrow` / `env_return` / `env_transfer` 外，其余 `env_*` 工具就是插件注册给 dsh 的那一套定义（`env_exec`、`env_read_file`、`env_screenshot`、`env_process_start`、`env_tunnel`、`env_install_apk`……），行为和 dsh 会话里完全一样；截图等图片以 MCP 的 image 内容块（base64）返回。
+- **同一套占用规则**：租约默认无界面，`gui: true` 才拿 GUI；独占环境、GUI 排队、断线自动重连都与 dsh 会话相同。MCP 借走的环境会出现在**环境**页面里，标题形如 `MCP: Antigravity (pid 12345)`，人可以在那里释放它；连接关闭（stdin EOF）时自动归还全部租约。
+
+客户端的配置就是一个 stdio 条目（Antigravity 写 `~/.gemini/config/mcp_config.json`，重启后在 **Additional Options (…) → MCP Servers** 里能看到工具）：
+
+```json
+{
+  "mcpServers": {
+    "environments": {
+      "command": "node",
+      "args": ["<绝对路径>/packages/plugin/dist/mcp.js"],
+      "env": { "DSH_ENV_MCP_WORKSPACE": "<项目目录>" }
+    }
+  }
+}
+```
+
+可选参数有 `--data-dir`、`--workspace`、`--adb`、`--no-adb-discovery`、`--allow id,id`、`--name`，也可以改用对应的 `DSH_ENV_MCP_*` 环境变量；工具清单、协议细节和限制见 [docs/mcp.md](docs/mcp.md)。
+
 ## 生命周期
 
 - 每个连接、租约和隧道都绑定在 Cordis 的 fiber/scope 上，智能体销毁、归还或插件卸载时会自动清理。
@@ -234,7 +259,7 @@ pnpm install
 pnpm lint && pnpm typecheck    # ESLint（type-aware）+ tsc
 pnpm test                      # 协议单元测试（安全通道、WebSocket）+ 插件集成测试：env-server、ssh、反向连接、adb（模拟设备）、租约、挂载映射
 pnpm build:server              # cargo 构建 crates/dsh-env-server，并放到 packages/plugin/bin/
-pnpm build:plugin              # packages/plugin/dist/index.js
+pnpm build:plugin              # packages/plugin/dist/index.js、dist/mcp.js
 pnpm build:client              # packages/plugin/client.js
 pnpm run package               # 发布包 out/dsh-plugin-environments-<版本>.tgz + SHA256SUMS（本地缺少 macOS 二进制时加 --allow-missing）
 ```
@@ -246,6 +271,7 @@ pnpm run package               # 发布包 out/dsh-plugin-environments-<版本>.
 - 截图和键鼠输入在 Linux/macOS 的 `dsh-env-server` 上暂不支持。Android 的截图和输入走 adb。
 - 走纯 SSH（未运行 `dsh-env-server`）时只有 TCP 隧道；远端是 Windows 时也不支持 grep。
 - 挂载会话中，GUI 侧栏的文件树、diff 摘要和 `@` 文件补全仍然显示宿主机上的占位目录。
+- MCP 服务器不做挂载，也不向客户端注入“可借用环境”的提示上下文，一切以 `env_list` 为准（见 [docs/mcp.md](docs/mcp.md)）。
 - 挂载失败而被拦下的那条消息不会进入会话记录（DSH 在进入这一步之前拒绝它），需要在环境恢复后重新发送。
 - DSH 没有为工作区行提供插件扩展位，侧边栏里远程工作区的环境名称是按工作区行的 `data-row-key` 属性插入到页面里的。DSH 改变侧边栏结构后，这些装饰可能不再显示，但不会影响其他功能。
 - 同一台 Windows 机器上同一时间只有一个交互桌面，**共用**模式下 Windows 账户环境的程序和当前用户共用这个桌面（其他限制见上面的“Windows 账户环境”）。

@@ -188,12 +188,15 @@ async function main(): Promise<void> {
     await buildClient({ root: ROOT, minify: true })
   }
   const bundle = path.join(PLUGIN_DIR, 'dist', 'index.js')
+  const mcpBundle = path.join(PLUGIN_DIR, 'dist', 'mcp.js')
   const client = path.join(PLUGIN_DIR, 'client.js')
-  for (const f of [bundle, client]) {
+  for (const f of [bundle, mcpBundle, client]) {
     if (!fs.existsSync(f)) fail(`${path.relative(ROOT, f)} missing (run pnpm build:plugin / build:client)`)
   }
-  if (/from\s*["']@dsh-environments\//.test(fs.readFileSync(bundle, 'utf8'))) {
-    fail('dist/index.js imports a workspace package; it must be bundled')
+  for (const f of [bundle, mcpBundle]) {
+    if (/from\s*["']@dsh-environments\//.test(fs.readFileSync(f, 'utf8'))) {
+      fail(`${path.relative(PLUGIN_DIR, f)} imports a workspace package; it must be bundled`)
+    }
   }
   const binaries = collectBinaries()
 
@@ -245,6 +248,7 @@ async function main(): Promise<void> {
   const expected = [
     'package/package.json',
     'package/dist/index.js',
+    'package/dist/mcp.js',
     'package/client.js',
     'package/cordis.patch.yml',
     'package/README.md',

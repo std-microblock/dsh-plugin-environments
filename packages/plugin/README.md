@@ -17,3 +17,12 @@ This package is built from the monorepo at <https://github.com/std-microblock/ds
 outputs (`pnpm build`). Release packages ship the server for win32-x64, linux-x64, linux-ia32, linux-arm64
 and darwin-arm64 as Brotli-compressed `dsh-env-server[.exe].br`, unpacked into `~/.dsh/cache/` on first use.
 See the repository README for features and usage, and `docs/protocol.md` for the server protocol.
+
+`dist/mcp.js` (the `dsh-env-mcp` bin) serves the same environments to MCP clients as a stdio server:
+
+```json
+{ "mcpServers": { "environments": { "command": "node", "args": ["<package>/dist/mcp.js"] } } }
+```
+
+It reads the plugin's data directory, so the devices configured in DeepSeek Harness are the ones an
+MCP client can borrow. See `docs/mcp.md` in the repository for the tool list and options.

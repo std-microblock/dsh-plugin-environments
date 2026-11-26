@@ -5,8 +5,12 @@
   "description": "Environments for the DeepSeek Harness: mount or borrow local, dsh-env-server, SSH, ADB (Android) and Windows-account devices.",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "dsh-env-mcp": "dist/mcp.js"
+  },
   "exports": {
     ".": "./dist/index.js",
+    "./mcp": "./dist/mcp.js",
     "./client": "./client.js",
     "./package.json": "./package.json"
   },

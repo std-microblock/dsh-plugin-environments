@@ -36,6 +36,7 @@ packages/
       mount/              routing a session's own fs/shell tools into an environment
       borrowing/          env_list / env_borrow / env_return / env_transfer
       tools/              model-facing tool helpers and the per-lease tool sets
+      mcp/                the same environments as an MCP server (dist/mcp.js, `dsh-env-mcp`)
       api/                HTTP API for the GUI
     test/                 node:test suites (*.test.ts), fixtures, manual/ scripts for real devices
   client/                 @dsh-environments/client (private): React GUI
@@ -124,7 +125,8 @@ Replacing an installed _package version_ still needs a restart.
   `info.caps`), add an opener in `EnvironmentManager.open`, the kind to `KINDS` and its config fields to
   `EnvironmentConfig` in `manager/definitions.ts`, and an icon/form in the client.
 - **A borrowed-environment tool**: add it in the matching `tools/lease/*-tools.ts` (gate it on a
-  capability with `env.hasCap(...)`).
+  capability with `env.hasCap(...)`). It needs no second implementation for MCP: `src/mcp/` builds
+  its tools from the same `envTools` definitions (see `docs/mcp.md`).
 
 ## CI
 

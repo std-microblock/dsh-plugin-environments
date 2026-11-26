@@ -1,4 +1,6 @@
-// Bundle packages/plugin/src into packages/plugin/dist/index.js (ESM, Node).
+// Bundle packages/plugin/src into packages/plugin/dist/ (ESM, Node):
+//   dist/index.js  the host plugin DSH loads
+//   dist/mcp.js    `dsh-env-mcp`, the same environments as an MCP server (stdio)
 // Workspace packages are inlined; ssh2 and the DSH runtime packages stay external.
 //
 // `watch` keeps esbuild running and rewrites the bundle after every source change. With the
@@ -23,10 +25,14 @@ export async function buildPlugin({
   watch?: boolean
 }): Promise<void> {
   const pkgDir = path.join(root, 'packages', 'plugin')
-  const outfile = path.join(pkgDir, 'dist', 'index.js')
+  const outdir = path.join(pkgDir, 'dist')
+  const entries = [
+    { in: path.join(pkgDir, 'src', 'index.ts'), out: 'index' },
+    { in: path.join(pkgDir, 'src', 'mcp', 'main.ts'), out: 'mcp' },
+  ]
   const options = {
-    entryPoints: [path.join(pkgDir, 'src', 'index.ts')],
-    outfile,
+    entryPoints: entries,
+    outdir,
     bundle: true,
     format: 'esm' as const,
     platform: 'node' as const,
@@ -43,7 +49,9 @@ export async function buildPlugin({
   if (!watch) {
     fs.rmSync(path.join(pkgDir, 'dist'), { recursive: true, force: true })
     await build(options)
-    console.log(`packages/plugin/dist/index.js written${release ? ' (release)' : ''}`)
+    console.log(
+      `packages/plugin/dist/{${entries.map(e => `${e.out}.js`).join(',')}} written${release ? ' (release)' : ''}`,
+    )
     return
   }
 
@@ -54,7 +62,9 @@ export async function buildPlugin({
     setup(buildContext) {
       buildContext.onEnd(result => {
         if (result.errors.length > 0) return
-        console.log(`packages/plugin/dist/index.js written (${new Date().toLocaleTimeString()})`)
+        console.log(
+          `packages/plugin/dist/{${entries.map(e => `${e.out}.js`).join(',')}} written (${new Date().toLocaleTimeString()})`,
+        )
       })
     },
   }
