@@ -2,6 +2,7 @@ import * as React from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { call, invalidate, messageOf } from './api.ts'
+import { actionBlocked, derivedWorkspaceTitle, pathBarIntent } from './browser-logic.ts'
 import type { Translate } from './host-api.ts'
 import { IconFile, IconFolder, IconHome, IconPlus, IconRefresh, IconSpinner, IconUp } from './icons.tsx'
 import { envName } from './names.ts'
@@ -13,13 +14,6 @@ function formatSize(n: number | undefined | null): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`
-}
-
-function baseName(p: string): string {
-  const parts = String(p)
-    .split(/[\\/]+/)
-    .filter(Boolean)
-  return parts[parts.length - 1] ?? p
 }
 
 interface RemoteBrowserProps {
@@ -61,23 +55,31 @@ export function RemoteBrowser({
   const [newFolder, setNewFolder] = useState<string | undefined>(undefined)
   const seq = useRef(0)
 
-  const load = useCallback(async (id: string | undefined, path: string | undefined) => {
-    if (!id) return
-    const mine = ++seq.current
-    setLoading(true)
-    setError(undefined)
-    try {
-      const value = await call<ListingView>('fs.list', { envId: id, path })
-      if (mine !== seq.current) return
-      setListing(value)
-      setPathText(value.path)
-    } catch (e) {
-      if (mine !== seq.current) return
-      setError(messageOf(e))
-    } finally {
-      if (mine === seq.current) setLoading(false)
-    }
-  }, [])
+  /**
+   * Load a directory. Resolves the listing on success and undefined when the
+   * request failed (the message is surfaced in the dialog) or was superseded.
+   */
+  const load = useCallback(
+    async (id: string | undefined, path: string | undefined): Promise<ListingView | undefined> => {
+      if (!id) return undefined
+      const mine = ++seq.current
+      setLoading(true)
+      setError(undefined)
+      try {
+        const value = await call<ListingView>('fs.list', { envId: id, path })
+        if (mine !== seq.current) return undefined
+        setListing(value)
+        setPathText(value.path)
+        return value
+      } catch (e) {
+        if (mine === seq.current) setError(messageOf(e))
+        return undefined
+      } finally {
+        if (mine === seq.current) setLoading(false)
+      }
+    },
+    [],
+  )
 
   useEffect(() => {
     if (!open) return
@@ -92,8 +94,14 @@ export function RemoteBrowser({
 
   const env = environments.find(e => e.id === envId)
   const current = listing?.path
-  const derivedTitle = current && env ? `${baseName(current)} @ ${env.name}` : ''
+  // Follow the path bar, not the loaded listing, so the name preview matches
+  // the directory the user is about to create a workspace in.
+  const derivedTitle = derivedWorkspaceTitle(pathText.trim() || current, env?.name)
   const effectiveTitle = titleTouched ? title : derivedTitle
+  const blocked = actionBlocked({ busy, loading, pathText, currentDir: current })
+  const intent = pathBarIntent({ pathText, currentDir: current })
+  // Retry what the path bar asks for, not the directory behind the error.
+  const retryTarget = intent.load ?? intent.path
 
   const changeEnv = (id: string) => {
     setEnvId(id)
@@ -123,18 +131,29 @@ export function RemoteBrowser({
   }
 
   const confirm = async (startSession: boolean) => {
-    if (!current) return
-    if (mode === 'pick') {
-      if (envId) onPicked?.({ envId, path: current })
-      return
-    }
+    if (!envId || busy) return
     setBusy(true)
     setError(undefined)
     try {
+      // The path bar is the source of truth: commit a path the user typed but
+      // never submitted first, so the workspace is never created under the
+      // directory that happens to be loaded already.
+      const intent = pathBarIntent({ pathText, currentDir: current })
+      let target = intent.path
+      if (intent.load) {
+        const value = await load(envId, intent.load)
+        if (!value) return // load() reported the failure; never fall back
+        target = value.path
+      }
+      if (!target) return
+      if (mode === 'pick') {
+        onPicked?.({ envId, path: target })
+        return
+      }
       const value = await call<CreatedWorkspaceView>('remoteWorkspace.create', {
         envId,
-        root: current,
-        title: effectiveTitle,
+        root: target,
+        title: titleTouched ? title : derivedWorkspaceTitle(target, env?.name),
       })
       invalidate()
       onCreated?.(value, startSession)
@@ -168,11 +187,11 @@ export function RemoteBrowser({
         {t('action.cancel')}
       </Button>
       {mode === 'workspace' && (
-        <Button variant="outline" disabled={!current || busy} onClick={() => void confirm(false)}>
+        <Button variant="outline" disabled={blocked} onClick={() => void confirm(false)}>
           {t('browser.create')}
         </Button>
       )}
-      <Button variant="primary" disabled={!current || busy} onClick={() => void confirm(true)}>
+      <Button variant="primary" disabled={blocked} onClick={() => void confirm(true)}>
         {mode === 'workspace' ? t('browser.createAndOpen') : t('action.choose')}
       </Button>
     </div>
@@ -217,7 +236,7 @@ export function RemoteBrowser({
             className="envx-iconbtn"
             title={t('action.up')}
             aria-label={t('action.up')}
-            disabled={!listing?.parent}
+            disabled={!listing?.parent || loading}
             onClick={() => void load(envId, listing?.parent)}
           >
             <IconUp size={16} />
@@ -227,7 +246,7 @@ export function RemoteBrowser({
             className="envx-iconbtn"
             title={t('action.home')}
             aria-label={t('action.home')}
-            disabled={!listing?.home}
+            disabled={!listing?.home || loading}
             onClick={() => void load(envId, listing?.home)}
           >
             <IconHome size={16} />
@@ -237,7 +256,7 @@ export function RemoteBrowser({
             className="envx-iconbtn"
             title={t('action.newFolder')}
             aria-label={t('action.newFolder')}
-            disabled={!current}
+            disabled={!current || loading}
             onClick={() => setNewFolder('')}
           >
             <IconPlus size={16} />
@@ -247,75 +266,90 @@ export function RemoteBrowser({
             className="envx-iconbtn"
             title={t('action.refresh')}
             aria-label={t('action.refresh')}
+            disabled={loading}
             onClick={() => void load(envId, current)}
           >
             <IconRefresh size={16} />
           </button>
+          {loading && (
+            <span className="envx-browser-busy" title={t('browser.loading')} aria-label={t('browser.loading')}>
+              <IconSpinner size={14} />
+            </span>
+          )}
         </div>
-        <div className="envx-browser-list" role="list">
-          {loading && !listing && (
-            <div className="envx-browser-state">
+        <div className="envx-browser-frame">
+          <div className="envx-browser-list" role="list" aria-busy={loading || undefined}>
+            {loading && !listing && (
+              <div className="envx-browser-state">
+                <IconSpinner size={16} />
+                {t('browser.loading')}
+              </div>
+            )}
+            {error && (
+              <div
+                className="envx-browser-state"
+                style={{ color: 'var(--dsw-alias-state-error-primary)', flexDirection: 'column' }}
+              >
+                <span>{error}</span>
+                <button type="button" className="envx-textbtn" onClick={() => void load(envId, retryTarget)}>
+                  {t('action.retry')}
+                </button>
+              </div>
+            )}
+            {!error && listing && (
+              <>
+                {newFolder !== undefined && (
+                  <div className="envx-entry" data-type="dir">
+                    <IconFolder size={16} />
+                    <input
+                      className="envx-input"
+                      style={{ height: 26 }}
+                      autoFocus
+                      value={newFolder}
+                      placeholder={t('browser.folderName')}
+                      onChange={e => setNewFolder(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') void createFolder()
+                        if (e.key === 'Escape') {
+                          e.stopPropagation()
+                          setNewFolder(undefined)
+                        }
+                      }}
+                      onBlur={() => void createFolder()}
+                    />
+                  </div>
+                )}
+                {dirs.map(e => (
+                  <button
+                    type="button"
+                    key={`d:${e.name}`}
+                    className="envx-entry"
+                    data-type="dir"
+                    disabled={loading}
+                    onClick={() => void load(envId, join(e.name))}
+                  >
+                    <IconFolder size={16} />
+                    <span>{e.name}</span>
+                  </button>
+                ))}
+                {files.map(e => (
+                  <div key={`f:${e.name}`} className="envx-entry" data-type="file">
+                    <IconFile size={16} />
+                    <span>{e.name}</span>
+                    <em>{formatSize(e.size)}</em>
+                  </div>
+                ))}
+                {dirs.length === 0 && files.length === 0 && newFolder === undefined && (
+                  <div className="envx-browser-state">{t('browser.empty')}</div>
+                )}
+              </>
+            )}
+          </div>
+          {loading && listing && (
+            <div className="envx-browser-overlay">
               <IconSpinner size={16} />
               {t('browser.loading')}
             </div>
-          )}
-          {error && (
-            <div
-              className="envx-browser-state"
-              style={{ color: 'var(--dsw-alias-state-error-primary)', flexDirection: 'column' }}
-            >
-              <span>{error}</span>
-              <button type="button" className="envx-textbtn" onClick={() => void load(envId, listing?.path)}>
-                {t('action.retry')}
-              </button>
-            </div>
-          )}
-          {!error && listing && (
-            <>
-              {newFolder !== undefined && (
-                <div className="envx-entry" data-type="dir">
-                  <IconFolder size={16} />
-                  <input
-                    className="envx-input"
-                    style={{ height: 26 }}
-                    autoFocus
-                    value={newFolder}
-                    placeholder={t('browser.folderName')}
-                    onChange={e => setNewFolder(e.target.value)}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter') void createFolder()
-                      if (e.key === 'Escape') {
-                        e.stopPropagation()
-                        setNewFolder(undefined)
-                      }
-                    }}
-                    onBlur={() => void createFolder()}
-                  />
-                </div>
-              )}
-              {dirs.map(e => (
-                <button
-                  type="button"
-                  key={`d:${e.name}`}
-                  className="envx-entry"
-                  data-type="dir"
-                  onClick={() => void load(envId, join(e.name))}
-                >
-                  <IconFolder size={16} />
-                  <span>{e.name}</span>
-                </button>
-              ))}
-              {files.map(e => (
-                <div key={`f:${e.name}`} className="envx-entry" data-type="file">
-                  <IconFile size={16} />
-                  <span>{e.name}</span>
-                  <em>{formatSize(e.size)}</em>
-                </div>
-              ))}
-              {dirs.length === 0 && files.length === 0 && newFolder === undefined && (
-                <div className="envx-browser-state">{t('browser.empty')}</div>
-              )}
-            </>
           )}
         </div>
       </div>

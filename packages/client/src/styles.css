@@ -1293,12 +1293,35 @@ select.envx-input {
   flex: none;
   width: 200px;
 }
+.envx-browser-busy {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+}
+.envx-browser-frame {
+  position: relative;
+  min-height: 0;
+}
 .envx-browser-list {
   height: 320px;
   overflow: auto;
   border: 0.5px solid var(--dsw-alias-border-l2);
   border-radius: 10px;
   background: var(--dsw-alias-bg-base);
+}
+.envx-browser-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 10px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+  background: color-mix(in srgb, var(--dsw-alias-bg-base) 72%, transparent);
+  backdrop-filter: blur(1px);
 }
 .envx-entry {
   appearance: none;
@@ -1318,6 +1341,13 @@ select.envx-input {
 }
 .envx-entry:hover {
   background: var(--dsw-alias-interactive-bg-hover);
+}
+.envx-entry:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.envx-entry:disabled:hover {
+  background: transparent;
 }
 .envx-entry[data-type='file'] {
   color: var(--dsw-alias-label-tertiary);
