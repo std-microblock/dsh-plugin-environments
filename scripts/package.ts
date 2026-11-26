@@ -137,7 +137,7 @@ function pnpm(args: string[], cwd: string): void {
   // Prefer the pnpm running this script (`pnpm run package`): a JS entry or a standalone executable.
   const execPath = process.env['npm_execpath']
   if (execPath && /pnpm/i.test(path.basename(execPath))) {
-    const js = /\.c?js$/.test(execPath)
+    const js = /\.(?:c|m)?js$/.test(execPath)
     execFileSync(js ? process.execPath : execPath, js ? [execPath, ...args] : args, { cwd, stdio: 'inherit' })
   } else {
     execFileSync('pnpm', args, { cwd, stdio: 'inherit', shell: process.platform === 'win32' })
